@@ -8,7 +8,7 @@
 
 ## Phase 0 — Repo Scaffold & Config (0-8%)
 
-### [ ] 0.1 — Initialize Python project with `pyproject.toml` (2%)
+### [x] 0.1 — Initialize Python project with `pyproject.toml` (2%)
 Set up the project with `pyproject.toml` (not `setup.py`). Use `hatchling` or `setuptools` as build backend. Define dependencies:
 - `openai-agents` (Agents SDK)
 - `openai` (embeddings + direct calls)
@@ -24,16 +24,18 @@ Create `.python-version` (3.12+). Create `src/sentinel/__init__.py`.
 ```
 Notes:
 ─────
+2026-05-10: Created pyproject.toml (hatchling backend), .python-version (3.12), src/sentinel/__init__.py. Added google-genai, structlog, sentence-transformers per ARCHITECTURE.md. Pyright strict mode uses array syntax.
 ```
 
-### [ ] 0.2 — Create full directory structure (1%)
+### [x] 0.2 — Create full directory structure (1%)
 Create every directory and `__init__.py` from ARCHITECTURE.md §4. Don't write logic yet — just empty files with module docstrings. This gives Claude Code the full map.
 ```
 Notes:
 ─────
+2026-05-10: Created all 9 packages (api, models, agents, tools, memory, eval, generator, infra + prompts dir), tests/test_*, scripts/, data/scenarios/, data/services/, reports/. Every .py stub has from __future__ import annotations + module docstring.
 ```
 
-### [ ] 0.3 — Config module with `pydantic-settings` (2%)
+### [x] 0.3 — Config module with `pydantic-settings` (2%)
 `src/sentinel/config.py` — Load all config from env vars with sensible defaults:
 - `OPENAI_API_KEY` (required)
 - `SENTINEL_DB_PATH` (default: `./data/sentinel.db`)
@@ -48,6 +50,7 @@ Create `.env.example` with all vars documented.
 ```
 Notes:
 ─────
+2026-05-10: Used GROQ_API_KEY (not OPENAI_API_KEY) and Groq model names per ARCHITECTURE.md. Embedding model is all-MiniLM-L6-v2 (local). Added Literal type for log_level, Path for db_path, validators for key/tool-call bounds. Added pythonpath=["src"] to pytest config. 5/5 tests pass.
 ```
 
 ### [ ] 0.4 — Docker + docker-compose + .gitignore (1%)
@@ -699,4 +702,6 @@ These are documented for interview conversations ("what would you do next"):
 
 | Date | Tasks Done | Notes |
 |---|---|---|
-| | | |
+| 2026-05-10 | 0.1 | pyproject.toml, .python-version, src/sentinel/__init__.py |
+| 2026-05-10 | 0.2 | Full directory structure — 60+ stub files across all packages |
+| 2026-05-10 | 0.3 | config.py with pydantic-settings, .env.example, 5 tests |
