@@ -126,7 +126,7 @@ Notes:
 2026-05-10: Added LogLevel + RiskLevel + ApprovalStatus StrEnums. suspect_deploy is Deploy|None (handles no-deploy scenarios). reviewer validator enforces non-empty. All models use = [] for list defaults. 38/38 tests pass.
 ```
 
-### [ ] 1.4 — Memory + Eval models (2%)
+### [x] 1.4 — Memory + Eval models (2%)
 `src/sentinel/models/memory.py`:
 - `EpisodicRecord` — id, service_name, severity, symptoms, root_cause, resolution, mttr_seconds, embedding (list[float]), created_at
 - `SemanticRecord` — service metadata + runbook reference
@@ -139,6 +139,7 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-10: EpisodicRecord includes raw_timeline (dict|None) for trajectory storage. Runbook model added for semantic memory. DimensionScore/TrajectoryScore have field_validators for 0-5 range. All use = [] for list defaults. 20 new tests (58 total). ruff + pyright clean.
 ```
 
 ---
@@ -715,3 +716,4 @@ These are documented for interview conversations ("what would you do next"):
 | 2026-05-10 | 1.1 | models/alert.py — AlertSource, AlertSeverity, AlertPayload, AlertAck. 16 tests. |
 | 2026-05-10 | 1.2 | models/incident.py + service.py — Severity, IncidentStatus, Incident, ServiceMetadata. 23 tests. |
 | 2026-05-10 | 1.3 | models/log_entry.py + deploy.py + remediation.py — 9 models, 3 enums. 38 tests. |
+| 2026-05-10 | 1.4 | models/memory.py + eval_result.py — EpisodicRecord, Runbook, SemanticRecord, MemoryQueryResult, EvalDimension, DimensionScore, TrajectoryScore. 20 tests. |
