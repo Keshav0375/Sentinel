@@ -46,7 +46,7 @@ LLM:              LLM: Groq API (OpenAI-compatible) — llama-3.3-70b-versatile 
 Tool schemas:     Pydantic v2
 Memory store:     SQLite (via aiosqlite) — episodic + semantic tables
 Short-term mem:   Python dict (per-incident, in-process)
-Embeddings:       text-embedding-3-small (OpenAI)
+Embeddings:       Embeddings: sentence-transformers all-MiniLM-L6-v2 (local, zero cost) — 384 dims. Update SQLite embedding BLOB schema accordingly.
 API layer:        FastAPI + uvicorn
 HTTP client:      httpx (async)
 Testing:          pytest + pytest-asyncio
@@ -342,7 +342,7 @@ CREATE TABLE runbooks (
 ```
 
 ### 7.4 Embedding Strategy
-- Model: `text-embedding-3-small` (1536 dims, cheap)
+- Model: Model: all-MiniLM-L6-v2 (384 dims, local, free) — swap to text-embedding-3-small for prod
 - Similarity: Cosine similarity computed in Python (no vector DB needed for MVP scale)
 - Store as BLOB in SQLite, deserialize with numpy
 
