@@ -1,41 +1,59 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
 *.egg-info/
+*.egg
+*.whl
 dist/
 build/
 .eggs/
 
-# Environment
+# ── Virtual environments ───────────────────────────────────────────────────────
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 env/
+ENV/
 
-# IDE
+# ── Database ──────────────────────────────────────────────────────────────────
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.sqlite
+
+# ── Test / Coverage ───────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ── Type-checker / linter caches ─────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+.pyright/
+
+# ── Eval reports (generated artifacts) ───────────────────────────────────────
+reports/*.json
+reports/*.md
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Database
-data/*.db
-data/*.sqlite
-
-# Reports
-reports/
-
-# Claude Code local overrides
-CLAUDE.local.md
-.claude/settings.local.json
-
-# OS
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Test / Coverage
-.pytest_cache/
-.coverage
-htmlcov/
-.mypy_cache/
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+
+# ── Claude Code local overrides ───────────────────────────────────────────────
+CLAUDE.local.md
+.claude/settings.local.json

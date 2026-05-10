@@ -53,28 +53,30 @@ Notes:
 2026-05-10: Used GROQ_API_KEY (not OPENAI_API_KEY) and Groq model names per ARCHITECTURE.md. Embedding model is all-MiniLM-L6-v2 (local). Added Literal type for log_level, Path for db_path, validators for key/tool-call bounds. Added pythonpath=["src"] to pytest config. 5/5 tests pass.
 ```
 
-### [ ] 0.4 — Docker + docker-compose + .gitignore (1%)
+### [x] 0.4 — Docker + docker-compose + .gitignore (1%)
 `Dockerfile` — multi-stage, Python 3.12-slim, copies `src/`, installs from `pyproject.toml`.
 `docker-compose.yml` — single service for now, mounts `.env`, exposes port 8000.
 `.gitignore` — Python defaults + `.env` + `data/*.db` + `__pycache__`.
 ```
 Notes:
 ─────
+2026-05-10: Multi-stage Dockerfile uses venv in builder stage for clean runtime image. docker-compose mounts ./data volume for SQLite persistence. .gitignore updated (pre-existing file merged, not overwritten) — kept CLAUDE.local.md entry.
 ```
 
-### [ ] 0.5 — Structured logging + basic infra (2%)
+### [x] 0.5 — Structured logging + basic infra (2%)
 `src/sentinel/infra/logging.py` — `structlog` or stdlib `logging` with JSON formatter. Every log line includes `incident_id` when in incident context.
 `src/sentinel/infra/db.py` — async SQLite connection factory using `aiosqlite`. Context manager pattern. Create tables on first run (migration-free for MVP).
 ```
 Notes:
 ─────
+2026-05-10: structlog with PrintLoggerFactory + JSON renderer. incident_context() binds via contextvars (async-safe). Dropped stdlib.add_logger_name (incompatible with PrintLogger). db.py: create_tables() idempotent DDL, get_db() enables WAL + foreign_keys. 11/11 tests pass.
 ```
 
 ---
 
 ## Phase 1 — Pydantic Domain Models (8-16%)
 
-### [ ] 1.1 — Alert models (2%)
+### [x] 1.1 — Alert models (2%)
 `src/sentinel/models/alert.py`:
 - `AlertSource` (enum: `datadog`, `pagerduty`)
 - `AlertPayload` — source, service, metric, threshold, current_value, severity, timestamp, alert_id, metadata dict
@@ -84,9 +86,10 @@ These are the contract between webhook receiver and orchestrator.
 ```
 Notes:
 ─────
+2026-05-10: Added AlertSeverity StrEnum (critical/high/warning/low/info) to separate raw tool severity from internal P1-P4. Both enums use StrEnum (Python 3.11+). alert_id and timestamp default to UUID4/now(UTC). 16/16 tests pass.
 ```
 
-### [ ] 1.2 — Incident + Service models (2%)
+### [x] 1.2 — Incident + Service models (2%)
 `src/sentinel/models/incident.py`:
 - `Severity` (enum: P1-P4)
 - `IncidentStatus` (enum: `triage`, `investigating`, `remediating`, `pending_approval`, `resolved`, `escalated`)
@@ -98,9 +101,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-10: Added ServiceTier StrEnum (critical/standard/best-effort). Result fields typed dict[str,Any]|None — concrete types come in later phases. timeline uses = [] (pydantic v2 deep-copies mutable defaults, avoids pyright unknown type). Incident id = "inc-{8hex}". 23/23 tests pass.
 ```
 
-### [ ] 1.3 — Log, Deploy, Remediation models (2%)
+### [x] 1.3 — Log, Deploy, Remediation models (2%)
 `src/sentinel/models/log_entry.py`:
 - `LogEntry` — timestamp, level, service, message, trace_id (optional)
 - `LogQuery` — service, start_time, end_time, level_filter, keyword_filter
@@ -119,6 +123,7 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-10: Added LogLevel + RiskLevel + ApprovalStatus StrEnums. suspect_deploy is Deploy|None (handles no-deploy scenarios). reviewer validator enforces non-empty. All models use = [] for list defaults. 38/38 tests pass.
 ```
 
 ### [ ] 1.4 — Memory + Eval models (2%)
@@ -705,3 +710,8 @@ These are documented for interview conversations ("what would you do next"):
 | 2026-05-10 | 0.1 | pyproject.toml, .python-version, src/sentinel/__init__.py |
 | 2026-05-10 | 0.2 | Full directory structure — 60+ stub files across all packages |
 | 2026-05-10 | 0.3 | config.py with pydantic-settings, .env.example, 5 tests |
+| 2026-05-10 | 0.4 | Dockerfile (multi-stage venv), docker-compose.yml, .gitignore updated |
+| 2026-05-10 | 0.5 | infra/logging.py (structlog JSON + incident_context), infra/db.py (aiosqlite, WAL, DDL) |
+| 2026-05-10 | 1.1 | models/alert.py — AlertSource, AlertSeverity, AlertPayload, AlertAck. 16 tests. |
+| 2026-05-10 | 1.2 | models/incident.py + service.py — Severity, IncidentStatus, Incident, ServiceMetadata. 23 tests. |
+| 2026-05-10 | 1.3 | models/log_entry.py + deploy.py + remediation.py — 9 models, 3 enums. 38 tests. |
