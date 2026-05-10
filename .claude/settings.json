@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash(ruff*)",
+      "Bash(pyright*)",
+      "Bash(pytest*)",
+      "Bash(python*)",
+      "Bash(pip*)",
+      "Bash(uvicorn*)",
+      "Bash(cat*)",
+      "Bash(ls*)",
+      "Bash(find*)",
+      "Bash(grep*)",
+      "Bash(head*)",
+      "Bash(tail*)",
+      "Bash(wc*)",
+      "Bash(mkdir*)",
+      "Bash(cp*)",
+      "Bash(mv*)",
+      "Bash(touch*)",
+      "Bash(git*)",
+      "Bash(docker*)",
+      "Bash(echo*)",
+      "Bash(tree*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)*",
+      "Bash(curl*)",
+      "Bash(wget*)",
+      "Bash(sudo*)"
+    ]
+  }
+}

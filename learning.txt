@@ -1,0 +1,95 @@
+Sentinel:
+
+Sentinel is a multi agent incident response system. 
+
+ALert Fires -> Sentinal auto triages it -> every destructive action is HITL 
+			|	
+			------> pulls logs, correlates with recent deploys, figures out root casue, drafts a slack summary, and opens a rollback/hotfix PR
+
+									|
+									|	{remembers past events incidents and gets smarter over time via self improvement loop
+
+5 core things:
+1. Multi agents orchestration --> hands off to specialist sub agents (triage, log analyst, remediation)
+2. tool calling with real action surface --> 6-10 tool call per incident, not a chatbot
+3. HITL gating ---> destructive actions require approval (simulated)
+4. Memory --> agent recalls past incidents to improve triage (episodmic memory)
+5. Trajectory eval --> grade the agent on the full incident arc, not just single responses
+
+
+Prerequisite 
+- OpenAI Agents SDK 
+-- PRINCIPLES
+1. Enough features to be worth using, but few enough primitives to make it quick to learn.
+2. Works great out of the box, but you can customize exactly what happens.
+
+- Main Features
+1. Agent Loop -- handles tool invocation, sends results back to the LLM, and continues until task is complete
+2. Python First -- language features to orchestrate and chain agents, rather than needing to learn new abstractions
+3. Agents as tools/Handoffs -- mechanism for coordinating and delgating work across multiple agents
+4. Sandbox agents -- run specialists inside inside real isolated workspaces with manifest defined files, sandbox client choice, and resumable sandbox sessions
+5. Guardrails -- run input validation and safety checks in parallel with agent execution and fail fast when checks do not pass
+6. Function tools -- tool with automatic schema generation and pydantic powered validation
+7. MCP server tool calling -- MCP server tool integration that works the same way as function tools.
+8. Sessions -- memory layer for maintaining working context with an agent loop.
+9. HITL
+10. Tracing
+11. Realtime agents
+
+
+
+
+
+
+
+
+
+TOOLS
+
+The SDK supports five categories:
+- HOSTED OPENAI TOOLS = RUN ALONGSIDE THE MODEL ON OpenAI SERVERS
+- LOCAL RUNTIME EXECUTION TOOLS = COMPUTERTOOL AND APPLYPATCHTOOL ALWAYS RUN IN YOUR ENVIRONMENT
+- FUNCTION CALLING = WPAP A PYTHON FUNCTION AS TOOL
+- AGENTS AS TOOL = EXPOSE AN AGENT AS CALLABLE TOOL WITHOUT A FULL HANDOFF
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
