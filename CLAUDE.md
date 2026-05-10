@@ -16,7 +16,8 @@ Read `TODO.md` for the current task tracker. Tasks are ordered by dependency —
 
 - Python 3.12+, `pyproject.toml` with hatchling
 - `openai-agents` (OpenAI Agents SDK) for orchestration + handoffs
-- `openai` for embeddings and direct LLM calls
+- `openai` for Groq-compatible LLM calls (base_url: api.groq.com/openai/v1)
+- `google-genai` for Gemini backup calls (NOT google-generativeai, deprecated)
 - FastAPI + uvicorn for webhook API
 - Pydantic v2 for all models and tool schemas
 - `pydantic-settings` for config (env-var driven)

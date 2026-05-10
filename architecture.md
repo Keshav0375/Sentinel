@@ -42,7 +42,7 @@ The agent makes 6-10 tool calls per incident. Every destructive action is gated 
 ```
 Runtime:          Python 3.12+
 Agent framework:  openai-agents (OpenAI Agents SDK)
-LLM:              OpenAI API (gpt-4o for orchestration + analysis, gpt-4o-mini for triage + eval judge)
+LLM:              LLM: Groq API (OpenAI-compatible) — llama-3.3-70b-versatile for orchestration + analysis, llama-3.1-8b-instant for triage + eval judge. Gemini 2.5 Flash as backup via google-genai SDK.
 Tool schemas:     Pydantic v2
 Memory store:     SQLite (via aiosqlite) — episodic + semantic tables
 Short-term mem:   Python dict (per-incident, in-process)
