@@ -146,7 +146,7 @@ Notes:
 
 ## Phase 2 — Synthetic Data Generator (16-28%)
 
-### [ ] 2.1 — Scenario schema + first 3 scenarios (3%)
+### [x] 2.1 — Scenario schema + first 3 scenarios (3%)
 `data/scenarios/` — Create JSON files for:
 1. `bad_deploy_01.json` — null pointer from missing config key
 2. `bad_deploy_02.json` — dependency version mismatch
@@ -156,6 +156,7 @@ Each file has: scenario_id, failure_class, description, alert payload, known_roo
 ```
 Notes:
 ─────
+2026-05-10: Added ground_truth block to schema (severity, affected_service, root_cause_summary, recommended_action, deploy_id) — eval judge needs this without parsing known_root_cause. db_pool_01 has null deploy_id (no deploy culprit). 14+ logs per scenario with red herrings. 39 schema-validation tests pass.
 ```
 
 ### [ ] 2.2 — Remaining 7 scenarios (3%)
@@ -717,3 +718,4 @@ These are documented for interview conversations ("what would you do next"):
 | 2026-05-10 | 1.2 | models/incident.py + service.py — Severity, IncidentStatus, Incident, ServiceMetadata. 23 tests. |
 | 2026-05-10 | 1.3 | models/log_entry.py + deploy.py + remediation.py — 9 models, 3 enums. 38 tests. |
 | 2026-05-10 | 1.4 | models/memory.py + eval_result.py — EpisodicRecord, Runbook, SemanticRecord, MemoryQueryResult, EvalDimension, DimensionScore, TrajectoryScore. 20 tests. |
+| 2026-05-10 | 2.1 | data/scenarios/bad_deploy_01.json + bad_deploy_02.json + db_pool_01.json — 14+ logs each, red herrings, ground_truth block added to schema. 39 tests. |
