@@ -1,0 +1,155 @@
+{
+  "scenario_id": "db_pool_02",
+  "failure_class": "db_pool",
+  "description": "Order service batch job leaks DB connections by not closing cursors in the finally block. Slow leak exhausts the pool over 3 hours.",
+  "alert": {
+    "source": "datadog",
+    "service": "order-service",
+    "metric": "error_rate",
+    "threshold": 0.03,
+    "current_value": 0.42,
+    "severity": "high"
+  },
+  "known_root_cause": {
+    "type": "db_pool",
+    "deploy_id": "deploy-order-041",
+    "commit": "2e3f4a5b",
+    "description": "Nightly batch reconciliation job opens cursors in a try block but the finally clause only closes the connection, not the cursor. Leaked cursors hold DB connections open indefinitely, exhausting the 20-connection pool over ~3 hours of accumulated batch runs."
+  },
+  "ground_truth": {
+    "severity": "P2",
+    "affected_service": "order-service",
+    "root_cause_summary": "deploy-order-041 introduces cursor leak in batch reconciliation job — cursor.close() missing from finally block, exhausting 20-connection pool over 3 hours",
+    "recommended_action": "hotfix",
+    "deploy_id": "deploy-order-041"
+  },
+  "logs": [
+    {
+      "ts": "2026-05-11T12:00:05Z",
+      "level": "INFO",
+      "service": "order-service",
+      "message": "Nightly reconciliation batch started. Processing 8,441 pending orders.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T12:00:07Z",
+      "level": "INFO",
+      "service": "order-service",
+      "message": "DB connection pool utilization: 6/20.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T12:05:30Z",
+      "level": "WARNING",
+      "service": "order-service",
+      "message": "DB connection pool utilization: 11/20. Unusual for this time of day.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T12:30:00Z",
+      "level": "INFO",
+      "service": "analytics-pipeline",
+      "message": "Hourly aggregation job completed successfully. 0 errors.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T13:00:01Z",
+      "level": "INFO",
+      "service": "order-service",
+      "message": "Reconciliation batch cycle 2 started.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T13:00:03Z",
+      "level": "WARNING",
+      "service": "order-service",
+      "message": "DB connection pool utilization: 15/20. Previous batch cursors not released.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T13:30:00Z",
+      "level": "WARNING",
+      "service": "order-service",
+      "message": "DB connection pool utilization: 18/20. Approaching capacity.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T14:00:02Z",
+      "level": "INFO",
+      "service": "order-service",
+      "message": "Reconciliation batch cycle 3 started.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T14:00:04Z",
+      "level": "WARNING",
+      "service": "order-service",
+      "message": "DB connection pool at capacity: 20/20. New requests will queue.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T14:02:11Z",
+      "level": "ERROR",
+      "service": "order-service",
+      "message": "Connection pool exhausted. GET /orders/88821 waiting for DB connection. Queue depth: 7.",
+      "trace_id": "trace-ord01"
+    },
+    {
+      "ts": "2026-05-11T14:02:14Z",
+      "level": "ERROR",
+      "service": "order-service",
+      "message": "Request timeout: GET /orders/88821 failed after 8001ms. Returning 503.",
+      "trace_id": "trace-ord01"
+    },
+    {
+      "ts": "2026-05-11T14:02:15Z",
+      "level": "ERROR",
+      "service": "order-service",
+      "message": "Request timeout: POST /orders/create failed after 8002ms. Returning 503.",
+      "trace_id": "trace-ord02"
+    },
+    {
+      "ts": "2026-05-11T14:02:20Z",
+      "level": "ERROR",
+      "service": "order-service",
+      "message": "Cursor leak detected in reconciliation.py:147 — cursor object not closed before connection returned to pool.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T14:02:25Z",
+      "level": "CRITICAL",
+      "service": "order-service",
+      "message": "Error rate 42%. Datadog alert firing. Connection pool fully leaked.",
+      "trace_id": null
+    }
+  ],
+  "deploys": [
+    {
+      "id": "deploy-order-041",
+      "service": "order-service",
+      "ts": "2026-05-11T11:45:00Z",
+      "author": "felix",
+      "commit": "2e3f4a5b",
+      "files_changed": 6,
+      "description": "Add nightly order reconciliation batch job for accounting exports"
+    },
+    {
+      "id": "deploy-order-040",
+      "service": "order-service",
+      "ts": "2026-05-10T15:00:00Z",
+      "author": "ci-bot",
+      "commit": "1a2b3c4d",
+      "files_changed": 2,
+      "description": "Fix order status enum serialization bug"
+    },
+    {
+      "id": "deploy-pay-093",
+      "service": "payment-service",
+      "ts": "2026-05-11T10:00:00Z",
+      "author": "diana",
+      "commit": "5e6f7a8b",
+      "files_changed": 3,
+      "description": "Add idempotency keys to payment webhook retries"
+    }
+  ]
+}

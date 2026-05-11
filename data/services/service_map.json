@@ -1,0 +1,84 @@
+{
+  "services": [
+    {
+      "name": "api-gateway",
+      "team": "team-platform",
+      "tier": "critical",
+      "oncall_channel": "#oncall-platform",
+      "repo_url": "https://github.com/acme-corp/api-gateway",
+      "description": "Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.",
+      "dependencies": ["auth-service", "user-service", "payment-service", "order-service"],
+      "failure_classes": ["bad_deploy", "downstream_outage", "config_regression"]
+    },
+    {
+      "name": "user-service",
+      "team": "team-identity",
+      "tier": "critical",
+      "oncall_channel": "#oncall-identity",
+      "repo_url": "https://github.com/acme-corp/user-service",
+      "description": "Manages user accounts, profiles, and preferences. Provides internal lookup API used by auth-service and order-service.",
+      "dependencies": [],
+      "failure_classes": ["bad_deploy", "db_pool", "config_regression"]
+    },
+    {
+      "name": "auth-service",
+      "team": "team-identity",
+      "tier": "critical",
+      "oncall_channel": "#oncall-identity",
+      "repo_url": "https://github.com/acme-corp/auth-service",
+      "description": "Issues and validates JWT session tokens. Handles OAuth provider integrations (Google, GitHub). Called on every authenticated request via api-gateway.",
+      "dependencies": ["user-service"],
+      "failure_classes": ["bad_deploy", "downstream_outage"]
+    },
+    {
+      "name": "payment-service",
+      "team": "team-payments",
+      "tier": "critical",
+      "oncall_channel": "#oncall-payments",
+      "repo_url": "https://github.com/acme-corp/payment-service",
+      "description": "Processes charges, refunds, and payment method management via Stripe. PCI-scoped service — all changes require security review.",
+      "dependencies": [],
+      "failure_classes": ["bad_deploy", "db_pool", "downstream_outage"]
+    },
+    {
+      "name": "order-service",
+      "team": "team-commerce",
+      "tier": "critical",
+      "oncall_channel": "#oncall-commerce",
+      "repo_url": "https://github.com/acme-corp/order-service",
+      "description": "Manages the full order lifecycle: creation, fulfillment, cancellation, and reconciliation. Coordinates between payment-service and notification-service.",
+      "dependencies": ["payment-service", "notification-service", "user-service"],
+      "failure_classes": ["bad_deploy", "db_pool"]
+    },
+    {
+      "name": "notification-service",
+      "team": "team-comms",
+      "tier": "standard",
+      "oncall_channel": "#oncall-comms",
+      "repo_url": "https://github.com/acme-corp/notification-service",
+      "description": "Sends transactional emails, push notifications, and WebSocket real-time updates. Stateless delivery — retries handled by queue.",
+      "dependencies": ["user-service"],
+      "failure_classes": ["bad_deploy", "memory_leak"]
+    },
+    {
+      "name": "analytics-pipeline",
+      "team": "team-data",
+      "tier": "best-effort",
+      "oncall_channel": "#oncall-data",
+      "repo_url": "https://github.com/acme-corp/analytics-pipeline",
+      "description": "Reads order and payment data for business intelligence reporting. Non-critical path — user-facing flows do not depend on this service.",
+      "dependencies": ["order-service", "payment-service"],
+      "failure_classes": ["bad_deploy", "memory_leak"]
+    },
+    {
+      "name": "cdn-proxy",
+      "team": "team-platform",
+      "tier": "standard",
+      "oncall_channel": "#oncall-platform",
+      "repo_url": "https://github.com/acme-corp/cdn-proxy",
+      "description": "Cloudflare-backed CDN proxy for static assets and cacheable API responses. Sits in front of api-gateway for GET requests.",
+      "dependencies": ["api-gateway"],
+      "failure_classes": ["bad_deploy", "config_regression"]
+    }
+  ]
+}

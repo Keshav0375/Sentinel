@@ -38,7 +38,22 @@ VALID_ALERT_SOURCES = {"datadog", "pagerduty"}
 
 VALID_ALERT_SEVERITIES = {"critical", "high", "warning", "low", "info"}
 
-SCENARIO_IDS = ["bad_deploy_01", "bad_deploy_02", "db_pool_01"]
+SCENARIO_IDS = [
+    "bad_deploy_01",
+    "bad_deploy_02",
+    "bad_deploy_03",
+    "db_pool_01",
+    "db_pool_02",
+    "downstream_outage_01",
+    "downstream_outage_02",
+    "memory_leak_01",
+    "memory_leak_02",
+    "config_regression_01",
+]
+
+VALID_FAILURE_CLASSES = {
+    "bad_deploy", "db_pool", "downstream_outage", "memory_leak", "config_regression"
+}
 
 
 def load_scenario(scenario_id: str) -> dict:
@@ -137,6 +152,12 @@ def test_deploy_entry_structure(scenario_id: str) -> None:
         assert isinstance(deploy["files_changed"], int) and deploy["files_changed"] >= 0
 
 
+@pytest.mark.parametrize("scenario_id", SCENARIO_IDS)
+def test_failure_class_is_valid(scenario_id: str) -> None:
+    data = load_scenario(scenario_id)
+    assert data["failure_class"] in VALID_FAILURE_CLASSES
+
+
 # ── Scenario-specific assertions ──────────────────────────────────────────────
 
 
@@ -174,9 +195,96 @@ def test_scenario_services_are_realistic() -> None:
     expected_services = {
         "bad_deploy_01": "api-gateway",
         "bad_deploy_02": "user-service",
+        "bad_deploy_03": "auth-service",
         "db_pool_01": "payment-service",
+        "db_pool_02": "order-service",
+        "downstream_outage_01": "payment-service",
+        "downstream_outage_02": "api-gateway",
+        "memory_leak_01": "analytics-pipeline",
+        "memory_leak_02": "notification-service",
+        "config_regression_01": "user-service",
     }
     for scenario_id, expected_service in expected_services.items():
         data = load_scenario(scenario_id)
-        assert data["alert"]["service"] == expected_service
-        assert data["ground_truth"]["affected_service"] == expected_service
+        assert data["alert"]["service"] == expected_service, (
+            f"{scenario_id}: expected alert service '{expected_service}'"
+        )
+
+
+# ── New scenario-specific assertions ─────────────────────────────────────────
+
+
+def test_bad_deploy_03_missing_env_var() -> None:
+    data = load_scenario("bad_deploy_03")
+    assert data["known_root_cause"]["deploy_id"] == "deploy-auth-112"
+    assert data["ground_truth"]["recommended_action"] == "rollback"
+    assert data["failure_class"] == "bad_deploy"
+
+
+def test_db_pool_02_has_deploy_culprit() -> None:
+    data = load_scenario("db_pool_02")
+    assert data["known_root_cause"]["deploy_id"] == "deploy-order-041"
+    assert data["ground_truth"]["recommended_action"] == "hotfix"
+
+
+def test_downstream_outage_01_no_deploy_culprit() -> None:
+    data = load_scenario("downstream_outage_01")
+    assert data["known_root_cause"]["deploy_id"] is None
+    assert data["ground_truth"]["recommended_action"] == "escalate"
+    assert data["failure_class"] == "downstream_outage"
+
+
+def test_downstream_outage_02_alert_on_gateway_root_in_auth() -> None:
+    data = load_scenario("downstream_outage_02")
+    assert data["alert"]["service"] == "api-gateway"
+    assert data["ground_truth"]["affected_service"] == "auth-service"
+    assert data["ground_truth"]["deploy_id"] == "deploy-auth-114"
+
+
+def test_memory_leak_01_is_gradual_oom() -> None:
+    data = load_scenario("memory_leak_01")
+    assert data["alert"]["metric"] == "memory_usage_bytes"
+    assert data["ground_truth"]["recommended_action"] == "rollback"
+    assert data["failure_class"] == "memory_leak"
+
+
+def test_memory_leak_02_alert_is_restarts() -> None:
+    data = load_scenario("memory_leak_02")
+    assert data["alert"]["metric"] == "process_restarts_total"
+    assert data["ground_truth"]["deploy_id"] == "deploy-notif-019"
+
+
+def test_config_regression_no_deploy_id() -> None:
+    data = load_scenario("config_regression_01")
+    assert data["known_root_cause"]["deploy_id"] is None
+    assert data["ground_truth"]["deploy_id"] is None
+    assert data["ground_truth"]["recommended_action"] == "escalate"
+    assert data["failure_class"] == "config_regression"
+
+
+def test_all_10_scenarios_have_unique_ids() -> None:
+    seen: set[str] = set()
+    for scenario_id in SCENARIO_IDS:
+        data = load_scenario(scenario_id)
+        sid = data["scenario_id"]
+        assert sid not in seen, f"Duplicate scenario_id: {sid}"
+        seen.add(sid)
+    assert len(seen) == 10
+
+
+def test_failure_classes_cover_all_4_types() -> None:
+    classes = {load_scenario(s)["failure_class"] for s in SCENARIO_IDS}
+    assert "bad_deploy" in classes
+    assert "db_pool" in classes
+    assert "downstream_outage" in classes
+    assert "memory_leak" in classes
+    assert "config_regression" in classes
+
+
+def test_escalate_scenarios_have_no_deploy_id() -> None:
+    for scenario_id in SCENARIO_IDS:
+        data = load_scenario(scenario_id)
+        if data["ground_truth"]["recommended_action"] == "escalate":
+            assert data["ground_truth"]["deploy_id"] is None, (
+                f"{scenario_id}: escalate scenarios should not have a deploy_id"
+            )

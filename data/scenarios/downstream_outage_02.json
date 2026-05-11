@@ -1,0 +1,155 @@
+{
+  "scenario_id": "downstream_outage_02",
+  "failure_class": "downstream_outage",
+  "description": "Auth service slowdown caused by an unindexed session query cascades to api-gateway timeouts. Alert fires on api-gateway but root cause is in auth-service.",
+  "alert": {
+    "source": "datadog",
+    "service": "api-gateway",
+    "metric": "p99_latency_ms",
+    "threshold": 300,
+    "current_value": 12400,
+    "severity": "critical"
+  },
+  "known_root_cause": {
+    "type": "bad_deploy",
+    "deploy_id": "deploy-auth-114",
+    "commit": "7g6h5i4j",
+    "description": "Auth service deploy adds session activity tracking with a query on the sessions table lacking an index on user_id. Under prod load, query takes 8-12s. api-gateway waits for auth verification on every request, causing cascading timeout. Root cause is in auth-service, not api-gateway."
+  },
+  "ground_truth": {
+    "severity": "P1",
+    "affected_service": "auth-service",
+    "root_cause_summary": "Unindexed session query in deploy-auth-114 causes auth-service p99 to reach 11s, cascading timeouts to api-gateway",
+    "recommended_action": "rollback",
+    "deploy_id": "deploy-auth-114"
+  },
+  "logs": [
+    {
+      "ts": "2026-05-12T15:50:00Z",
+      "level": "INFO",
+      "service": "auth-service",
+      "message": "Deployment deploy-auth-114 complete. Version 5.3.1 -> 5.4.0.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T15:52:10Z",
+      "level": "WARNING",
+      "service": "auth-service",
+      "message": "Slow query detected: SELECT * FROM sessions WHERE user_id=? ORDER BY last_active DESC — duration 1240ms. Seq scan on 2.1M row table.",
+      "trace_id": "trace-au10"
+    },
+    {
+      "ts": "2026-05-12T15:53:01Z",
+      "level": "WARNING",
+      "service": "auth-service",
+      "message": "Slow query: sessions WHERE user_id=? — duration 3200ms. Query plan shows full table scan. Index missing on user_id.",
+      "trace_id": "trace-au11"
+    },
+    {
+      "ts": "2026-05-12T15:54:00Z",
+      "level": "INFO",
+      "service": "notification-service",
+      "message": "Delivered 204 push notifications. 0 failures.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T15:54:30Z",
+      "level": "WARNING",
+      "service": "api-gateway",
+      "message": "auth-service /auth/verify response time: 4800ms. Upstream latency degrading.",
+      "trace_id": "trace-gw20"
+    },
+    {
+      "ts": "2026-05-12T15:55:00Z",
+      "level": "WARNING",
+      "service": "auth-service",
+      "message": "Slow query: sessions WHERE user_id=? — duration 8100ms. Thread pool at 80% capacity.",
+      "trace_id": "trace-au12"
+    },
+    {
+      "ts": "2026-05-12T15:55:15Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "Timeout waiting for auth-service /auth/verify after 10000ms. Request: GET /api/v1/dashboard — returning 504.",
+      "trace_id": "trace-gw21"
+    },
+    {
+      "ts": "2026-05-12T15:55:16Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "Timeout waiting for auth-service /auth/verify after 10001ms. Request: POST /api/v1/orders — returning 504.",
+      "trace_id": "trace-gw22"
+    },
+    {
+      "ts": "2026-05-12T15:55:20Z",
+      "level": "CRITICAL",
+      "service": "api-gateway",
+      "message": "p99 latency 12400ms. Datadog alert firing. All requests pending auth verification are timing out.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T15:55:22Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "Timeout waiting for auth-service /auth/verify after 10000ms. Queue depth: 34 pending requests.",
+      "trace_id": "trace-gw23"
+    },
+    {
+      "ts": "2026-05-12T15:55:25Z",
+      "level": "ERROR",
+      "service": "auth-service",
+      "message": "Thread pool exhausted: 32/32 threads occupied by session queries. New requests queuing.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T15:55:30Z",
+      "level": "INFO",
+      "service": "api-gateway",
+      "message": "Note: static asset routes (no auth required) responding normally at 12ms p99.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T15:55:35Z",
+      "level": "WARNING",
+      "service": "auth-service",
+      "message": "Session activity query introduced in deploy-auth-114 is the only change affecting this code path.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T15:55:40Z",
+      "level": "ERROR",
+      "service": "user-service",
+      "message": "Auth verification failing for profile update requests. Upstream auth-service latency: 11200ms avg.",
+      "trace_id": "trace-usr20"
+    }
+  ],
+  "deploys": [
+    {
+      "id": "deploy-auth-114",
+      "service": "auth-service",
+      "ts": "2026-05-12T15:49:00Z",
+      "author": "ci-bot",
+      "commit": "7g6h5i4j",
+      "files_changed": 4,
+      "description": "Add session activity tracking — log last_active timestamp per user for analytics dashboard"
+    },
+    {
+      "id": "deploy-auth-113",
+      "service": "auth-service",
+      "ts": "2026-05-12T09:00:00Z",
+      "author": "carlos",
+      "commit": "6f5e4d3c",
+      "files_changed": 1,
+      "description": "Update rate limit: 10 failed logins per minute before lockout"
+    },
+    {
+      "id": "deploy-gw-091",
+      "service": "api-gateway",
+      "ts": "2026-05-11T16:00:00Z",
+      "author": "priya",
+      "commit": "5d4c3b2a",
+      "files_changed": 3,
+      "description": "Add request ID header to all outbound calls for tracing"
+    }
+  ]
+}

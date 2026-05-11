@@ -1,0 +1,88 @@
+{
+  "edges": [
+    {
+      "from": "cdn-proxy",
+      "to": "api-gateway",
+      "protocol": "http",
+      "criticality": "standard",
+      "notes": "CDN proxies all cacheable GET requests to api-gateway. Cache miss falls through synchronously."
+    },
+    {
+      "from": "api-gateway",
+      "to": "auth-service",
+      "protocol": "http",
+      "criticality": "critical",
+      "notes": "Every authenticated request calls auth-service /auth/verify before routing. Latency here cascades to all api-gateway p99 latency."
+    },
+    {
+      "from": "api-gateway",
+      "to": "user-service",
+      "protocol": "http",
+      "criticality": "critical",
+      "notes": "Routes /api/v1/users/* requests to user-service."
+    },
+    {
+      "from": "api-gateway",
+      "to": "payment-service",
+      "protocol": "http",
+      "criticality": "critical",
+      "notes": "Routes /api/v1/payments/* requests to payment-service."
+    },
+    {
+      "from": "api-gateway",
+      "to": "order-service",
+      "protocol": "http",
+      "criticality": "critical",
+      "notes": "Routes /api/v1/orders/* requests to order-service."
+    },
+    {
+      "from": "auth-service",
+      "to": "user-service",
+      "protocol": "http",
+      "criticality": "critical",
+      "notes": "auth-service calls /internal/users/lookup to resolve user identity during token verification."
+    },
+    {
+      "from": "order-service",
+      "to": "payment-service",
+      "protocol": "http",
+      "criticality": "critical",
+      "notes": "order-service calls payment-service /payments/charge synchronously during order creation. Failures here block order placement."
+    },
+    {
+      "from": "order-service",
+      "to": "notification-service",
+      "protocol": "http",
+      "criticality": "standard",
+      "notes": "order-service fires async POST to notification-service after successful order. Non-blocking — order succeeds even if notification fails."
+    },
+    {
+      "from": "order-service",
+      "to": "user-service",
+      "protocol": "http",
+      "criticality": "standard",
+      "notes": "order-service validates user identity via /internal/users/{id} before order creation."
+    },
+    {
+      "from": "notification-service",
+      "to": "user-service",
+      "protocol": "http",
+      "criticality": "standard",
+      "notes": "notification-service fetches user email and push token from /internal/users/{id}/contact."
+    },
+    {
+      "from": "analytics-pipeline",
+      "to": "order-service",
+      "protocol": "db-read",
+      "criticality": "best-effort",
+      "notes": "analytics-pipeline reads directly from order-service's read replica. Not a service-to-service HTTP call."
+    },
+    {
+      "from": "analytics-pipeline",
+      "to": "payment-service",
+      "protocol": "db-read",
+      "criticality": "best-effort",
+      "notes": "analytics-pipeline reads from payment-service's read replica for revenue reporting."
+    }
+  ]
+}

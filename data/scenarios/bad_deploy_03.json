@@ -1,0 +1,155 @@
+{
+  "scenario_id": "bad_deploy_03",
+  "failure_class": "bad_deploy",
+  "description": "Auth service deploy adds OAuth integration that reads OAUTH_CLIENT_SECRET env var not provisioned in production config map",
+  "alert": {
+    "source": "datadog",
+    "service": "auth-service",
+    "metric": "error_rate",
+    "threshold": 0.02,
+    "current_value": 0.61,
+    "severity": "critical"
+  },
+  "known_root_cause": {
+    "type": "bad_deploy",
+    "deploy_id": "deploy-auth-112",
+    "commit": "9c8b7a6f",
+    "description": "OAuth provider integration reads OAUTH_CLIENT_SECRET from environment at request time. Key was not added to the prod Kubernetes ConfigMap. KeyError on every /auth/oauth/* route."
+  },
+  "ground_truth": {
+    "severity": "P1",
+    "affected_service": "auth-service",
+    "root_cause_summary": "Missing env var OAUTH_CLIENT_SECRET causes KeyError on all OAuth routes after deploy-auth-112",
+    "recommended_action": "rollback",
+    "deploy_id": "deploy-auth-112"
+  },
+  "logs": [
+    {
+      "ts": "2026-05-11T08:55:00Z",
+      "level": "INFO",
+      "service": "auth-service",
+      "message": "Deployment deploy-auth-112 starting. Version 5.2.0 -> 5.3.0",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T08:55:18Z",
+      "level": "WARNING",
+      "service": "auth-service",
+      "message": "Environment variable OAUTH_CLIENT_SECRET not found. OAuth routes will fail at runtime.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T08:55:22Z",
+      "level": "INFO",
+      "service": "auth-service",
+      "message": "Health check passed. Liveness probe: /health/live — OK",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T08:55:30Z",
+      "level": "INFO",
+      "service": "auth-service",
+      "message": "Deployment complete. 3/3 pods running on version 5.3.0.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T08:58:01Z",
+      "level": "INFO",
+      "service": "cdn-proxy",
+      "message": "Cache hit ratio: 94.2%. No anomalies.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T09:00:14Z",
+      "level": "ERROR",
+      "service": "auth-service",
+      "message": "KeyError: 'OAUTH_CLIENT_SECRET'. Traceback: OAuthProvider.__init__ (providers/oauth.py:22) -> os.environ.__getitem__",
+      "trace_id": "trace-au01"
+    },
+    {
+      "ts": "2026-05-11T09:00:14Z",
+      "level": "ERROR",
+      "service": "auth-service",
+      "message": "POST /auth/oauth/google/callback failed: KeyError — 500 returned",
+      "trace_id": "trace-au01"
+    },
+    {
+      "ts": "2026-05-11T09:00:15Z",
+      "level": "ERROR",
+      "service": "auth-service",
+      "message": "KeyError: 'OAUTH_CLIENT_SECRET'. Traceback: OAuthProvider.__init__ (providers/oauth.py:22)",
+      "trace_id": "trace-au02"
+    },
+    {
+      "ts": "2026-05-11T09:00:16Z",
+      "level": "ERROR",
+      "service": "auth-service",
+      "message": "POST /auth/oauth/github/callback failed: KeyError — 500 returned",
+      "trace_id": "trace-au02"
+    },
+    {
+      "ts": "2026-05-11T09:00:20Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "auth-service /auth/oauth/* routes returning 500. OAuth login unavailable.",
+      "trace_id": "trace-gw01"
+    },
+    {
+      "ts": "2026-05-11T09:00:25Z",
+      "level": "INFO",
+      "service": "user-service",
+      "message": "Password-based login requests up 40% — users retrying after OAuth failure.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T09:00:31Z",
+      "level": "CRITICAL",
+      "service": "auth-service",
+      "message": "Error rate 61%. Datadog alert firing. All OAuth provider routes affected.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-11T09:00:35Z",
+      "level": "ERROR",
+      "service": "auth-service",
+      "message": "Stack trace: OAuthProvider.__init__ (providers/oauth.py:22) -> OAuthCallbackHandler.handle (handlers/oauth_callback.py:58) -> Router.dispatch (router.py:112)",
+      "trace_id": "trace-au03"
+    },
+    {
+      "ts": "2026-05-11T09:00:40Z",
+      "level": "WARNING",
+      "service": "auth-service",
+      "message": "Note: /auth/password/* routes unaffected. Only OAuth routes impacted.",
+      "trace_id": null
+    }
+  ],
+  "deploys": [
+    {
+      "id": "deploy-auth-112",
+      "service": "auth-service",
+      "ts": "2026-05-11T08:55:00Z",
+      "author": "ci-bot",
+      "commit": "9c8b7a6f",
+      "files_changed": 9,
+      "description": "Add OAuth 2.0 provider integration (Google, GitHub) — reads OAUTH_CLIENT_SECRET from env"
+    },
+    {
+      "id": "deploy-auth-111",
+      "service": "auth-service",
+      "ts": "2026-05-10T11:00:00Z",
+      "author": "carlos",
+      "commit": "8d7e6f5a",
+      "files_changed": 2,
+      "description": "Increase session token expiry from 24h to 48h per product request"
+    },
+    {
+      "id": "deploy-gw-088",
+      "service": "api-gateway",
+      "ts": "2026-05-11T07:00:00Z",
+      "author": "ci-bot",
+      "commit": "4b3c2d1e",
+      "files_changed": 1,
+      "description": "Update nginx config: increase upstream timeout to 30s"
+    }
+  ]
+}

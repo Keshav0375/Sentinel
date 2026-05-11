@@ -1,0 +1,155 @@
+{
+  "scenario_id": "downstream_outage_01",
+  "failure_class": "downstream_outage",
+  "description": "Stripe payment processor API is down. Payment service is healthy but all charge requests fail with 503 from Stripe. No internal code or deploy issue.",
+  "alert": {
+    "source": "pagerduty",
+    "service": "payment-service",
+    "metric": "error_rate",
+    "threshold": 0.02,
+    "current_value": 0.98,
+    "severity": "critical"
+  },
+  "known_root_cause": {
+    "type": "downstream_outage",
+    "deploy_id": null,
+    "commit": null,
+    "description": "Stripe API returning 503 Service Unavailable for all /v1/charges and /v1/payment_intents endpoints. Stripe status page shows 'Identified' incident. Payment service has no internal errors — all failures are upstream at the Stripe boundary."
+  },
+  "ground_truth": {
+    "severity": "P1",
+    "affected_service": "payment-service",
+    "root_cause_summary": "Stripe API outage causing 98% error rate on payment-service. No internal deploy or code issue. Escalate to vendor and activate fallback processor.",
+    "recommended_action": "escalate",
+    "deploy_id": null
+  },
+  "logs": [
+    {
+      "ts": "2026-05-12T10:58:02Z",
+      "level": "INFO",
+      "service": "payment-service",
+      "message": "POST /payments/charge request received. Routing to Stripe /v1/charges.",
+      "trace_id": "trace-str01"
+    },
+    {
+      "ts": "2026-05-12T10:58:04Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Stripe API error: HTTP 503 from api.stripe.com/v1/charges. Retry 1/3.",
+      "trace_id": "trace-str01"
+    },
+    {
+      "ts": "2026-05-12T10:58:05Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Stripe API error: HTTP 503 from api.stripe.com/v1/charges. Retry 2/3.",
+      "trace_id": "trace-str01"
+    },
+    {
+      "ts": "2026-05-12T10:58:07Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Stripe API error: HTTP 503 from api.stripe.com/v1/charges. Retry 3/3. Giving up.",
+      "trace_id": "trace-str01"
+    },
+    {
+      "ts": "2026-05-12T10:58:07Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "POST /payments/charge failed: Stripe unavailable — returning 503 to caller",
+      "trace_id": "trace-str01"
+    },
+    {
+      "ts": "2026-05-12T10:58:10Z",
+      "level": "INFO",
+      "service": "payment-service",
+      "message": "Internal health check: DB pool OK (4/20), Redis OK, queue depth 0. No internal errors.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T10:58:15Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Stripe API error: HTTP 503 from api.stripe.com/v1/payment_intents/create. External provider down.",
+      "trace_id": "trace-str02"
+    },
+    {
+      "ts": "2026-05-12T10:58:20Z",
+      "level": "INFO",
+      "service": "notification-service",
+      "message": "Order confirmation emails queued: 0 (no successful orders).",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T10:58:22Z",
+      "level": "ERROR",
+      "service": "order-service",
+      "message": "payment-service returning 503 for all charge requests. Order creation failing.",
+      "trace_id": "trace-ord10"
+    },
+    {
+      "ts": "2026-05-12T10:58:25Z",
+      "level": "WARNING",
+      "service": "payment-service",
+      "message": "Stripe status page API reports: Incident identified — api.stripe.com degraded. ETA unknown.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T10:58:30Z",
+      "level": "CRITICAL",
+      "service": "payment-service",
+      "message": "Error rate 98%. PagerDuty alert firing. All Stripe API calls failing.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T10:58:35Z",
+      "level": "INFO",
+      "service": "payment-service",
+      "message": "Application pods: 3/3 healthy. No OOM or crash. External Stripe dependency is the failure point.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-12T10:58:40Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Stripe API error: HTTP 503 from api.stripe.com/v1/refunds. Refund processing also unavailable.",
+      "trace_id": "trace-str03"
+    },
+    {
+      "ts": "2026-05-12T10:58:45Z",
+      "level": "WARNING",
+      "service": "payment-service",
+      "message": "Fallback payment processor (Adyen) available but not configured for prod traffic. Manual escalation required.",
+      "trace_id": null
+    }
+  ],
+  "deploys": [
+    {
+      "id": "deploy-pay-095",
+      "service": "payment-service",
+      "ts": "2026-05-11T16:00:00Z",
+      "author": "diana",
+      "commit": "c9d0e1f2",
+      "files_changed": 2,
+      "description": "Update Stripe client library from 5.4.0 to 5.5.1 — patch release, no breaking changes"
+    },
+    {
+      "id": "deploy-pay-094",
+      "service": "payment-service",
+      "ts": "2026-05-10T14:30:00Z",
+      "author": "ci-bot",
+      "commit": "a1b2c3d4",
+      "files_changed": 1,
+      "description": "Increase Stripe request timeout from 10s to 15s"
+    },
+    {
+      "id": "deploy-order-042",
+      "service": "order-service",
+      "ts": "2026-05-12T09:00:00Z",
+      "author": "felix",
+      "commit": "b3c4d5e6",
+      "files_changed": 4,
+      "description": "Add order cancellation flow"
+    }
+  ]
+}

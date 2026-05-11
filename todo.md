@@ -159,7 +159,7 @@ Notes:
 2026-05-10: Added ground_truth block to schema (severity, affected_service, root_cause_summary, recommended_action, deploy_id) — eval judge needs this without parsing known_root_cause. db_pool_01 has null deploy_id (no deploy culprit). 14+ logs per scenario with red herrings. 39 schema-validation tests pass.
 ```
 
-### [ ] 2.2 — Remaining 7 scenarios (3%)
+### [x] 2.2 — Remaining 7 scenarios (3%)
 Create scenarios 4-10:
 4. `bad_deploy_03.json` — missing env var
 5. `db_pool_02.json` — connection leak
@@ -173,9 +173,10 @@ Make logs realistic — include timestamps, proper log levels, stack traces wher
 ```
 Notes:
 ─────
+2026-05-10: All 5 failure classes covered (bad_deploy x3, db_pool x2, downstream_outage x2, memory_leak x2, config_regression x1). downstream_outage_02 has mismatched alert/root-cause services (api-gateway alert, auth-service root cause) — tests agent's diagnostic depth. config_regression has no deploy_id (config-map change, not code). 136 tests pass.
 ```
 
-### [ ] 2.3 — Service map + dependency graph seed data (2%)
+### [x] 2.3 — Service map + dependency graph seed data (2%)
 `data/services/service_map.json` — Define 6-8 fake services:
 - `api-gateway` (critical, team-platform)
 - `user-service` (critical, team-identity)
@@ -192,9 +193,10 @@ Include oncall channels, repo URLs (fake GitHub URLs), runbook references.
 ```
 Notes:
 ─────
+2026-05-10: Added runbooks.json alongside service_map.json + dependency_graph.json — 19 runbooks covering all 10 scenario (service, failure_class) pairs. Dependency graph edges cross-validated against service_map dependencies. user-service has no deps (avoids circular dep with auth-service). 37 tests pass.
 ```
 
-### [ ] 2.4 — Alert generator module (2%)
+### [x] 2.4 — Alert generator module (2%)
 `src/sentinel/generator/alert_gen.py`:
 - `load_scenario(scenario_id: str) -> Scenario` — loads from JSON
 - `generate_alert(scenario: Scenario) -> AlertPayload` — creates the alert webhook payload
@@ -206,9 +208,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-10: Scenario model reuses AlertSource/AlertSeverity/LogLevel/Severity/RemediationAction enums — JSON loading validates all enum fields at parse time. ScenarioLogEntry uses 'ts' (not 'timestamp') to match compact JSON field name. functions take optional scenarios_dir param for testability. 73 tests pass.
 ```
 
-### [ ] 2.5 — Log + deploy generator modules (2%)
+### [x] 2.5 — Log + deploy generator modules (2%)
 `src/sentinel/generator/log_gen.py`:
 - `generate_logs(scenario: Scenario, noise: bool = True) -> list[LogEntry]` — returns scenario logs + optional noise (unrelated info-level logs from other services to make it realistic)
 
@@ -217,9 +220,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-10: Noise entries are deterministic (no RNG), exclude both alert.service and ground_truth.affected_service, spaced evenly across time window. deploy_gen sorts most-recent-first; null commit → "n/a". 170 tests pass.
 ```
 
-### [ ] 2.6 — Seed data loader (seed.py) (1%)
+### [x] 2.6 — Seed data loader (seed.py) (1%)
 `data/seed.py` — Script that:
 1. Creates SQLite DB at configured path
 2. Runs CREATE TABLE statements for semantic memory (services, runbooks)
@@ -230,22 +234,24 @@ Run with: `python -m data.seed`
 ```
 Notes:
 ─────
+2026-05-10: seed() is async, idempotent (INSERT OR REPLACE), returns (services_count, runbooks_count). Services inserted before runbooks to satisfy FK. data/__init__.py created. Accepts optional db_path CLI arg. 15 tests pass.
 ```
 
 ---
 
 ## Phase 3 — Memory Subsystem (28-38%)
 
-### [ ] 3.1 — Memory store protocol/ABC (1%)
+### [x] 3.1 — Memory store protocol/ABC (1%)
 `src/sentinel/memory/base.py`:
 - `MemoryStore` protocol with abstract methods: `store()`, `query()`, `get()`, `delete()`
 - Keeps memory implementations swappable (SQLite now, Cosmos later)
 ```
 Notes:
 ─────
+2026-05-10: runtime_checkable Protocol with Any-typed signatures (concrete implementations add domain-specific typed methods). query() has top_k=5 default. 14 tests pass.
 ```
 
-### [ ] 3.2 — Embedding client wrapper (2%)
+### [x] 3.2 — Embedding client wrapper (2%)
 `src/sentinel/memory/embeddings.py`:
 - `EmbeddingClient` class wrapping OpenAI `text-embedding-3-small`
 - `async embed(text: str) -> list[float]`
@@ -254,9 +260,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-10: Model injected (not singleton) — tests use _FakeModel without loading torch. from_model_name() lazily imports SentenceTransformer. embed_batch deduplicates within and across calls; per-unique-text encode. 20 tests pass.
 ```
 
-### [ ] 3.3 — Semantic memory (SQLite) (2%)
+### [x] 3.3 — Semantic memory (SQLite) (2%)
 `src/sentinel/memory/semantic.py`:
 - `SemanticMemory` class implementing `MemoryStore`
 - `get_service(name: str) -> ServiceMetadata`
@@ -267,6 +274,7 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-10: get_service/get_dependencies/get_runbook + get_all_runbooks. Both caches use dicts (None cached for missing runbooks). query() returns SemanticRecord. store/delete raise NotImplementedError. Protocol assert at import time. 34 tests pass.
 ```
 
 ### [ ] 3.4 — Episodic memory (SQLite + embeddings) (3%)
@@ -719,3 +727,11 @@ These are documented for interview conversations ("what would you do next"):
 | 2026-05-10 | 1.3 | models/log_entry.py + deploy.py + remediation.py — 9 models, 3 enums. 38 tests. |
 | 2026-05-10 | 1.4 | models/memory.py + eval_result.py — EpisodicRecord, Runbook, SemanticRecord, MemoryQueryResult, EvalDimension, DimensionScore, TrajectoryScore. 20 tests. |
 | 2026-05-10 | 2.1 | data/scenarios/bad_deploy_01.json + bad_deploy_02.json + db_pool_01.json — 14+ logs each, red herrings, ground_truth block added to schema. 39 tests. |
+| 2026-05-10 | 2.2 | 7 more scenarios — bad_deploy_03, db_pool_02, downstream_outage_01/02, memory_leak_01/02, config_regression_01. All 5 failure classes. 136 tests. |
+| 2026-05-10 | 2.3 | service_map.json (8 services), dependency_graph.json (12 edges), runbooks.json (19 runbooks). 37 tests. |
+| 2026-05-10 | 2.4 | generator/scenarios.py (6 Pydantic models), generator/alert_gen.py (load_scenario, generate_alert, list_scenarios). 73 tests. |
+| 2026-05-10 | 2.5 | generator/log_gen.py (generate_logs + noise), generator/deploy_gen.py (generate_deploys). 170 tests. |
+| 2026-05-10 | 2.6 | data/seed.py — async seed() inserting 8 services + 19 runbooks into SQLite. data/__init__.py added. 15 tests. |
+| 2026-05-10 | 3.1 | memory/base.py — MemoryStore runtime_checkable Protocol (store, query, get, delete). 14 tests. |
+| 2026-05-10 | 3.2 | memory/embeddings.py — EmbeddingClient (inject model, dict cache, embed/embed_batch, asyncio.to_thread). 20 tests. |
+| 2026-05-10 | 3.3 | memory/semantic.py — SemanticMemory (get_service, get_dependencies, get_runbook, in-process cache). 34 tests. |

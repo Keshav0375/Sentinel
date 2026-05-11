@@ -1,0 +1,155 @@
+{
+  "scenario_id": "memory_leak_02",
+  "failure_class": "memory_leak",
+  "description": "Notification service WebSocket handler registers an event listener on each connection but never removes it on disconnect. Thousands of stale listeners accumulate causing memory bloat and eventual crash.",
+  "alert": {
+    "source": "datadog",
+    "service": "notification-service",
+    "metric": "process_restarts_total",
+    "threshold": 2,
+    "current_value": 5,
+    "severity": "high"
+  },
+  "known_root_cause": {
+    "type": "bad_deploy",
+    "deploy_id": "deploy-notif-019",
+    "commit": "8r7s6t5u",
+    "description": "WebSocket connection handler calls emitter.on('message', handler) for each new connection but never calls emitter.off() on disconnect. After 4,000+ connections, the EventEmitter holds thousands of live handler references, each retaining closure scope. Memory grows until OOM restart."
+  },
+  "ground_truth": {
+    "severity": "P2",
+    "affected_service": "notification-service",
+    "root_cause_summary": "deploy-notif-019 leaks event listeners on WebSocket disconnect — emitter.off() not called, 4000+ stale handlers accumulate causing repeated OOM restarts",
+    "recommended_action": "rollback",
+    "deploy_id": "deploy-notif-019"
+  },
+  "logs": [
+    {
+      "ts": "2026-05-13T18:00:00Z",
+      "level": "INFO",
+      "service": "notification-service",
+      "message": "Deployment deploy-notif-019 complete. WebSocket push notifications enabled.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T18:05:00Z",
+      "level": "INFO",
+      "service": "notification-service",
+      "message": "WebSocket connections established: 142. Memory: 280MB.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T18:30:00Z",
+      "level": "WARNING",
+      "service": "notification-service",
+      "message": "EventEmitter: possible memory leak detected — 12 listeners added for event 'message'. MaxListeners: 10.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T18:30:05Z",
+      "level": "WARNING",
+      "service": "notification-service",
+      "message": "EventEmitter warning repeated for 88 events. Listener count growing on each WebSocket connection.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T18:45:00Z",
+      "level": "INFO",
+      "service": "user-service",
+      "message": "Active user sessions: 1,240. No anomalies.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T19:00:00Z",
+      "level": "WARNING",
+      "service": "notification-service",
+      "message": "Memory usage: 890MB. Listener count: 1,440. WebSocket connections since restart: 1,440 (0 removed on disconnect).",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T19:30:00Z",
+      "level": "WARNING",
+      "service": "notification-service",
+      "message": "Memory usage: 1.4GB. Each retained handler closure holds ~350KB of scope data.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T19:50:00Z",
+      "level": "ERROR",
+      "service": "notification-service",
+      "message": "Memory usage 2.1GB. GC struggling to reclaim. Retained listener references prevent GC of closed connection scopes.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T19:55:00Z",
+      "level": "CRITICAL",
+      "service": "notification-service",
+      "message": "OOM Kill. Pod notification-service-4c8b2 terminated. Restart 1/5.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T19:56:00Z",
+      "level": "INFO",
+      "service": "notification-service",
+      "message": "Pod restarted. Memory: 260MB. WebSocket connections re-establishing.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T20:30:00Z",
+      "level": "CRITICAL",
+      "service": "notification-service",
+      "message": "OOM Kill again. Pod notification-service-4c8b2 terminated. Restart 2/5. Listeners accumulated to 2,100 in 34 minutes.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T20:55:00Z",
+      "level": "CRITICAL",
+      "service": "notification-service",
+      "message": "OOM Kill. Restart 3/5. CrashLoopBackOff pattern forming.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T21:00:10Z",
+      "level": "CRITICAL",
+      "service": "notification-service",
+      "message": "Process restarts: 5 in last 3 hours. Datadog alert firing: process_restarts_total=5 > threshold=2.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T21:00:15Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "notification-service unavailable. Real-time notification delivery failing for all connected clients.",
+      "trace_id": null
+    }
+  ],
+  "deploys": [
+    {
+      "id": "deploy-notif-019",
+      "service": "notification-service",
+      "ts": "2026-05-13T18:00:00Z",
+      "author": "yuki",
+      "commit": "8r7s6t5u",
+      "files_changed": 11,
+      "description": "Refactor notification delivery to use WebSocket persistent connections instead of HTTP polling"
+    },
+    {
+      "id": "deploy-notif-018",
+      "service": "notification-service",
+      "ts": "2026-05-12T14:00:00Z",
+      "author": "ci-bot",
+      "commit": "7q6r5s4t",
+      "files_changed": 2,
+      "description": "Increase email retry backoff from 30s to 60s"
+    },
+    {
+      "id": "deploy-user-119",
+      "service": "user-service",
+      "ts": "2026-05-13T15:00:00Z",
+      "author": "priya",
+      "commit": "6p5q4r3s",
+      "files_changed": 4,
+      "description": "Add user preference for notification frequency"
+    }
+  ]
+}

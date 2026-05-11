@@ -1,0 +1,155 @@
+{
+  "scenario_id": "config_regression_01",
+  "failure_class": "config_regression",
+  "description": "Feature flag 'enable_new_auth_flow' enabled in production config for 50% of users. New auth flow has a broken OAuth token refresh path causing login failures for half of users. No code deploy — config change only.",
+  "alert": {
+    "source": "datadog",
+    "service": "user-service",
+    "metric": "error_rate",
+    "threshold": 0.03,
+    "current_value": 0.48,
+    "severity": "high"
+  },
+  "known_root_cause": {
+    "type": "config_regression",
+    "deploy_id": null,
+    "commit": null,
+    "description": "Feature flag 'enable_new_auth_flow' set to 50% rollout via ConfigMap update (not a code deploy). The new auth flow's OAuth token refresh path calls refresh_token() with incorrect parameter order — refresh_token(client_id, token) instead of refresh_token(token, client_id). Affects ~50% of users deterministically by user_id hash."
+  },
+  "ground_truth": {
+    "severity": "P2",
+    "affected_service": "user-service",
+    "root_cause_summary": "Feature flag enable_new_auth_flow at 50% rollout — new auth flow has parameter order bug in refresh_token(). Config change, not code deploy. Disable flag to remediate.",
+    "recommended_action": "escalate",
+    "deploy_id": null
+  },
+  "logs": [
+    {
+      "ts": "2026-05-14T13:55:00Z",
+      "level": "INFO",
+      "service": "user-service",
+      "message": "Feature flag config updated: enable_new_auth_flow = 50% (was 0%). Rolling out to production.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-14T13:55:05Z",
+      "level": "INFO",
+      "service": "user-service",
+      "message": "No code deployment. Config map updated via kubectl apply. Pods reloaded flags.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-14T13:57:00Z",
+      "level": "INFO",
+      "service": "user-service",
+      "message": "New auth flow active for 48% of incoming sessions (expected ~50%).",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-14T13:58:10Z",
+      "level": "ERROR",
+      "service": "user-service",
+      "message": "TypeError: refresh_token() got unexpected keyword argument. Expected (token, client_id), received (client_id, token). User: 88821. Flag: enable_new_auth_flow=true.",
+      "trace_id": "trace-usr30"
+    },
+    {
+      "ts": "2026-05-14T13:58:11Z",
+      "level": "ERROR",
+      "service": "user-service",
+      "message": "POST /auth/token/refresh failed: TypeError — 500 returned. New auth flow path.",
+      "trace_id": "trace-usr30"
+    },
+    {
+      "ts": "2026-05-14T13:58:12Z",
+      "level": "INFO",
+      "service": "user-service",
+      "message": "POST /auth/token/refresh succeeded. User: 12044. Flag: enable_new_auth_flow=false. Legacy path unaffected.",
+      "trace_id": "trace-usr31"
+    },
+    {
+      "ts": "2026-05-14T13:58:13Z",
+      "level": "ERROR",
+      "service": "user-service",
+      "message": "TypeError: refresh_token() argument order mismatch. User: 77291. enable_new_auth_flow=true.",
+      "trace_id": "trace-usr32"
+    },
+    {
+      "ts": "2026-05-14T13:58:14Z",
+      "level": "INFO",
+      "service": "user-service",
+      "message": "GET /users/profile succeeded. User: 33190. Flag: enable_new_auth_flow=false. Legacy path healthy.",
+      "trace_id": "trace-usr33"
+    },
+    {
+      "ts": "2026-05-14T13:58:20Z",
+      "level": "ERROR",
+      "service": "user-service",
+      "message": "Pattern: all errors originate from enable_new_auth_flow=true code path. Legacy path (enable_new_auth_flow=false) has 0 errors.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-14T13:58:25Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "user-service /auth/token/refresh returning 500 for ~50% of requests. Non-deterministic from gateway perspective.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-14T13:58:30Z",
+      "level": "WARNING",
+      "service": "user-service",
+      "message": "Error rate pattern correlates exactly with feature flag assignment. No errors from flag=false users in last 90s.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-14T13:58:35Z",
+      "level": "CRITICAL",
+      "service": "user-service",
+      "message": "Error rate 48%. Datadog alert firing. Last code deploy was 6 hours ago. Config change 3 minutes ago.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-14T13:58:40Z",
+      "level": "INFO",
+      "service": "user-service",
+      "message": "Stack trace (new auth flow): TokenRefreshHandler.handle (auth/token.py:201) -> OAuthClient.refresh_token (oauth/client.py:88) -> TypeError",
+      "trace_id": "trace-usr34"
+    },
+    {
+      "ts": "2026-05-14T13:58:45Z",
+      "level": "INFO",
+      "service": "user-service",
+      "message": "Note: no matching errors in payment-service or order-service. Issue isolated to auth token refresh path.",
+      "trace_id": null
+    }
+  ],
+  "deploys": [
+    {
+      "id": "deploy-user-120",
+      "service": "user-service",
+      "ts": "2026-05-14T08:00:00Z",
+      "author": "ci-bot",
+      "commit": "5v4w3x2y",
+      "files_changed": 7,
+      "description": "Implement new_auth_flow behind feature flag enable_new_auth_flow (flag off by default)"
+    },
+    {
+      "id": "deploy-user-119",
+      "service": "user-service",
+      "ts": "2026-05-13T15:00:00Z",
+      "author": "priya",
+      "commit": "6p5q4r3s",
+      "files_changed": 4,
+      "description": "Add user preference for notification frequency"
+    },
+    {
+      "id": "deploy-auth-115",
+      "service": "auth-service",
+      "ts": "2026-05-14T11:00:00Z",
+      "author": "carlos",
+      "commit": "1z0a9b8c",
+      "files_changed": 2,
+      "description": "Extend session token TTL from 48h to 72h"
+    }
+  ]
+}
