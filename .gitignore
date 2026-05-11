@@ -59,6 +59,4 @@ CLAUDE.local.md
 .claude/settings.local.json
 
 # ── Project Documentation ────────────────────────────────────────────────────
-learning.txt
-commands.md
-student-pack-summary.md
+Extra/
