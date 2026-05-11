@@ -12,4 +12,12 @@ model: sonnet
 6. If the task involves a tool or agent, write a test in the appropriate test directory
 7. Run `pytest -xvs` on the new/changed test files to verify
 8. Update TODO.md: change `[ ]` to `[x]` for this task and add today's date + a one-line note under `Notes:`
-9. Show me a summary of what was implemented and any decisions made
+9. Show a final implementation report:
+   - **Files changed:** list every file that was created or modified
+   - **Plain English summary:** explain what was built in simple story form —
+     what problem it solves, what the code does step by step, and any key
+     decisions or trade-offs made — as if explaining to someone non-technical
+10. Save the implementation report from step 9 to:
+    Story-Reports/{phase}-{name}.md
+    where {phase} = the project phase or epic number (e.g. 1.1.1, 1.6, 2.5)
+    and   {name}  = short snake_case descriptor of the task (e.g. login_flow, data_ingestion)

@@ -1,0 +1,268 @@
+{
+  "runbooks": [
+    {
+      "id": "rb-api-gateway-bad-deploy",
+      "service_name": "api-gateway",
+      "failure_class": "bad_deploy",
+      "steps": [
+        "Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys",
+        "Identify the most recent deploy timestamp and correlate with the alert onset time",
+        "Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits",
+        "Look for changes to middleware, config loading, or environment variable reads",
+        "If culprit deploy identified within the last 2 hours, initiate rollback: `kubectl rollout undo deployment/api-gateway`",
+        "Monitor error_rate metric for 5 minutes post-rollback to confirm recovery",
+        "If rollback does not resolve, escalate to #oncall-platform with deploy ID and timeline"
+      ]
+    },
+    {
+      "id": "rb-api-gateway-downstream-outage",
+      "service_name": "api-gateway",
+      "failure_class": "downstream_outage",
+      "steps": [
+        "Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages",
+        "Verify auth-service health: `curl -s http://auth-service/health/live`",
+        "Verify user-service health: `curl -s http://user-service/health/live`",
+        "If auth-service is slow (latency cascade): check auth-service logs for slow queries or thread pool exhaustion",
+        "If a downstream service is degraded, consider enabling circuit breaker bypass for non-critical routes",
+        "Escalate to the owning team's oncall channel with the specific failing upstream dependency",
+        "Document impact scope: how many routes are affected and what percentage of user traffic"
+      ]
+    },
+    {
+      "id": "rb-api-gateway-config-regression",
+      "service_name": "api-gateway",
+      "failure_class": "config_regression",
+      "steps": [
+        "Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config`",
+        "Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml",
+        "Identify the changed config key and correlate with error pattern in logs",
+        "If a feature flag was recently toggled, check the flag state and disable it via config management",
+        "Rollback ConfigMap to previous version: `kubectl apply -f k8s/configmap.yaml` (from previous commit)",
+        "Restart pods to reload config: `kubectl rollout restart deployment/api-gateway`",
+        "Verify error rate returns to baseline within 5 minutes"
+      ]
+    },
+    {
+      "id": "rb-user-service-bad-deploy",
+      "service_name": "user-service",
+      "failure_class": "bad_deploy",
+      "steps": [
+        "Check recent deploys: `kubectl rollout history deployment/user-service`",
+        "Correlate most recent deploy timestamp with error onset in logs",
+        "Review commit diff at https://github.com/acme-corp/user-service/commits — focus on dependency changes (requirements.txt) and DB query code",
+        "Check for library version upgrades that may have breaking API changes",
+        "If dependency version bump is the likely cause, initiate rollback: `kubectl rollout undo deployment/user-service`",
+        "Check for DB migration issues: `python manage.py showmigrations` to verify no pending or failed migrations",
+        "Monitor user-service error_rate for 5 minutes post-rollback"
+      ]
+    },
+    {
+      "id": "rb-user-service-db-pool",
+      "service_name": "user-service",
+      "failure_class": "db_pool",
+      "steps": [
+        "Check connection pool utilization: look for 'pool at capacity' or 'connection pool exhausted' in logs",
+        "Identify the query holding connections: search logs for 'slow query' or 'full table scan' entries",
+        "Check for recent batch jobs or cron tasks that may have added DB load",
+        "If a recent deploy introduced new queries: `kubectl rollout undo deployment/user-service`",
+        "Temporary mitigation: scale up DB connection pool limit in config and restart pods",
+        "Add missing index if identified: coordinate with team-identity for hotfix deploy",
+        "After resolution, add query to slow query monitoring alerts"
+      ]
+    },
+    {
+      "id": "rb-user-service-config-regression",
+      "service_name": "user-service",
+      "failure_class": "config_regression",
+      "steps": [
+        "Check for recent feature flag changes in the config store",
+        "Look for partial failure pattern: ~50% error rates often indicate a flag rollout to a subset of users",
+        "Identify the flag by correlating log errors with flag assignment metadata",
+        "Disable the suspect feature flag: set rollout percentage to 0% in config management",
+        "Verify error rate drops to baseline within 2 minutes of flag disable",
+        "Notify feature owner in #oncall-identity with the flag name and bug description",
+        "Do not re-enable the flag until the underlying code bug is fixed and tested"
+      ]
+    },
+    {
+      "id": "rb-auth-service-bad-deploy",
+      "service_name": "auth-service",
+      "failure_class": "bad_deploy",
+      "steps": [
+        "Check recent auth-service deploys: `kubectl rollout history deployment/auth-service`",
+        "Look for errors referencing missing env vars (KeyError) or missing config keys — check startup logs",
+        "If KeyError on env var: check the Kubernetes Secret and ConfigMap for the missing key",
+        "Add missing secret: `kubectl create secret generic auth-secrets --from-literal=OAUTH_CLIENT_SECRET=<value>`",
+        "If adding the secret is not immediately possible, rollback: `kubectl rollout undo deployment/auth-service`",
+        "Verify api-gateway can reach auth-service after rollback: check gateway error rate",
+        "Document the missing config key and add it to the deployment checklist for future releases"
+      ]
+    },
+    {
+      "id": "rb-auth-service-downstream-outage",
+      "service_name": "auth-service",
+      "failure_class": "downstream_outage",
+      "steps": [
+        "Check if auth-service itself is healthy: `curl -s http://auth-service/health/live`",
+        "If auth-service is slow (high latency), check for slow DB queries in logs",
+        "Look for 'full table scan' or 'Seq scan' entries in logs — may indicate a missing index",
+        "If a recent deploy introduced a new DB query, rollback: `kubectl rollout undo deployment/auth-service`",
+        "As a temporary mitigation, add a DB index: `CREATE INDEX CONCURRENTLY idx_sessions_user_id ON sessions(user_id);`",
+        "Check that user-service is also healthy (auth-service depends on it for user lookup)",
+        "Alert api-gateway team (#oncall-platform) as they will see cascading latency"
+      ]
+    },
+    {
+      "id": "rb-payment-service-bad-deploy",
+      "service_name": "payment-service",
+      "failure_class": "bad_deploy",
+      "steps": [
+        "Check recent deploys: `kubectl rollout history deployment/payment-service`",
+        "IMPORTANT: Payment service changes require security review — do not rollback without notifying #oncall-payments",
+        "Identify the failing code path in logs — look for exception type and stack trace",
+        "If the deploy modified Stripe client configuration or API version, rollback immediately",
+        "Rollback: `kubectl rollout undo deployment/payment-service`",
+        "Verify Stripe webhook delivery is not affected: check Stripe dashboard for webhook errors",
+        "Post-incident: create a security review task for the offending deploy before re-merging"
+      ]
+    },
+    {
+      "id": "rb-payment-service-db-pool",
+      "service_name": "payment-service",
+      "failure_class": "db_pool",
+      "steps": [
+        "Check DB connection pool utilization in logs: look for 'pool at capacity' or timeout errors",
+        "Identify if exhaustion is traffic-driven (spike) or leak-driven (gradual over hours)",
+        "For traffic spike: scale payment-service pods — `kubectl scale deployment/payment-service --replicas=6`",
+        "For connection leak: identify the leaking query or batch job in recent deploys",
+        "Check for slow queries: look for 'full table scan' on payment_records table",
+        "Add missing index as hotfix: coordinate with team-payments for immediate deploy",
+        "Monitor pool utilization after scaling — if still exhausting, escalate to team-payments"
+      ]
+    },
+    {
+      "id": "rb-payment-service-downstream-outage",
+      "service_name": "payment-service",
+      "failure_class": "downstream_outage",
+      "steps": [
+        "Check internal payment-service health: `curl -s http://payment-service/health/live` — if healthy, the issue is external",
+        "Check Stripe status page: https://status.stripe.com — look for active incidents",
+        "Verify Stripe API connectivity: look for 'HTTP 503 from api.stripe.com' in logs",
+        "If Stripe is down: escalate to account manager and activate fallback processor (Adyen) per runbook rb-payment-service-fallback",
+        "Notify order-service team (#oncall-commerce) — they will see order creation failures",
+        "Post status update to #incidents: 'Payment processing unavailable due to Stripe outage — ETA per Stripe status page'",
+        "Do NOT attempt rollbacks — this is an external dependency issue, not a code issue"
+      ]
+    },
+    {
+      "id": "rb-order-service-bad-deploy",
+      "service_name": "order-service",
+      "failure_class": "bad_deploy",
+      "steps": [
+        "Check recent deploys: `kubectl rollout history deployment/order-service`",
+        "Correlate deploy timestamp with error onset — look for <15 minute gap",
+        "Review commit diff for changes to order creation, DB queries, or external service calls",
+        "Check if batch jobs were introduced or modified in this deploy",
+        "If batch job changes are present, check for resource leak patterns in logs (connection pool, memory)",
+        "Rollback: `kubectl rollout undo deployment/order-service`",
+        "Verify payment-service and notification-service downstream traffic normalizes after rollback"
+      ]
+    },
+    {
+      "id": "rb-order-service-db-pool",
+      "service_name": "order-service",
+      "failure_class": "db_pool",
+      "steps": [
+        "Check connection pool utilization trend: is it rising gradually (leak) or sudden (spike)?",
+        "For gradual leak: search logs for 'cursor not closed', 'connection not returned to pool', or similar warnings",
+        "Identify the leaking code path — typically a try/finally block missing cursor.close()",
+        "Check if a recent deploy introduced batch jobs or new DB query code",
+        "Immediate mitigation: restart the deployment to flush leaked connections: `kubectl rollout restart deployment/order-service`",
+        "For a hotfix: the fix is adding cursor.close() in the finally block of the offending method",
+        "After hotfix deploy, monitor pool utilization over 3 hours to confirm the leak is stopped"
+      ]
+    },
+    {
+      "id": "rb-notification-service-bad-deploy",
+      "service_name": "notification-service",
+      "failure_class": "bad_deploy",
+      "steps": [
+        "Check recent deploys: `kubectl rollout history deployment/notification-service`",
+        "Review commit for changes to WebSocket handlers, event emitters, or connection lifecycle code",
+        "If WebSocket changes: check for EventEmitter maxListeners warnings in logs — indicates listener leak",
+        "If memory is growing gradually post-deploy: this is likely a listener/resource leak",
+        "Rollback: `kubectl rollout undo deployment/notification-service`",
+        "Verify pod memory stabilizes after rollback — should stop growing within 30 minutes",
+        "The fix for listener leaks: ensure emitter.off() is called on disconnect in a finally/cleanup handler"
+      ]
+    },
+    {
+      "id": "rb-notification-service-memory-leak",
+      "service_name": "notification-service",
+      "failure_class": "memory_leak",
+      "steps": [
+        "Check memory trend in logs: is growth sudden (bad deploy) or gradual over hours (leak)?",
+        "Look for 'EventEmitter: possible memory leak' warnings — indicates listener accumulation",
+        "Check WebSocket connection handling code in the most recent deploy",
+        "If pod is in CrashLoopBackOff: `kubectl describe pod <pod>` to check OOM kill reason",
+        "Immediate mitigation: rollback to previous version — `kubectl rollout undo deployment/notification-service`",
+        "Confirm by checking if memory stabilizes at baseline (~250MB) after rollback",
+        "Root fix: ensure cleanup handlers call emitter.removeAllListeners() or emitter.off() on disconnect"
+      ]
+    },
+    {
+      "id": "rb-analytics-pipeline-bad-deploy",
+      "service_name": "analytics-pipeline",
+      "failure_class": "bad_deploy",
+      "steps": [
+        "Note: analytics-pipeline is best-effort tier — user-facing services are not blocked by this service",
+        "Check recent deploys: `kubectl rollout history deployment/analytics-pipeline`",
+        "Review commit for new caching logic, data loading, or large in-memory data structures",
+        "If memory is growing post-deploy: check logs for cache size metrics or unbounded dict growth",
+        "Rollback: `kubectl rollout undo deployment/analytics-pipeline`",
+        "After rollback, confirm pod memory returns to baseline (< 600MB)",
+        "For caching features: ensure LRU eviction and max_size are configured before re-deploying"
+      ]
+    },
+    {
+      "id": "rb-analytics-pipeline-memory-leak",
+      "service_name": "analytics-pipeline",
+      "failure_class": "memory_leak",
+      "steps": [
+        "Check memory growth rate in logs: rapid growth (>20MB/min) indicates an unbounded cache or data structure",
+        "Look for 'cache size' or 'entries' log lines — if count is unbounded, this is likely a missing eviction policy",
+        "Identify the cache/dict in code: look for module-level dict or class-level caches without max_size",
+        "Rollback the deploy that introduced the cache: `kubectl rollout undo deployment/analytics-pipeline`",
+        "After rollback, pod will restart with cleared memory — confirm it stays stable",
+        "The fix: add `maxsize=` to lru_cache or implement TTL-based eviction before re-deploying",
+        "Monitor memory for 4 hours post-fix to confirm no recurrence"
+      ]
+    },
+    {
+      "id": "rb-cdn-proxy-bad-deploy",
+      "service_name": "cdn-proxy",
+      "failure_class": "bad_deploy",
+      "steps": [
+        "Check recent Cloudflare rule or Worker deploys in the Cloudflare dashboard",
+        "Review the nginx/Cloudflare config diff for routing rule changes",
+        "If caching rules were modified: verify TTL and cache-key configuration is correct",
+        "Rollback Cloudflare Worker: use Cloudflare dashboard to revert to previous version",
+        "Clear CDN cache if stale content is being served: Cloudflare Dashboard → Caching → Purge Everything",
+        "Verify api-gateway is receiving traffic normally after CDN config rollback"
+      ]
+    },
+    {
+      "id": "rb-cdn-proxy-config-regression",
+      "service_name": "cdn-proxy",
+      "failure_class": "config_regression",
+      "steps": [
+        "Check Cloudflare dashboard for recent Page Rule or Transform Rule changes",
+        "Identify the rule change that correlates with incident onset",
+        "Disable the suspect rule in Cloudflare dashboard immediately",
+        "Verify traffic is routing correctly to api-gateway after rule disable",
+        "Review the intended vs actual rule behavior with team-platform",
+        "Re-enable rule only after testing in staging environment"
+      ]
+    }
+  ]
+}

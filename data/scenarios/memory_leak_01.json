@@ -1,0 +1,155 @@
+{
+  "scenario_id": "memory_leak_01",
+  "failure_class": "memory_leak",
+  "description": "Analytics pipeline caches query results in an unbounded dict with no TTL or eviction. Memory grows from 512MB to 4GB over 3 hours before OOM kill and pod restart.",
+  "alert": {
+    "source": "datadog",
+    "service": "analytics-pipeline",
+    "metric": "memory_usage_bytes",
+    "threshold": 3221225472,
+    "current_value": 4294967296,
+    "severity": "high"
+  },
+  "known_root_cause": {
+    "type": "bad_deploy",
+    "deploy_id": "deploy-analytics-028",
+    "commit": "3k2l1m0n",
+    "description": "Query result caching feature stores results in module-level dict `_query_cache` with no max-size, TTL, or LRU eviction. Each unique query key persists forever. Under prod query diversity, cache grows unboundedly until OOM."
+  },
+  "ground_truth": {
+    "severity": "P2",
+    "affected_service": "analytics-pipeline",
+    "root_cause_summary": "Unbounded query result cache introduced in deploy-analytics-028 accumulates 4GB of cached results over 3 hours — OOM kill at 3GB threshold",
+    "recommended_action": "rollback",
+    "deploy_id": "deploy-analytics-028"
+  },
+  "logs": [
+    {
+      "ts": "2026-05-13T01:00:05Z",
+      "level": "INFO",
+      "service": "analytics-pipeline",
+      "message": "Deployment deploy-analytics-028 complete. Query result caching enabled.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T01:00:30Z",
+      "level": "INFO",
+      "service": "analytics-pipeline",
+      "message": "Memory usage: 512MB. Nominal.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T01:30:00Z",
+      "level": "INFO",
+      "service": "analytics-pipeline",
+      "message": "Memory usage: 718MB. Cache hits: 1,240. Cache misses: 4,891.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T02:00:00Z",
+      "level": "WARNING",
+      "service": "analytics-pipeline",
+      "message": "Memory usage: 1.1GB. Cache size: 28,440 entries. No eviction policy configured.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T02:00:10Z",
+      "level": "INFO",
+      "service": "order-service",
+      "message": "Scheduled report generation triggered. 0 errors.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T02:30:00Z",
+      "level": "WARNING",
+      "service": "analytics-pipeline",
+      "message": "Memory usage: 1.8GB. GC pressure increasing. Minor GC runs: 44 in last 30min.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T03:00:00Z",
+      "level": "WARNING",
+      "service": "analytics-pipeline",
+      "message": "Memory usage: 2.6GB. Cache size: 91,200 entries. Major GC triggered.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T03:15:00Z",
+      "level": "WARNING",
+      "service": "analytics-pipeline",
+      "message": "GC pause: 2400ms. Service latency degrading during GC collection.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T03:30:00Z",
+      "level": "ERROR",
+      "service": "analytics-pipeline",
+      "message": "Memory usage: 3.4GB. OOM threshold approaching. Cache growing at 22MB/min.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T03:45:00Z",
+      "level": "ERROR",
+      "service": "analytics-pipeline",
+      "message": "Memory allocation failed for query result. Cache dict size: 147,000 entries. Process RSS: 3.9GB.",
+      "trace_id": "trace-an01"
+    },
+    {
+      "ts": "2026-05-13T03:55:00Z",
+      "level": "CRITICAL",
+      "service": "analytics-pipeline",
+      "message": "Memory usage 4GB. Datadog alert firing. Process approaching OOM kill threshold.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T03:58:00Z",
+      "level": "CRITICAL",
+      "service": "analytics-pipeline",
+      "message": "OOM Kill received. Pod analytics-pipeline-7d9f4 terminated. Kubernetes restarting.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T04:00:02Z",
+      "level": "INFO",
+      "service": "analytics-pipeline",
+      "message": "Pod restarted. Memory usage: 490MB (cache cleared on restart). Issue will recur.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-13T04:00:05Z",
+      "level": "WARNING",
+      "service": "analytics-pipeline",
+      "message": "Cache repopulating. Without eviction policy, OOM will recur in ~3 hours.",
+      "trace_id": null
+    }
+  ],
+  "deploys": [
+    {
+      "id": "deploy-analytics-028",
+      "service": "analytics-pipeline",
+      "ts": "2026-05-13T01:00:00Z",
+      "author": "sam",
+      "commit": "3k2l1m0n",
+      "files_changed": 5,
+      "description": "Add in-memory query result caching to reduce DB load on repeated dashboard queries"
+    },
+    {
+      "id": "deploy-analytics-027",
+      "service": "analytics-pipeline",
+      "ts": "2026-05-12T12:00:00Z",
+      "author": "ci-bot",
+      "commit": "2j1k0l9m",
+      "files_changed": 2,
+      "description": "Bump structlog to 24.2.0"
+    },
+    {
+      "id": "deploy-order-043",
+      "service": "order-service",
+      "ts": "2026-05-13T00:00:00Z",
+      "author": "felix",
+      "commit": "9n8o7p6q",
+      "files_changed": 3,
+      "description": "Optimize order list query with compound index on (user_id, created_at)"
+    }
+  ]
+}

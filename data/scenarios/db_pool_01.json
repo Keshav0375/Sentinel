@@ -1,0 +1,155 @@
+{
+  "scenario_id": "db_pool_01",
+  "failure_class": "db_pool",
+  "description": "Payment service connection pool exhausted under Black Friday traffic spike. All connections held by slow queries, new requests timeout.",
+  "alert": {
+    "source": "datadog",
+    "service": "payment-service",
+    "metric": "p99_latency_ms",
+    "threshold": 500,
+    "current_value": 8200,
+    "severity": "critical"
+  },
+  "known_root_cause": {
+    "type": "db_pool",
+    "deploy_id": null,
+    "commit": null,
+    "description": "Traffic spike (3.8x baseline) combined with an unindexed full-table scan in payment_records.find_pending() exhausts the 20-connection pool. New requests queue and timeout after 8s."
+  },
+  "ground_truth": {
+    "severity": "P1",
+    "affected_service": "payment-service",
+    "root_cause_summary": "DB connection pool exhausted: traffic spike + slow query on unindexed payment_records.find_pending() holding all 20 connections",
+    "recommended_action": "scale",
+    "deploy_id": null
+  },
+  "logs": [
+    {
+      "ts": "2026-05-10T18:00:05Z",
+      "level": "INFO",
+      "service": "payment-service",
+      "message": "Request rate rising: 420 req/s (baseline: 110 req/s). Monitoring.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T18:01:12Z",
+      "level": "INFO",
+      "service": "payment-service",
+      "message": "DB connection pool utilization: 14/20 connections active.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T18:01:45Z",
+      "level": "WARNING",
+      "service": "payment-service",
+      "message": "Slow query detected: payment_records.find_pending() executing full table scan. Duration: 2340ms. Missing index on status column.",
+      "trace_id": "trace-p001"
+    },
+    {
+      "ts": "2026-05-10T18:02:01Z",
+      "level": "WARNING",
+      "service": "payment-service",
+      "message": "DB connection pool utilization: 20/20 — pool at capacity. Requests will queue.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T18:02:08Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Connection pool exhausted. Queue depth: 12 requests waiting. Timeout in 8000ms.",
+      "trace_id": "trace-p002"
+    },
+    {
+      "ts": "2026-05-10T18:02:09Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Connection pool exhausted. Queue depth: 18 requests waiting.",
+      "trace_id": "trace-p003"
+    },
+    {
+      "ts": "2026-05-10T18:02:15Z",
+      "level": "INFO",
+      "service": "notification-service",
+      "message": "Processed 88 order confirmation emails successfully.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T18:02:16Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Request timeout: POST /payments/charge waited 8002ms for DB connection. Returning 503.",
+      "trace_id": "trace-p004"
+    },
+    {
+      "ts": "2026-05-10T18:02:17Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Request timeout: POST /payments/charge waited 8001ms for DB connection. Returning 503.",
+      "trace_id": "trace-p005"
+    },
+    {
+      "ts": "2026-05-10T18:02:18Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Request timeout: GET /payments/status/88241 waited 8003ms for DB connection. Returning 503.",
+      "trace_id": "trace-p006"
+    },
+    {
+      "ts": "2026-05-10T18:02:20Z",
+      "level": "CRITICAL",
+      "service": "payment-service",
+      "message": "p99 latency breached threshold: 8200ms > 500ms. Datadog alert firing.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T18:02:22Z",
+      "level": "ERROR",
+      "service": "order-service",
+      "message": "payment-service /payments/charge returning 503. Order placement failing for all users.",
+      "trace_id": "trace-q001"
+    },
+    {
+      "ts": "2026-05-10T18:02:30Z",
+      "level": "ERROR",
+      "service": "payment-service",
+      "message": "Slow query still running: payment_records.find_pending() — 47 seconds elapsed. Holding 1 connection.",
+      "trace_id": "trace-p001"
+    },
+    {
+      "ts": "2026-05-10T18:02:35Z",
+      "level": "INFO",
+      "service": "payment-service",
+      "message": "Autoscaler triggered: adding 2 additional pods. ETA: 90 seconds.",
+      "trace_id": null
+    }
+  ],
+  "deploys": [
+    {
+      "id": "deploy-pay-091",
+      "service": "payment-service",
+      "ts": "2026-05-09T16:00:00Z",
+      "author": "diana",
+      "commit": "d1e2f3a4",
+      "files_changed": 3,
+      "description": "Add retry logic for failed payment webhooks"
+    },
+    {
+      "id": "deploy-pay-090",
+      "service": "payment-service",
+      "ts": "2026-05-08T11:30:00Z",
+      "author": "ci-bot",
+      "commit": "b5c6d7e8",
+      "files_changed": 1,
+      "description": "Bump version to 4.2.1 — no functional changes"
+    },
+    {
+      "id": "deploy-order-033",
+      "service": "order-service",
+      "ts": "2026-05-10T08:00:00Z",
+      "author": "felix",
+      "commit": "e9f0a1b2",
+      "files_changed": 7,
+      "description": "Black Friday promotional pricing engine — new discount rules"
+    }
+  ]
+}

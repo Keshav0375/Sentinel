@@ -1,0 +1,11 @@
+services:
+  sentinel:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persist the SQLite database across container restarts.
+      - ./data:/app/data
+    restart: unless-stopped

@@ -1,0 +1,155 @@
+{
+  "scenario_id": "bad_deploy_01",
+  "failure_class": "bad_deploy",
+  "description": "API gateway deploy introduces null pointer in auth middleware due to missing JWT secret config key",
+  "alert": {
+    "source": "datadog",
+    "service": "api-gateway",
+    "metric": "error_rate",
+    "threshold": 0.05,
+    "current_value": 0.34,
+    "severity": "critical"
+  },
+  "known_root_cause": {
+    "type": "bad_deploy",
+    "deploy_id": "deploy-abc123",
+    "commit": "a1b2c3d4",
+    "description": "Auth middleware refactor references config key 'auth.jwt_secret' that was not provisioned in the config service for prod. NullPointerException on every authenticated request."
+  },
+  "ground_truth": {
+    "severity": "P1",
+    "affected_service": "api-gateway",
+    "root_cause_summary": "Missing config key auth.jwt_secret causes NullPointerException in AuthMiddleware.validate() after deploy-abc123",
+    "recommended_action": "rollback",
+    "deploy_id": "deploy-abc123"
+  },
+  "logs": [
+    {
+      "ts": "2026-05-10T02:44:55Z",
+      "level": "INFO",
+      "service": "api-gateway",
+      "message": "Starting deployment health check — version 2.11.0",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T02:45:10Z",
+      "level": "INFO",
+      "service": "api-gateway",
+      "message": "Health check passed. Deployment deploy-abc123 marked live.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T02:45:22Z",
+      "level": "WARNING",
+      "service": "api-gateway",
+      "message": "Config key 'auth.jwt_secret' not found in config store. Using fallback null value.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T02:47:01Z",
+      "level": "INFO",
+      "service": "user-service",
+      "message": "Routine token refresh completed for 42 sessions.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T02:58:43Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "NullPointerException in AuthMiddleware.validate() at line 87: Cannot read property 'sign' of null",
+      "trace_id": "trace-0001"
+    },
+    {
+      "ts": "2026-05-10T02:58:43Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "Request failed: POST /api/v1/auth/token — 500 Internal Server Error",
+      "trace_id": "trace-0001"
+    },
+    {
+      "ts": "2026-05-10T02:58:44Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "NullPointerException in AuthMiddleware.validate() at line 87: Cannot read property 'sign' of null",
+      "trace_id": "trace-0002"
+    },
+    {
+      "ts": "2026-05-10T02:58:44Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "Request failed: GET /api/v1/users/profile — 500 Internal Server Error",
+      "trace_id": "trace-0002"
+    },
+    {
+      "ts": "2026-05-10T02:58:45Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "NullPointerException in AuthMiddleware.validate() at line 87: Cannot read property 'sign' of null",
+      "trace_id": "trace-0003"
+    },
+    {
+      "ts": "2026-05-10T02:58:46Z",
+      "level": "CRITICAL",
+      "service": "api-gateway",
+      "message": "Error rate threshold breached: 34% of requests returning 5xx in last 60s. Alert firing.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T02:59:01Z",
+      "level": "INFO",
+      "service": "notification-service",
+      "message": "Email delivery queue processed 128 messages. No errors.",
+      "trace_id": null
+    },
+    {
+      "ts": "2026-05-10T02:59:15Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "Stack trace: AuthMiddleware.validate (middleware/auth.js:87) -> Router.handle (router/index.js:284) -> next (express/application.js:210)",
+      "trace_id": "trace-0004"
+    },
+    {
+      "ts": "2026-05-10T02:59:20Z",
+      "level": "ERROR",
+      "service": "api-gateway",
+      "message": "Downstream call to user-service /internal/verify timed out after 5000ms — upstream auth failure likely root cause",
+      "trace_id": "trace-0005"
+    },
+    {
+      "ts": "2026-05-10T03:00:01Z",
+      "level": "INFO",
+      "service": "api-gateway",
+      "message": "Datadog alert triggered: error_rate=0.34 exceeds threshold=0.05 for service api-gateway",
+      "trace_id": null
+    }
+  ],
+  "deploys": [
+    {
+      "id": "deploy-abc123",
+      "service": "api-gateway",
+      "ts": "2026-05-10T02:44:50Z",
+      "author": "ci-bot",
+      "commit": "a1b2c3d4",
+      "files_changed": 5,
+      "description": "Refactor AuthMiddleware to use configurable JWT secret from config service"
+    },
+    {
+      "id": "deploy-xyz789",
+      "service": "api-gateway",
+      "ts": "2026-05-09T14:00:00Z",
+      "author": "keshav",
+      "commit": "x7y8z9a1",
+      "files_changed": 2,
+      "description": "Update rate limiting thresholds per traffic analysis"
+    },
+    {
+      "id": "deploy-user-112",
+      "service": "user-service",
+      "ts": "2026-05-10T01:30:00Z",
+      "author": "maya",
+      "commit": "b2c3d4e5",
+      "files_changed": 3,
+      "description": "Add pagination to /users/list endpoint"
+    }
+  ]
+}
