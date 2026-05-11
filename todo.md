@@ -277,7 +277,7 @@ Notes:
 2026-05-10: get_service/get_dependencies/get_runbook + get_all_runbooks. Both caches use dicts (None cached for missing runbooks). query() returns SemanticRecord. store/delete raise NotImplementedError. Protocol assert at import time. 34 tests pass.
 ```
 
-### [ ] 3.4 — Episodic memory (SQLite + embeddings) (3%)
+### [x] 3.4 — Episodic memory (SQLite + embeddings) (3%)
 `src/sentinel/memory/episodic.py`:
 - `EpisodicMemory` class implementing `MemoryStore`
 - `store_incident(incident: Incident) -> None` — embed symptoms, store full record
@@ -289,9 +289,10 @@ This is the key learning feature. Test it: store 3 incidents, query with similar
 ```
 Notes:
 ─────
+2026-05-11: EpisodicMemory with store_incident (embedding BLOB via numpy tobytes), _scored_search internal helper shared by search_similar+query, cosine similarity in numpy. _build_symptom_text derives natural language from Incident fields. _KeywordFakeModel for deterministic ranking tests — 3-incident ranking test verifies correct ordering by cluster. 34 tests pass, 646 total.
 ```
 
-### [ ] 3.5 — Short-term memory (in-memory) (2%)
+### [x] 3.5 — Short-term memory (in-memory) (2%)
 `src/sentinel/memory/short_term.py`:
 - `ShortTermMemory` class — Python dict keyed by `incident_id`
 - `create(incident_id: str, alert: AlertPayload) -> None`
@@ -304,13 +305,14 @@ Every tool call and handoff gets logged here. This is what the eval system reads
 ```
 Notes:
 ─────
+2026-05-11: ShortTermMemory with 5 required methods + update_context (agents need to set result fields) + active_incident_ids/active_count properties. All methods sync (no I/O). get_timeline returns defensive copy. _require() helper centralises KeyError for unknown incidents. 35 tests, 681 total.
 ```
 
 ---
 
 ## Phase 4 — Tool Layer (38-50%)
 
-### [ ] 4.1 — Tool registry pattern (1%)
+### [x] 4.1 — Tool registry pattern (1%)
 `src/sentinel/tools/registry.py`:
 - Central list of all tools
 - Each tool is a standalone function decorated with `@function_tool`
@@ -318,9 +320,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-11: ToolDeps dataclass (semantic_memory, episodic_memory, scenario). build_tools() factory with lazy imports for all 8 tools. Each tool module has make_*() factory with correct signature + NotImplementedError stub (replaced in 4.2-4.8). Closure pattern verified in tests. 25 tests, 706 total.
 ```
 
-### [ ] 4.2 — `get_service_metadata` tool (2%)
+### [x] 4.2 — `get_service_metadata` tool (2%)
 `src/sentinel/tools/service_lookup.py`:
 - Takes: service name (str)
 - Returns: ServiceMetadata (team, tier, deps, oncall, runbook summary)
@@ -329,9 +332,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-11: Logic in _build_service_response() + _format_record() for testability without ToolContext. Returns human-readable multiline string (name, team, tier, oncall, repo, deps, runbooks with 3-step preview). Unknown service → error string (never raises). 34 tests, 740 total.
 ```
 
-### [ ] 4.3 — `fetch_logs` tool (2%)
+### [x] 4.3 — `fetch_logs` tool (2%)
 `src/sentinel/tools/log_fetcher.py`:
 - Takes: LogQuery (service, time range, level filter)
 - Returns: list of LogEntry objects
@@ -340,9 +344,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-11: Flat params (service, start_time, end_time, level_filter, keyword_filter) with strict_mode=False for optional defaults. Level filter = minimum severity (ERROR → ERROR+CRITICAL). Logic in _fetch_logs/_filter_logs/_format_logs/_parse_iso for testability. Noise filtered automatically by service name. 43 tests, 783 total.
 ```
 
-### [ ] 4.4 — `list_recent_deploys` tool (2%)
+### [x] 4.4 — `list_recent_deploys` tool (2%)
 `src/sentinel/tools/deploy_checker.py`:
 - Takes: service name, hours_back (default 2)
 - Returns: list of Deploy objects sorted by timestamp desc
@@ -350,9 +355,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-11: Reference time = max(latest log ts, latest deploy ts) from scenario data — avoids datetime.now() mismatch with historical scenario timestamps. Filter by service + time window. hours_back=2 correctly isolates culprit deploy from bad_deploy_01. Logic in _list_recent_deploys/_filter_deploys/_format_deploys/_get_reference_time. 36 tests, 819 total.
 ```
 
-### [ ] 4.5 — `search_past_incidents` tool (2%)
+### [x] 4.5 — `search_past_incidents` tool (2%)
 `src/sentinel/tools/incident_search.py`:
 - Takes: symptom_query (str), top_k (int, default 5)
 - Returns: list of EpisodicRecord with similarity scores
@@ -361,9 +367,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-11: Calls memory.query() for MemoryQueryResult (records + scores). Logic in _search_past_incidents/_format_results for testability. Formats each record with service, severity, symptoms, root_cause, resolution, mttr, similarity score. 33 tests, 852 total.
 ```
 
-### [ ] 4.6 — `draft_rollback_pr` + `draft_hotfix` tools (2%)
+### [x] 4.6 — `draft_rollback_pr` + `draft_hotfix` tools (2%)
 `src/sentinel/tools/remediation_tools.py`:
 - `draft_rollback_pr`: Takes deploy_id + justification → Returns RollbackPR (title, body, target branch)
 - `draft_hotfix`: Takes file_path + fix_description → Returns HotfixPatch (diff string, test suggestions)
@@ -371,9 +378,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-11: Pure template generators — no deps injected, make_remediation_tools() returns list[FunctionTool]. _draft_rollback_pr generates PR with title/branch/checklist/approval warning. _draft_hotfix generates unified diff template + test suggestions. Both validate empty/whitespace inputs. 39 tests, 891 total.
 ```
 
-### [ ] 4.7 — `draft_slack_summary` tool (1%)
+### [x] 4.7 — `draft_slack_summary` tool (1%)
 `src/sentinel/tools/comms_tools.py`:
 - Takes: full incident timeline dict
 - Returns: formatted Slack summary string (Impact / Root Cause / Timeline / Status / Action Items / ETA)
@@ -381,9 +389,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-11: Accepts JSON (preferred) or raw text. _parse_incident_data tries JSON with 8 keys (service, severity, impact, root_cause, timeline, status, action_items, eta), falls back to raw text in template. _format_slack_message applies Slack mrkdwn template. cast() for pyright strict mode on json.loads. 32 tests, 923 total.
 ```
 
-### [ ] 4.8 — `request_human_approval` HITL gate (2%)
+### [x] 4.8 — `request_human_approval` HITL gate (2%)
 `src/sentinel/tools/hitl.py`:
 - Takes: ApprovalRequest (action, risk_level, evidence_summary, proposed_by)
 - MVP: prints the request to terminal, waits for `input()` — `approve` or `reject`
@@ -393,6 +402,7 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-11: Injectable ApprovalFn callback (default: _terminal_approval via asyncio.to_thread(input)). structlog logs every decision with action/risk/status/comment. Unknown decisions treated as REJECTED. High-risk display uses "!!!" indicator. _format_request_display + _format_result extracted. 32 tests, 955 total.
 ```
 
 ---
