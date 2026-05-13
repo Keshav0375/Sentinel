@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -50,6 +50,36 @@ class TimelineEntry(BaseModel):
     agent_name: str
     action: str
     result_summary: str
+
+
+class TriageResult(BaseModel):
+    """Structured output produced by the Triage Agent.
+
+    The agent populates this after calling get_service_metadata and
+    search_past_incidents. It drives every downstream decision: severity
+    determines SLA, affected_service scopes log and deploy queries,
+    is_duplicate short-circuits re-investigation.
+    """
+
+    severity: Severity
+    affected_service: str
+    is_duplicate: bool
+    recommended_action: str
+
+
+class IncidentSummary(BaseModel):
+    """Final outcome returned by the Orchestrator Agent after the full pipeline runs.
+
+    This is what the API layer surfaces to callers and what the eval system
+    uses to determine whether the pipeline reached a terminal state correctly.
+    """
+
+    status: Literal["resolved", "pending_approval", "escalated"]
+    affected_service: str
+    severity: Severity
+    root_cause_summary: str
+    action_taken: str
+    next_steps: list[str] = []
 
 
 class Incident(BaseModel):

@@ -409,7 +409,7 @@ Notes:
 
 ## Phase 5 — Agent Definitions (50-68%)
 
-### [ ] 5.1 — System prompt files (2%)
+### [x] 5.1 — System prompt files (2%)
 Create `src/sentinel/agents/prompts/` directory with text files:
 - `orchestrator.txt` — role, handoff rules, tool-call cap, incident workflow
 - `triage.txt` — classification rules, severity definitions, dedup logic
@@ -422,9 +422,10 @@ System prompts are loaded from files, not hardcoded strings. This makes prompt i
 ```
 Notes:
 ─────
+2026-05-12: Created all 6 prompt .txt files + src/sentinel/agents/loader.py (load_prompt with lru_cache). All prompts under 800 tokens, start with role declaration, and include explicit tool names + output format. HITL non-negotiable constraint encoded in remediation.txt and enforced by test. 35 tests pass (990 total).
 ```
 
-### [ ] 5.2 — Triage Agent (3%)
+### [x] 5.2 — Triage Agent (3%)
 `src/sentinel/agents/triage.py`:
 - Define Agent with name, instructions (from prompt file), tools (`get_service_metadata`, `search_past_incidents`), model (`gpt-4o-mini`)
 - Output: the agent should produce a `TriageResult` (severity, service, is_duplicate, recommended_action)
@@ -432,9 +433,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: TriageResult added to models/incident.py (severity, affected_service, is_duplicate, recommended_action). build_triage_agent() factory in agents/triage.py uses OpenAIChatCompletionsModel + AsyncOpenAI (Groq-compatible). output_type=TriageResult forces structured output. 20 tests pass — structural tests verify name, tool set (exactly 2 tools), model, no handoffs, output_type, and instructions content.
 ```
 
-### [ ] 5.3 — Log Analyst Agent (3%)
+### [x] 5.3 — Log Analyst Agent (3%)
 `src/sentinel/agents/log_analyst.py`:
 - Tools: `fetch_logs`, `get_service_metadata`
 - Model: `gpt-4o`
@@ -443,9 +445,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: build_log_analyst_agent() factory in agents/log_analyst.py; tools=[fetch_logs, get_service_metadata]; output_type=LogAnalysis; model=llama-3.3-70b-versatile (Groq analysis model). Accepts None scenario (fetch_logs returns error at call time, not construction time). 21 tests pass — structural tests + LogAnalysis model validation.
 ```
 
-### [ ] 5.4 — Deploy Correlator Agent (2%)
+### [x] 5.4 — Deploy Correlator Agent (2%)
 `src/sentinel/agents/deploy_correlator.py`:
 - Tools: `list_recent_deploys`
 - Model: `gpt-4o-mini`
@@ -454,9 +457,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: build_deploy_correlator_agent() factory; exactly 1 tool (list_recent_deploys); output_type=DeployCorrelation; model=llama-3.1-8b-instant. DeployCorrelation model validated (null suspect, multiple deploys, confidence range, JSON roundtrip with nested Deploy). 25 tests pass.
 ```
 
-### [ ] 5.5 — Remediation Agent (3%)
+### [x] 5.5 — Remediation Agent (3%)
 `src/sentinel/agents/remediation.py`:
 - Tools: `draft_rollback_pr`, `draft_hotfix`, `request_human_approval`
 - Model: `gpt-4o`
@@ -465,9 +469,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: build_remediation_agent() factory; tools=[draft_rollback_pr, draft_hotfix, request_human_approval]; output_type=RemediationPlan; model=llama-3.3-70b-versatile. Accepts injectable approval_fn for test/Phase2 swap. Critical HITL safety test + forbidden-tool test added. Fixed pyright list[FunctionTool]→list[Tool] covariance by explicit annotation. 27 tests pass.
 ```
 
-### [ ] 5.6 — Comms Agent (2%)
+### [x] 5.6 — Comms Agent (2%)
 `src/sentinel/agents/comms.py`:
 - Tools: `draft_slack_summary`
 - Model: `gpt-4o-mini`
@@ -476,9 +481,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: SlackSummary model added to models/comms.py (slack_message + recipients). build_comms_agent() factory; 1 tool (draft_slack_summary); output_type=SlackSummary; model=llama-3.1-8b-instant. Tests verify all 6 required sections present in instructions, #incidents channel, single tool scope. 24 tests pass.
 ```
 
-### [ ] 5.7 — Orchestrator Agent + Handoff Wiring (3%)
+### [x] 5.7 — Orchestrator Agent + Handoff Wiring (3%)
 `src/sentinel/agents/orchestrator.py`:
 - This is the top-level agent that receives the alert and coordinates everything
 - Handoffs: `[triage_agent, log_analyst, deploy_correlator, remediation_agent, comms_agent]`
@@ -489,13 +495,14 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: IncidentSummary model added to models/incident.py (status Literal + severity + service + root_cause_summary + action_taken + next_steps). build_orchestrator_agent() takes 5 pre-built specialist agents + groq_client; handoffs=[triage,log_analyst,deploy_correlator,remediation,comms]; no tools (routes via handoffs only); SPECIALIST_ORDER tuple documents+enforces wiring sequence. 26 tests pass; 178 total agent tests pass.
 ```
 
 ---
 
 ## Phase 6 — API + End-to-End Pipeline (68-78%)
 
-### [ ] 6.1 — FastAPI webhook receiver (2%)
+### [x] 6.1 — FastAPI webhook receiver (2%)
 `src/sentinel/api/webhooks.py`:
 - `POST /webhooks/alert` — accepts AlertPayload, assigns incident_id, triggers orchestrator
 - Idempotency: check alert_id, skip if already processed (dedup dict, 60s TTL)
@@ -503,9 +510,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: AlertDeduplicator (monotonic-time TTL cache, check/record/evict_expired). make_alert_router() factory with injectable deduplicator + STM + pipeline_fn. Route: dedup → incident_id generation → STM.create() → background_tasks.add_task(pipeline_fn). pyright: ignore[reportUnusedFunction] for inner FastAPI route function. 23 tests pass.
 ```
 
-### [ ] 6.2 — Incident query endpoint (1%)
+### [x] 6.2 — Incident query endpoint (1%)
 `src/sentinel/api/incidents.py`:
 - `GET /incidents` — list recent incidents (from short-term memory)
 - `GET /incidents/{id}` — get full incident timeline
@@ -513,9 +521,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: make_incidents_router(stm) → GET /incidents (IncidentListResponse) + GET /incidents/{id} (IncidentDetail, 404 on miss). make_health_router(stm|None) → GET /health (HealthResponse with active_incidents). Response models as API-layer DTOs in their own modules. 20 tests pass.
 ```
 
-### [ ] 6.3 — FastAPI app entrypoint + lifespan (2%)
+### [x] 6.3 — FastAPI app entrypoint + lifespan (2%)
 `src/sentinel/main.py`:
 - Create FastAPI app with lifespan handler
 - On startup: init DB, seed if needed, create memory clients, create agent instances (DI)
@@ -524,9 +533,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: lifespan(): create_tables → seed → EmbeddingClient+memory → groq_client+set_default_openai_client → 5 specialists → orchestrator → deduplicator → make_pipeline_fn → include_router x3. make_pipeline_fn() extracted as testable factory (Runner.run mock, STM status update, exception→ESCALATED, KeyError guard). 13 tests pass.
 ```
 
-### [ ] 6.4 — Tracing/trajectory capture (2%)
+### [x] 6.4 — Tracing/trajectory capture (2%)
 `src/sentinel/infra/tracing.py`:
 - Capture every agent step: tool calls, handoffs, LLM responses
 - Store as structured timeline in short-term memory
@@ -535,9 +545,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: SentinelTracer(TracingProcessor) — on_span_end converts FunctionSpanData→TimelineEntry (tool calls) + HandoffSpanData→TimelineEntry (handoffs); AgentSpanData/GenerationSpanData written to trajectory JSON only. incident_id via span.trace_metadata["incident_id"] (no extra mapping needed). _save_trajectory() writes reports/trajectories/{incident_id}.json. main.py updated: import agent_trace + SentinelTracer, wrap Runner.run in trace() ctx, add_trace_processor(tracer) in lifespan. 31 new tracing tests + 13 main tests = 44 pass.
 ```
 
-### [ ] 6.5 — End-to-end smoke test (3%)
+### [x] 6.5 — End-to-end smoke test (3%)
 `scripts/run_scenario.py`:
 - CLI script: `python scripts/run_scenario.py bad_deploy_01`
 - Loads scenario → generates alert → POSTs to webhook → waits for resolution
@@ -546,9 +557,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: run_scenario.py CLI: --list/--help/--scenario_id dispatch; run_scenario() async factory builds full agent pipeline with scenario injected into log/deploy tools; SentinelTracer+agent_trace() wired; _print_timeline/_print_header helpers. Tests: importlib loads script, arg handling, FileNotFoundError for unknown scenario, helper function output, 3 scenario load validations. 24 tests pass.
 ```
 
-### [ ] 6.6 — SSE event bus for real-time pipeline updates (3%)
+### [x] 6.6 — SSE event bus for real-time pipeline updates (3%)
 `src/sentinel/infra/event_bus.py`:
 - `EventBus` class using `asyncio.Queue` — one queue per connected client
 - Event types: `agent_started`, `agent_completed`, `tool_called`, `tool_result`, `hitl_requested`, `hitl_resolved`, `incident_resolved`
@@ -558,6 +570,7 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-12: EventBus with fan-out pub/sub (asyncio.Queue per subscriber), PipelineEvent model, EventType enum, close_incident sentinel pattern. 27 tests.
 ```
 
 ### [ ] 6.7 — SSE streaming endpoint + HITL approval API (2%)
