@@ -573,7 +573,7 @@ Notes:
 2026-05-12: EventBus with fan-out pub/sub (asyncio.Queue per subscriber), PipelineEvent model, EventType enum, close_incident sentinel pattern. 27 tests.
 ```
 
-### [ ] 6.7 — SSE streaming endpoint + HITL approval API (2%)
+### [x] 6.7 — SSE streaming endpoint + HITL approval API (2%)
 `src/sentinel/api/events.py`:
 - `GET /events/{incident_id}` — SSE endpoint, yields `PipelineEvent` as `text/event-stream`
 - Uses `EventBus` to subscribe to events for a specific incident
@@ -583,9 +583,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-13: events.py already implemented (HitlGateRegistry, HitlGate, make_api_approval_fn, make_events_router, set/reset_current_incident). Tests were present but 3 SSE tests hung due to cross-event-loop asyncio.Queue issue. Fixed by converting all SSE tests to async using httpx.AsyncClient+ASGITransport+asyncio.TaskGroup — same event loop as ASGI app ensures reliable close_incident signaling. 33/33 tests pass.
 ```
 
-### [ ] 6.8 — Live incident dashboard (single HTML file) (4%)
+### [x] 6.8 — Live incident dashboard (single HTML file) (4%)
 `src/sentinel/dashboard/index.html`:
 - Served by FastAPI at `GET /` via `StaticFiles` or inline route
 - No framework — vanilla HTML + JS + CSS using `EventSource` API for SSE
@@ -600,9 +601,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-13: dashboard/index.html (dark GitHub theme, vanilla JS+CSS, EventSource SSE, HITL overlay with approve/reject, metrics bar). api/scenarios.py (GET /api/scenarios → scenario list + alert payloads). infra/dashboard_emitter.py (DashboardEventEmitter TracingProcessor → publishes agent_started/completed/tool_called/tool_result to EventBus). main.py updated (GET / route, DashboardEventEmitter registration, scenarios router). 37/37 tests pass.
 ```
 
-### [ ] 6.9 — Eval results display page (2%)
+### [x] 6.9 — Eval results display page (2%)
 `src/sentinel/dashboard/eval.html`:
 - Served at `GET /eval`
 - Shows latest eval report: per-scenario scores, per-dimension averages, pass/fail
@@ -613,13 +615,14 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-13: dashboard/eval.html (dark GitHub theme, per-scenario score table, dimension averages, color-coded cells, pass/fail, summary cards). api/eval_report.py (GET /api/eval-report → reads reports/eval_report.json, 404 if missing). main.py updated (GET /eval route, eval_report router). 18/18 tests pass.
 ```
 
 ---
 
 ## Phase 7 — Trajectory Eval (78-90%)
 
-### [ ] 7.1 — Eval rubric + judge prompts (2%)
+### [x] 7.1 — Eval rubric + judge prompts (2%)
 `src/sentinel/eval/rubric.py`:
 - Define the 6 eval dimensions as enum
 - Write judge system prompt: given a trajectory JSON + scenario ground truth, score each dimension 0-5 with reasoning
@@ -627,9 +630,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-13: rubric.py — DimensionRubric frozen dataclass, DIMENSION_RUBRICS dict (all 6 dimensions, 0-5 levels each), JUDGE_SYSTEM_PROMPT built programmatically from rubric data, format_judge_input() helper. 29/29 tests pass.
 ```
 
-### [ ] 7.2 — LLM-as-judge implementation (3%)
+### [x] 7.2 — LLM-as-judge implementation (3%)
 `src/sentinel/eval/judge.py`:
 - `evaluate_trajectory(trajectory: dict, ground_truth: dict) -> TrajectoryScore`
 - Calls the judge model with the rubric prompt
@@ -638,9 +642,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-13: judge.py — evaluate_trajectory() async fn (Groq-compatible AsyncOpenAI, 4 attempts with 1s/2s/4s backoff), _parse_judge_response() (strips markdown fences, handles missing dims, clamps scores), _zero_score() fallback. 28/28 tests pass.
 ```
 
-### [ ] 7.3 — Eval runner (batch scenarios) (3%)
+### [x] 7.3 — Eval runner (batch scenarios) (3%)
 `src/sentinel/eval/runner.py` + `scripts/run_eval.py`:
 - Iterates over all 10 scenarios (or a subset)
 - For each: generate alert → run pipeline → capture trajectory → judge it
@@ -649,9 +654,10 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-13: runner.py — EvalRunResult dataclass, _auto_approve (always approves for batch eval), run_scenario_eval() (builds fresh agent set per scenario, auto-approve HITL, loads trajectory, judges), run_eval() (batch loop with error isolation), summary_stats() + scores_from_results() helpers. scripts/run_eval.py — CLI with --scenarios + --judge-model args, text table output, writes eval_report.json + eval_report.md. 20/20 tests pass.
 ```
 
-### [ ] 7.4 — Eval report generation (2%)
+### [x] 7.4 — Eval report generation (2%)
 `src/sentinel/eval/report.py`:
 - Takes list of TrajectoryScores → produces:
   1. JSON report (machine-readable, for CI gates later)
@@ -661,25 +667,27 @@ Notes:
 ```
 Notes:
 ─────
+2026-05-13: report.py — DimensionStats frozen dataclass, EvalReport frozen dataclass, build_report() (avg/pass rate/dim stats), to_json_dict() (dashboard-compatible shape), to_markdown() (3-section MD), write_json/write_markdown/write_reports() (create parent dirs). scripts/run_eval.py updated to use report.py (removed duplicate private fns). 44/44 tests pass.
 ```
 
 ---
 
 ## Phase 8 — Polish + Demo (90-100%)
 
-### [ ] 8.1 — README.md (3%)
+### [x] 8.1 — README.md (3%)
 Write the public-facing README:
 - Project title + one-line description
 - Architecture diagram (Mermaid or ASCII)
 - Features list (what it does)
 - Quick start (clone, .env, docker-compose up, fire a scenario)
-- Demo section (link to Loom or GIF)
+- Demo section (link to Loom or GIF) -- leave empty for now
 - Tech stack table
 - Eval results summary
 - Phase 2 roadmap teaser
 ```
 Notes:
 ─────
+2026-05-13: README.md — ASCII pipeline diagram, 8-bullet feature list, Quick Start (docker + bare-metal paths), demo placeholder, tech stack table, eval dimensions + pass threshold, project structure tree, 3 architecture decision notes, Phase 2 roadmap table, test run command.
 ```
 
 ### [ ] 8.2 — Demo script + recording (3%)
@@ -758,3 +766,4 @@ These are documented for interview conversations ("what would you do next"):
 | 2026-05-10 | 3.1 | memory/base.py — MemoryStore runtime_checkable Protocol (store, query, get, delete). 14 tests. |
 | 2026-05-10 | 3.2 | memory/embeddings.py — EmbeddingClient (inject model, dict cache, embed/embed_batch, asyncio.to_thread). 20 tests. |
 | 2026-05-10 | 3.3 | memory/semantic.py — SemanticMemory (get_service, get_dependencies, get_runbook, in-process cache). 34 tests. |
+| 2026-05-13 | 6.9 | dashboard/eval.html (eval results page), api/eval_report.py (GET /api/eval-report), main.py (GET /eval route). 18 tests. |
