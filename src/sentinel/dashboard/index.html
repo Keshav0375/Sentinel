@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sentinel — Live Incident Dashboard</title>
+  <style>
+    :root {
+      --bg:         #0d1117;
+      --surface:    #161b22;
+      --surface-2:  #21262d;
+      --border:     #30363d;
+      --text:       #e6edf3;
+      --muted:      #8b949e;
+      --blue:       #388bfd;
+      --blue-dim:   rgba(56,139,253,.15);
+      --green:      #3fb950;
+      --green-dim:  rgba(63,185,80,.15);
+      --amber:      #d29922;
+      --amber-dim:  rgba(210,153,34,.15);
+      --red:        #f85149;
+      --red-dim:    rgba(248,81,73,.15);
+      --purple:     #a371f7;
+      --r:          6px;
+      --sans:       -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+      --mono:       ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;
+         line-height:1.5;min-height:100vh;display:flex;flex-direction:column}
+
+    /* ── Header ── */
+    header{background:var(--surface);border-bottom:1px solid var(--border);
+           padding:10px 20px;display:flex;align-items:center;
+           justify-content:space-between;gap:12px;flex-wrap:wrap;
+           position:sticky;top:0;z-index:100}
+    .brand{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600}
+    .brand-sub{color:var(--muted);font-weight:400;font-size:13px}
+    .fire-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    select{background:var(--bg);border:1px solid var(--border);color:var(--text);
+           padding:5px 9px;border-radius:var(--r);font-size:13px;font-family:var(--sans);
+           min-width:220px;cursor:pointer}
+    select:focus{outline:2px solid var(--blue);outline-offset:1px}
+    .btn{padding:5px 14px;border:none;border-radius:var(--r);font-size:13px;
+         font-family:var(--sans);font-weight:500;cursor:pointer;transition:opacity .15s}
+    .btn:hover{opacity:.85}  .btn:disabled{opacity:.4;cursor:not-allowed}
+    .btn-primary{background:var(--blue);color:#fff}
+    .btn-success{background:var(--green);color:#000}
+    .btn-danger {background:var(--red);color:#fff}
+    .btn-outline{background:transparent;color:var(--text);
+                 border:1px solid var(--border)}
+
+    /* ── Incident bar ── */
+    #inc-bar{background:var(--surface);border-bottom:1px solid var(--border);
+             padding:6px 20px;display:none;align-items:center;gap:16px;
+             font-size:12px;flex-wrap:wrap}
+    #inc-bar.on{display:flex}
+    .itag{display:flex;align-items:center;gap:5px}
+    .itag-lbl{color:var(--muted)}
+    .sev{padding:1px 8px;border-radius:12px;font-size:11px;font-weight:700;
+         text-transform:uppercase;letter-spacing:.04em}
+    .sev-critical{background:var(--red-dim);color:var(--red)}
+    .sev-high    {background:var(--amber-dim);color:var(--amber)}
+    .sev-warning {background:var(--blue-dim);color:var(--blue)}
+    .sev-low,.sev-info{background:var(--green-dim);color:var(--green)}
+    .pill{padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600}
+    .pill-running {background:var(--blue-dim);color:var(--blue)}
+    .pill-resolved{background:var(--green-dim);color:var(--green)}
+    .pill-escalated{background:var(--red-dim);color:var(--red)}
+
+    /* ── Main ── */
+    main{flex:1;padding:20px;max-width:1400px;margin:0 auto;width:100%}
+    #empty{text-align:center;padding:80px 20px;color:var(--muted)}
+    #empty h2{font-size:20px;margin-bottom:8px;color:var(--text)}
+
+    /* ── Pipeline ── */
+    #pipeline{display:none}
+    #pipeline.on{display:block}
+    .sec-lbl{font-size:11px;font-weight:700;text-transform:uppercase;
+             letter-spacing:.08em;color:var(--muted);margin-bottom:10px}
+    .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
+           gap:10px;margin-bottom:20px}
+
+    /* ── Agent card ── */
+    .acard{background:var(--surface);border:1px solid var(--border);
+           border-radius:var(--r);overflow:hidden;
+           transition:border-color .25s,box-shadow .25s}
+    .acard.active{border-color:var(--blue);
+                  box-shadow:0 0 0 1px var(--blue),0 0 14px rgba(56,139,253,.12)}
+    .acard.done  {border-color:var(--green)}
+    .acard.err   {border-color:var(--red)}
+    .acard.hitl  {border-color:var(--amber);
+                  box-shadow:0 0 0 1px var(--amber),0 0 14px rgba(210,153,34,.12)}
+    .ch{padding:9px 11px;display:flex;align-items:center;gap:7px;
+        border-bottom:1px solid var(--border)}
+    .dot{width:8px;height:8px;border-radius:50%;background:var(--border);
+         flex-shrink:0;transition:background .25s}
+    .acard.active .dot{background:var(--blue);animation:pulse 1.4s infinite}
+    .acard.done   .dot{background:var(--green)}
+    .acard.err    .dot{background:var(--red)}
+    .acard.hitl   .dot{background:var(--amber)}
+    @keyframes pulse{
+      0%,100%{box-shadow:0 0 0 2px rgba(56,139,253,.3)}
+      50%     {box-shadow:0 0 0 5px rgba(56,139,253,.08)}}
+    .ct{font-size:13px;font-weight:600}
+    .cb{padding:9px 11px;min-height:44px}
+    .tool-list{list-style:none}
+    .ti{padding:4px 0;border-bottom:1px solid var(--border);font-size:12px}
+    .ti:last-child{border-bottom:none}
+    .tn{font-family:var(--mono);font-weight:600;color:var(--purple);
+        display:flex;align-items:center;gap:4px;word-break:break-all}
+    .tr{color:var(--muted);margin-top:2px;font-family:var(--mono);font-size:11px;
+        max-height:72px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+    .tp{color:var(--muted);font-style:italic;font-size:11px}
+    .ce{color:var(--muted);font-size:12px;font-style:italic}
+
+    /* ── Resolution banner ── */
+    #res-banner{display:none;background:var(--green-dim);border:1px solid var(--green);
+                border-radius:var(--r);padding:10px 14px;margin-bottom:14px;
+                color:var(--green);font-weight:600;align-items:center;gap:8px}
+    #res-banner.on{display:flex}
+
+    /* ── Timeline log ── */
+    #log-box{background:var(--bg);border:1px solid var(--border);
+             border-radius:var(--r);padding:10px;font-family:var(--mono);
+             font-size:11px;max-height:180px;overflow-y:auto;color:var(--muted)}
+    .le{margin-bottom:2px}
+    .le-started   {color:var(--blue)}
+    .le-completed {color:var(--green)}
+    .le-tool      {color:var(--purple)}
+    .le-result    {color:var(--muted)}
+    .le-hitl      {color:var(--amber)}
+    .le-resolved  {color:var(--green);font-weight:600}
+    .le-error     {color:var(--red)}
+    .le-system    {color:var(--muted);font-style:italic}
+
+    /* ── HITL overlay ── */
+    #hitl-wrap{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);
+               z-index:200;align-items:center;justify-content:center;padding:20px}
+    #hitl-wrap.on{display:flex}
+    .hcard{background:var(--surface);border:2px solid var(--amber);
+           border-radius:8px;padding:22px;max-width:580px;width:100%;
+           box-shadow:0 0 40px rgba(210,153,34,.18)}
+    .hcard h2{font-size:15px;color:var(--amber);margin-bottom:14px;
+              display:flex;align-items:center;gap:8px}
+    #hitl-text{background:var(--bg);border:1px solid var(--border);
+               border-radius:var(--r);padding:11px;font-family:var(--mono);
+               font-size:11.5px;white-space:pre-wrap;max-height:280px;
+               overflow-y:auto;margin-bottom:14px;color:var(--text)}
+    .hbtns{display:flex;gap:10px;flex-wrap:wrap}
+    #rej-comment{width:100%;margin-top:10px;background:var(--bg);
+                 border:1px solid var(--border);border-radius:var(--r);
+                 color:var(--text);padding:7px;font-family:var(--sans);
+                 font-size:13px;display:none;resize:vertical;min-height:56px}
+    #rej-comment.on{display:block}
+    #rej-submit{margin-top:8px;display:none}
+    #rej-submit.on{display:block}
+
+    /* ── Metrics bar ── */
+    footer{background:var(--surface);border-top:1px solid var(--border);
+           padding:7px 20px;display:flex;align-items:center;gap:22px;
+           font-size:12px;color:var(--muted);flex-wrap:wrap}
+    .met{display:flex;align-items:center;gap:5px}
+    .mv{font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
+    .flink{margin-left:auto;color:var(--muted);font-size:12px;text-decoration:none}
+    .flink:hover{color:var(--text)}
+  </style>
+</head>
+<body>
+
+<!-- ═══ HEADER ═══════════════════════════════════════════════════════════════ -->
+<header>
+  <div class="brand">
+    🛡 Sentinel
+    <span class="brand-sub">— Live Incident Dashboard</span>
+  </div>
+  <div class="fire-row">
+    <select id="sce-sel"><option value="">Loading scenarios…</option></select>
+    <button class="btn btn-primary" id="fire-btn" onclick="fireScenario()" disabled>
+      ⚡ Fire Scenario
+    </button>
+  </div>
+</header>
+
+<!-- ═══ INCIDENT BAR ═══════════════════════════════════════════════════════ -->
+<div id="inc-bar">
+  <div class="itag"><span class="itag-lbl">Incident</span>
+    <code id="ib-id" style="font-family:var(--mono);font-size:11px"></code></div>
+  <div class="itag"><span class="itag-lbl">Service</span>
+    <strong id="ib-svc"></strong></div>
+  <div class="itag"><span class="itag-lbl">Severity</span>
+    <span id="ib-sev" class="sev"></span></div>
+  <div class="itag"><span class="itag-lbl">Status</span>
+    <span id="ib-status" class="pill pill-running">Running</span></div>
+  <div class="itag"><span class="itag-lbl">Elapsed</span>
+    <span id="ib-elapsed" class="mv">0s</span></div>
+</div>
+
+<!-- ═══ MAIN ═════════════════════════════════════════════════════════════════ -->
+<main>
+  <div id="empty">
+    <h2>No active incident</h2>
+    <p>Select a scenario above and click <strong>⚡ Fire Scenario</strong> to start the pipeline.</p>
+  </div>
+
+  <div id="pipeline">
+    <div id="res-banner">✅ Incident resolved — pipeline complete.</div>
+
+    <div class="sec-lbl">Agent Pipeline</div>
+    <div class="cards" id="cards"></div>
+
+    <div class="sec-lbl" style="margin-top:16px">Event Log</div>
+    <div id="log-box"></div>
+  </div>
+</main>
+
+<!-- ═══ HITL OVERLAY ═════════════════════════════════════════════════════════ -->
+<div id="hitl-wrap">
+  <div class="hcard">
+    <h2>⚠️ Human Approval Required</h2>
+    <div id="hitl-text"></div>
+    <div class="hbtns">
+      <button class="btn btn-success" onclick="submitHitl('approve')">✅ Approve</button>
+      <button class="btn btn-outline" onclick="toggleReject()">❌ Reject…</button>
+    </div>
+    <textarea id="rej-comment" placeholder="Reason for rejection (optional, press Enter to skip)"></textarea>
+    <div id="rej-submit">
+      <button class="btn btn-danger" onclick="submitHitl('reject')">Confirm Rejection</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ METRICS BAR ═══════════════════════════════════════════════════════════ -->
+<footer>
+  <div class="met">🔧 <span>Tools:</span> <span class="mv" id="m-tools">0</span></div>
+  <div class="met">⏱ <span>Elapsed:</span> <span class="mv" id="m-elapsed">—</span></div>
+  <div class="met">🧠 <span>Memory hits:</span> <span class="mv" id="m-mem">0</span></div>
+  <div class="met">🤖 <span>Agents active:</span> <span class="mv" id="m-agents">0</span></div>
+  <a class="flink" href="/eval">View eval results →</a>
+</footer>
+
+<script>
+'use strict';
+
+// ── Constants ──────────────────────────────────────────────────────────────
+const AGENTS = [
+  {key:'triage_agent',            label:'Triage Agent',      icon:'🔍'},
+  {key:'log_analyst_agent',       label:'Log Analyst',       icon:'📋'},
+  {key:'deploy_correlator_agent', label:'Deploy Correlator', icon:'🚀'},
+  {key:'remediation_agent',       label:'Remediation',       icon:'🔧'},
+  {key:'comms_agent',             label:'Comms Agent',       icon:'📢'},
+];
+
+const SEV_CLASS = {critical:'critical',high:'high',warning:'warning',low:'low',info:'info'};
+
+// ── State ──────────────────────────────────────────────────────────────────
+let scenarios = [];
+let currentInc = null;     // {id, scenario}
+let es = null;             // EventSource
+let elTimer = null;
+let startTs = 0;
+
+// metrics
+let nTools=0, nMem=0, nAgents=0;
+
+// ── Init ───────────────────────────────────────────────────────────────────
+async function init() {
+  try {
+    const r = await fetch('/api/scenarios');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    scenarios = await r.json();
+    const sel = document.getElementById('sce-sel');
+    sel.innerHTML = scenarios.map(s =>
+      `<option value="${esc(s.id)}">${esc(s.id)} — ${esc(s.failure_class)}</option>`
+    ).join('');
+    document.getElementById('fire-btn').disabled = false;
+  } catch(e) {
+    document.getElementById('sce-sel').innerHTML =
+      '<option value="">Failed to load scenarios — is the server running?</option>';
+    log('error', `Init error: ${e.message}`);
+  }
+}
+
+// ── Build cards ────────────────────────────────────────────────────────────
+function buildCards() {
+  document.getElementById('cards').innerHTML = AGENTS.map(a => `
+    <div class="acard" id="card-${a.key}">
+      <div class="ch">
+        <div class="dot"></div>
+        <span class="ct">${a.icon} ${a.label}</span>
+      </div>
+      <div class="cb">
+        <ul class="tool-list" id="tl-${a.key}"></ul>
+        <div class="ce" id="ce-${a.key}">Waiting…</div>
+      </div>
+    </div>`).join('');
+}
+
+// ── Fire scenario ──────────────────────────────────────────────────────────
+async function fireScenario() {
+  const sid = document.getElementById('sce-sel').value;
+  if (!sid) return;
+  const scen = scenarios.find(s => s.id === sid);
+  if (!scen) return;
+
+  // Tear down previous run
+  if (es) { es.close(); es = null; }
+  if (elTimer) { clearInterval(elTimer); elTimer = null; }
+  resetState();
+  resetUI();
+
+  const btn = document.getElementById('fire-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Starting…';
+
+  try {
+    const r = await fetch('/webhooks/alert', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(scen.alert),
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
+    const {incident_id} = await r.json();
+
+    currentInc = {id: incident_id, scenario: scen};
+    showIncBar(incident_id, scen);
+    showPipeline();
+    startElapsed();
+    startSSE(incident_id);
+    log('system', `Incident ${incident_id} created — streaming started`);
+  } catch(e) {
+    log('error', `Fire error: ${e.message}`);
+    btn.disabled = false;
+    btn.textContent = '⚡ Fire Scenario';
+  }
+}
+
+// ── SSE ────────────────────────────────────────────────────────────────────
+function startSSE(incId) {
+  es = new EventSource(`/events/${incId}`);
+  es.onmessage = e => {
+    try { dispatch(JSON.parse(e.data), incId); }
+    catch(err) { log('error', `Parse error: ${err.message}`); }
+  };
+  es.onerror = () => {
+    log('error', 'SSE stream closed or error');
+    es.close();
+  };
+}
+
+// ── Dispatch ───────────────────────────────────────────────────────────────
+function dispatch(ev, incId) {
+  const ts = fmtTime(ev.timestamp);
+  switch(ev.type) {
+    case 'agent_started':     onStarted(ev, ts);         break;
+    case 'agent_completed':   onCompleted(ev, ts);       break;
+    case 'tool_called':       onToolCalled(ev, ts);      break;
+    case 'tool_result':       onToolResult(ev, ts);      break;
+    case 'hitl_requested':    onHitlReq(ev, incId, ts);  break;
+    case 'hitl_resolved':     onHitlRes(ev, ts);         break;
+    case 'incident_resolved': onResolved(ev, ts);        break;
+    default: log('system', `[${ev.type}] ${ev.agent_name || ''}`);
+  }
+}
+
+// ── Handlers ───────────────────────────────────────────────────────────────
+function onStarted(ev, ts) {
+  cardState(ev.agent_name, 'active');
+  nAgents++; document.getElementById('m-agents').textContent = nAgents;
+  log('started', `[${ts}] 🤖 ${ev.agent_name} started`);
+}
+
+function onCompleted(ev, ts) {
+  cardState(ev.agent_name, 'done');
+  const output = ev.data?.output;
+  if (output) appendOutput(ev.agent_name, String(output).slice(0, 200));
+  nAgents = Math.max(0, nAgents - 1);
+  document.getElementById('m-agents').textContent = nAgents;
+  log('completed', `[${ts}] ✅ ${ev.agent_name} completed`);
+}
+
+function onToolCalled(ev, ts) {
+  const agent = ev.agent_name;
+  const toolName = ev.data?.tool_name || 'tool';
+  const callId = ev.data?.call_id || toolName;
+
+  hidePlaceholder(agent);
+  const tl = document.getElementById(`tl-${agent}`);
+  if (tl) {
+    const li = document.createElement('li');
+    li.className = 'ti';
+    li.id = `tc-${callId}`;
+    li.innerHTML = `<div class="tn">⚙ ${esc(toolName)}</div>
+      <div class="tp" id="tp-${callId}">Running…</div>`;
+    tl.appendChild(li);
+  }
+  nTools++; document.getElementById('m-tools').textContent = nTools;
+  if (toolName === 'search_past_incidents') {
+    nMem++; document.getElementById('m-mem').textContent = nMem;
+  }
+  log('tool', `[${ts}] ⚙ ${toolName} (${agent})`);
+}
+
+function onToolResult(ev, ts) {
+  const callId = ev.data?.call_id || ev.data?.tool_name || '';
+  const output = ev.data?.output || '';
+  const toolName = ev.data?.tool_name || 'tool';
+  const el = document.getElementById(`tp-${callId}`);
+  if (el) {
+    el.className = 'tr';
+    el.textContent = String(output).slice(0, 200);
+  }
+  log('result', `[${ts}] ✓ ${toolName} → ${String(output).slice(0, 80)}`);
+}
+
+function onHitlReq(ev, incId, ts) {
+  const display = ev.data?.display || 'Approval requested.';
+  document.getElementById('hitl-text').textContent = display;
+  document.getElementById('hitl-wrap').dataset.incId = incId;
+  document.getElementById('hitl-wrap').classList.add('on');
+  document.getElementById('rej-comment').classList.remove('on');
+  document.getElementById('rej-submit').classList.remove('on');
+  cardState('remediation_agent', 'hitl');
+  log('hitl', `[${ts}] ⚠️ HITL approval requested`);
+}
+
+function onHitlRes(ev, ts) {
+  document.getElementById('hitl-wrap').classList.remove('on');
+  const dec = ev.data?.decision || '';
+  cardState('remediation_agent', 'done');
+  log('hitl', `[${ts}] ✓ HITL resolved — ${dec}`);
+}
+
+function onResolved(ev, ts) {
+  document.getElementById('res-banner').classList.add('on');
+  document.getElementById('ib-status').className = 'pill pill-resolved';
+  document.getElementById('ib-status').textContent = 'Resolved';
+  if (elTimer) { clearInterval(elTimer); elTimer = null; }
+  if (es) { es.close(); es = null; }
+  log('resolved', `[${ts}] ✅ Incident resolved`);
+  const btn = document.getElementById('fire-btn');
+  btn.disabled = false;
+  btn.textContent = '⚡ Fire Scenario';
+}
+
+// ── HITL submit ────────────────────────────────────────────────────────────
+async function submitHitl(action) {
+  const incId = document.getElementById('hitl-wrap').dataset.incId;
+  if (!incId) return;
+  const comment = action === 'reject'
+    ? (document.getElementById('rej-comment').value.trim() || undefined)
+    : undefined;
+  try {
+    const r = await fetch(`/incidents/${incId}/approve`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action, comment}),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      log('error', `HITL submit failed: ${err.detail || r.status}`);
+    }
+  } catch(e) {
+    log('error', `HITL submit error: ${e.message}`);
+  }
+}
+
+function toggleReject() {
+  const c = document.getElementById('rej-comment');
+  const s = document.getElementById('rej-submit');
+  const show = c.classList.toggle('on');
+  if (show) s.classList.add('on'); else s.classList.remove('on');
+}
+
+// ── UI helpers ─────────────────────────────────────────────────────────────
+function cardState(key, state) {
+  const card = document.getElementById(`card-${key}`);
+  if (!card) return;
+  card.classList.remove('active','done','err','hitl');
+  if (state) card.classList.add(state);
+}
+
+function hidePlaceholder(key) {
+  const ce = document.getElementById(`ce-${key}`);
+  if (ce) ce.style.display = 'none';
+}
+
+function appendOutput(key, text) {
+  hidePlaceholder(key);
+  const tl = document.getElementById(`tl-${key}`);
+  if (!tl) return;
+  const li = document.createElement('li');
+  li.className = 'ti';
+  li.innerHTML = `<div class="tn">✓ Result</div><div class="tr">${esc(text)}</div>`;
+  tl.appendChild(li);
+}
+
+function showIncBar(id, scen) {
+  const sev = scen.alert.severity || '';
+  document.getElementById('ib-id').textContent = id;
+  document.getElementById('ib-svc').textContent = scen.alert.service || '';
+  const sevEl = document.getElementById('ib-sev');
+  sevEl.textContent = sev.toUpperCase();
+  sevEl.className = `sev sev-${SEV_CLASS[sev.toLowerCase()] || 'low'}`;
+  document.getElementById('ib-status').className = 'pill pill-running';
+  document.getElementById('ib-status').textContent = 'Running';
+  document.getElementById('inc-bar').classList.add('on');
+}
+
+function showPipeline() {
+  document.getElementById('empty').style.display = 'none';
+  document.getElementById('res-banner').classList.remove('on');
+  document.getElementById('log-box').innerHTML = '';
+  buildCards();
+  document.getElementById('pipeline').classList.add('on');
+}
+
+function startElapsed() {
+  startTs = Date.now();
+  const tick = () => {
+    const s = Math.floor((Date.now() - startTs) / 1000);
+    const txt = s >= 60 ? `${Math.floor(s/60)}m ${s%60}s` : `${s}s`;
+    document.getElementById('m-elapsed').textContent = txt;
+    document.getElementById('ib-elapsed').textContent = txt;
+  };
+  tick();
+  elTimer = setInterval(tick, 1000);
+}
+
+function resetState() {
+  nTools = nMem = nAgents = 0;
+  document.getElementById('m-tools').textContent = '0';
+  document.getElementById('m-mem').textContent = '0';
+  document.getElementById('m-agents').textContent = '0';
+  document.getElementById('m-elapsed').textContent = '—';
+  document.getElementById('ib-elapsed').textContent = '0s';
+  currentInc = null;
+}
+
+function resetUI() {
+  document.getElementById('inc-bar').classList.remove('on');
+  document.getElementById('hitl-wrap').classList.remove('on');
+}
+
+function log(type, msg) {
+  const box = document.getElementById('log-box');
+  const d = document.createElement('div');
+  d.className = `le le-${type}`;
+  d.textContent = msg;
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+}
+
+function fmtTime(iso) {
+  try { return new Date(iso).toLocaleTimeString(); } catch { return ''; }
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>

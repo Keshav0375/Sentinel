@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sentinel — Eval Results</title>
+  <style>
+    :root {
+      --bg:         #0d1117;
+      --surface:    #161b22;
+      --surface-2:  #21262d;
+      --border:     #30363d;
+      --text:       #e6edf3;
+      --muted:      #8b949e;
+      --blue:       #388bfd;
+      --green:      #3fb950;
+      --green-dim:  rgba(63,185,80,.15);
+      --amber:      #d29922;
+      --amber-dim:  rgba(210,153,34,.15);
+      --red:        #f85149;
+      --red-dim:    rgba(248,81,73,.15);
+      --purple:     #a371f7;
+      --r:          6px;
+      --sans:       -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+      --mono:       ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;
+         line-height:1.5;min-height:100vh;display:flex;flex-direction:column}
+
+    header{background:var(--surface);border-bottom:1px solid var(--border);
+           padding:10px 20px;display:flex;align-items:center;
+           justify-content:space-between;gap:12px;flex-wrap:wrap;
+           position:sticky;top:0;z-index:100}
+    .brand{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600}
+    .brand-sub{color:var(--muted);font-weight:400;font-size:13px}
+    a.back{color:var(--muted);font-size:13px;text-decoration:none}
+    a.back:hover{color:var(--text)}
+
+    main{flex:1;padding:20px;max-width:1400px;margin:0 auto;width:100%}
+
+    .summary-row{display:flex;gap:14px;margin-bottom:20px;flex-wrap:wrap}
+    .scard{background:var(--surface);border:1px solid var(--border);
+           border-radius:var(--r);padding:14px 18px;min-width:140px;flex:1}
+    .scard-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.06em;
+               color:var(--muted);margin-bottom:4px}
+    .scard-val{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+
+    .sec-lbl{font-size:11px;font-weight:700;text-transform:uppercase;
+             letter-spacing:.08em;color:var(--muted);margin-bottom:10px}
+
+    .tbl-wrap{overflow-x:auto;margin-bottom:24px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th{background:var(--surface-2);text-align:left;padding:8px 10px;
+       font-weight:600;border-bottom:2px solid var(--border);white-space:nowrap}
+    td{padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
+    tr:hover td{background:var(--surface)}
+
+    .score-cell{font-weight:700;font-variant-numeric:tabular-nums;text-align:center;
+                border-radius:4px;min-width:48px}
+    .score-green{background:var(--green-dim);color:var(--green)}
+    .score-amber{background:var(--amber-dim);color:var(--amber)}
+    .score-red  {background:var(--red-dim);color:var(--red)}
+
+    .pass{color:var(--green);font-weight:700}
+    .fail{color:var(--red);font-weight:700}
+
+    .avg-row td{background:var(--surface-2);font-weight:700;border-top:2px solid var(--border)}
+
+    .meta{color:var(--muted);font-size:12px;margin-top:8px}
+
+    #empty{text-align:center;padding:80px 20px;color:var(--muted)}
+    #empty h2{font-size:20px;margin-bottom:8px;color:var(--text)}
+    #error{display:none;text-align:center;padding:60px 20px;color:var(--red)}
+
+    footer{background:var(--surface);border-top:1px solid var(--border);
+           padding:7px 20px;display:flex;align-items:center;gap:22px;
+           font-size:12px;color:var(--muted);flex-wrap:wrap}
+    .flink{color:var(--muted);font-size:12px;text-decoration:none}
+    .flink:hover{color:var(--text)}
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    🛡 Sentinel
+    <span class="brand-sub">— Eval Results</span>
+  </div>
+  <a class="back" href="/">← Back to Dashboard</a>
+</header>
+
+<main>
+  <div id="empty">
+    <h2>Loading eval report...</h2>
+    <p>Fetching from <code>/api/eval-report</code></p>
+  </div>
+  <div id="error"></div>
+  <div id="content" style="display:none">
+    <div class="summary-row" id="summary-row"></div>
+    <div class="sec-lbl">Per-Scenario Scores</div>
+    <div class="tbl-wrap">
+      <table id="scores-table">
+        <thead id="scores-head"></thead>
+        <tbody id="scores-body"></tbody>
+      </table>
+    </div>
+    <div class="meta" id="meta"></div>
+  </div>
+</main>
+
+<footer>
+  <a class="flink" href="/">← Dashboard</a>
+</footer>
+
+<script>
+'use strict';
+
+const DIMS = [
+  {key:'triage_accuracy',         label:'Triage'},
+  {key:'root_cause_correctness',  label:'Root Cause'},
+  {key:'tool_efficiency',         label:'Tool Eff.'},
+  {key:'mttr',                    label:'MTTR'},
+  {key:'remediation_safety',      label:'Remed. Safety'},
+  {key:'comms_quality',           label:'Comms'},
+];
+
+const PASS_THRESHOLD = 3.0;
+
+function scoreClass(v) {
+  if (v >= 4)   return 'score-green';
+  if (v >= 2.5) return 'score-amber';
+  return 'score-red';
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function init() {
+  try {
+    const r = await fetch('/api/eval-report');
+    if (r.status === 404) {
+      showEmpty('No eval report found', 'Run the eval suite first: python scripts/run_eval.py');
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    render(data);
+  } catch(e) {
+    showError(`Failed to load eval report: ${e.message}`);
+  }
+}
+
+function showEmpty(title, msg) {
+  document.getElementById('empty').innerHTML =
+    `<h2>${esc(title)}</h2><p>${esc(msg)}</p>`;
+}
+
+function showError(msg) {
+  document.getElementById('empty').style.display = 'none';
+  const el = document.getElementById('error');
+  el.style.display = 'block';
+  el.textContent = msg;
+}
+
+function render(data) {
+  document.getElementById('empty').style.display = 'none';
+  document.getElementById('content').style.display = 'block';
+
+  const results = data.results || data.scores || [];
+  if (results.length === 0) {
+    showEmpty('Eval report is empty', 'No scenario results found in the report.');
+    document.getElementById('content').style.display = 'none';
+    return;
+  }
+
+  const dimAvgs = {};
+  DIMS.forEach(d => { dimAvgs[d.key] = {sum:0, count:0}; });
+
+  let totalSum = 0;
+  let passCount = 0;
+
+  results.forEach(r => {
+    const scores = {};
+    (r.dimension_scores || []).forEach(ds => { scores[ds.dimension] = ds.score; });
+    const total = r.total_score ?? 0;
+    totalSum += total;
+    if (total >= PASS_THRESHOLD) passCount++;
+
+    DIMS.forEach(d => {
+      const v = scores[d.key];
+      if (v !== undefined) {
+        dimAvgs[d.key].sum += v;
+        dimAvgs[d.key].count++;
+      }
+    });
+  });
+
+  const overallAvg = results.length > 0 ? totalSum / results.length : 0;
+  const passRate = results.length > 0 ? (passCount / results.length * 100) : 0;
+
+  // Summary cards
+  const summaryHtml = `
+    <div class="scard">
+      <div class="scard-lbl">Overall Average</div>
+      <div class="scard-val" style="color:${colorForScore(overallAvg)}">${overallAvg.toFixed(2)}</div>
+    </div>
+    <div class="scard">
+      <div class="scard-lbl">Scenarios</div>
+      <div class="scard-val">${results.length}</div>
+    </div>
+    <div class="scard">
+      <div class="scard-lbl">Pass Rate (>=${PASS_THRESHOLD})</div>
+      <div class="scard-val" style="color:${passRate >= 80 ? 'var(--green)' : passRate >= 50 ? 'var(--amber)' : 'var(--red)'}">${passRate.toFixed(0)}%</div>
+    </div>
+    <div class="scard">
+      <div class="scard-lbl">Judge Model</div>
+      <div class="scard-val" style="font-size:14px">${esc(results[0]?.judge_model || 'N/A')}</div>
+    </div>`;
+  document.getElementById('summary-row').innerHTML = summaryHtml;
+
+  // Table header
+  let headHtml = '<tr><th>Scenario</th>';
+  DIMS.forEach(d => { headHtml += `<th style="text-align:center">${esc(d.label)}</th>`; });
+  headHtml += '<th style="text-align:center">Total</th><th style="text-align:center">Pass</th></tr>';
+  document.getElementById('scores-head').innerHTML = headHtml;
+
+  // Table body
+  let bodyHtml = '';
+  results.forEach(r => {
+    const scores = {};
+    (r.dimension_scores || []).forEach(ds => { scores[ds.dimension] = ds.score; });
+    const total = r.total_score ?? 0;
+    const passed = total >= PASS_THRESHOLD;
+
+    bodyHtml += `<tr><td><code style="font-family:var(--mono);font-size:12px">${esc(r.scenario_id)}</code></td>`;
+    DIMS.forEach(d => {
+      const v = scores[d.key];
+      if (v !== undefined) {
+        bodyHtml += `<td class="score-cell ${scoreClass(v)}">${v.toFixed(1)}</td>`;
+      } else {
+        bodyHtml += '<td class="score-cell" style="color:var(--muted)">—</td>';
+      }
+    });
+    bodyHtml += `<td class="score-cell ${scoreClass(total)}">${total.toFixed(2)}</td>`;
+    bodyHtml += `<td style="text-align:center" class="${passed ? 'pass' : 'fail'}">${passed ? 'PASS' : 'FAIL'}</td>`;
+    bodyHtml += '</tr>';
+  });
+
+  // Averages row
+  bodyHtml += '<tr class="avg-row"><td><strong>Average</strong></td>';
+  DIMS.forEach(d => {
+    const a = dimAvgs[d.key];
+    const avg = a.count > 0 ? a.sum / a.count : 0;
+    bodyHtml += `<td class="score-cell ${scoreClass(avg)}">${avg.toFixed(2)}</td>`;
+  });
+  bodyHtml += `<td class="score-cell ${scoreClass(overallAvg)}">${overallAvg.toFixed(2)}</td>`;
+  bodyHtml += `<td style="text-align:center" class="${overallAvg >= PASS_THRESHOLD ? 'pass' : 'fail'}">${overallAvg >= PASS_THRESHOLD ? 'PASS' : 'FAIL'}</td>`;
+  bodyHtml += '</tr>';
+
+  document.getElementById('scores-body').innerHTML = bodyHtml;
+
+  // Meta
+  const meta = data.generated_at || data.timestamp || '';
+  if (meta) {
+    document.getElementById('meta').textContent = `Report generated: ${meta}`;
+  }
+}
+
+function colorForScore(v) {
+  if (v >= 4)   return 'var(--green)';
+  if (v >= 2.5) return 'var(--amber)';
+  return 'var(--red)';
+}
+
+init();
+</script>
+</body>
+</html>

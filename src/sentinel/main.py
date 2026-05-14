@@ -18,6 +18,7 @@ from typing import Any
 from agents import Runner, add_trace_processor, set_default_openai_client
 from agents import trace as agent_trace
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from openai import AsyncOpenAI
 
 from sentinel.agents.comms import build_comms_agent
@@ -26,6 +27,7 @@ from sentinel.agents.log_analyst import build_log_analyst_agent
 from sentinel.agents.orchestrator import build_orchestrator_agent
 from sentinel.agents.remediation import build_remediation_agent
 from sentinel.agents.triage import build_triage_agent
+from sentinel.api.eval_report import make_eval_report_router
 from sentinel.api.events import (
     HitlGateRegistry,
     make_api_approval_fn,
@@ -35,8 +37,10 @@ from sentinel.api.events import (
 )
 from sentinel.api.health import make_health_router
 from sentinel.api.incidents import make_incidents_router
+from sentinel.api.scenarios import make_scenarios_router
 from sentinel.api.webhooks import AlertDeduplicator, PipelineFn, make_alert_router
 from sentinel.config import get_settings
+from sentinel.infra.dashboard_emitter import DashboardEventEmitter
 from sentinel.infra.db import create_tables
 from sentinel.infra.event_bus import EventBus
 from sentinel.infra.logging import configure_logging, get_logger
@@ -47,6 +51,9 @@ from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import AlertPayload
 from sentinel.models.incident import IncidentStatus
+
+_DASHBOARD_HTML = Path(__file__).resolve().parent / "dashboard" / "index.html"
+_EVAL_HTML = Path(__file__).resolve().parent / "dashboard" / "eval.html"
 
 logger = get_logger("sentinel.main")
 
@@ -218,6 +225,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     tracer = SentinelTracer(short_term_memory, trajectories_dir=trajectories_dir)
     add_trace_processor(tracer)
 
+    # ── Dashboard event emitter ───────────────────────────────────────────────
+    dashboard_emitter = DashboardEventEmitter(event_bus)
+    add_trace_processor(dashboard_emitter)
+
     # ── API wiring ────────────────────────────────────────────────────────────
     deduplicator = AlertDeduplicator()
     pipeline_fn = make_pipeline_fn(
@@ -231,6 +242,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.include_router(make_incidents_router(short_term_memory))
     app.include_router(make_health_router(short_term_memory))
     app.include_router(make_events_router(event_bus, gate_registry))
+    app.include_router(make_scenarios_router())
+    app.include_router(make_eval_report_router())
 
     logger.info("sentinel_ready")
     yield
@@ -244,12 +257,24 @@ def create_app() -> FastAPI:
     The app is not ready to serve traffic until the lifespan handler completes
     startup (memory clients, agents, and routers are all wired there).
     """
-    return FastAPI(
+    application = FastAPI(
         title="Sentinel",
         description="Autonomous DevOps incident response agent",
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    @application.get("/", response_class=HTMLResponse, include_in_schema=False)
+    async def dashboard() -> str:  # pyright: ignore[reportUnusedFunction]
+        """Serve the live incident dashboard."""
+        return _DASHBOARD_HTML.read_text(encoding="utf-8")
+
+    @application.get("/eval", response_class=HTMLResponse, include_in_schema=False)
+    async def eval_page() -> str:  # pyright: ignore[reportUnusedFunction]
+        """Serve the eval results page."""
+        return _EVAL_HTML.read_text(encoding="utf-8")
+
+    return application
 
 
 app = create_app()

@@ -358,50 +358,100 @@ class TestApproveEndpoint:
 
 
 class TestSseEndpoint:
-    def test_sse_returns_event_stream_content_type(self) -> None:
+    async def test_sse_returns_event_stream_content_type(self) -> None:
+        """SSE endpoint sets text/event-stream Content-Type (async ASGI client)."""
+        import httpx
+
         bus = EventBus()
         app = _make_test_app(event_bus=bus)
-        with TestClient(app) as client:
-            # Use stream=True to test streaming without consuming all events
-            with client.stream("GET", "/events/inc-001") as resp:
-                assert "text/event-stream" in resp.headers["content-type"]
+        transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
 
-    def test_sse_route_exists(self) -> None:
-        app = _make_test_app()
-        with TestClient(app) as client:
-            # HEAD or OPTIONS check route exists
-            resp = client.get("/events/inc-404-none")
-            # Even an empty bus should stream (then close on sentinel)
-            assert resp.status_code == 200
+        content_type: str = ""
 
-    def test_sse_streams_event_then_closes_on_sentinel(self) -> None:
+        async def _stream_and_check() -> None:
+            nonlocal content_type
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                async with client.stream("GET", "/events/inc-sse-ct") as resp:
+                    content_type = resp.headers.get("content-type", "")
+                    async for _ in resp.aiter_text():
+                        pass
+
+        async def _close() -> None:
+            await asyncio.sleep(0.05)
+            await bus.close_incident("inc-sse-ct")
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(_stream_and_check())
+            tg.create_task(_close())
+
+        assert "text/event-stream" in content_type
+
+    async def test_sse_route_exists(self) -> None:
+        """GET /events/{incident_id} returns HTTP 200 (async ASGI client)."""
+        import httpx
+
         bus = EventBus()
         app = _make_test_app(event_bus=bus)
+        transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+
+        status_code: int = 0
+
+        async def _check_status() -> None:
+            nonlocal status_code
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                async with client.stream("GET", "/events/inc-sse-re") as resp:
+                    status_code = resp.status_code
+                    async for _ in resp.aiter_text():
+                        pass
+
+        async def _close() -> None:
+            await asyncio.sleep(0.05)
+            await bus.close_incident("inc-sse-re")
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(_check_status())
+            tg.create_task(_close())
+
+        assert status_code == 200
+
+    async def test_sse_streams_event_then_closes_on_sentinel(self) -> None:
+        """SSE endpoint streams events and terminates cleanly on None sentinel."""
+        import httpx
+
+        bus = EventBus()
+        app = _make_test_app(event_bus=bus)
+        transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
         event = PipelineEvent(
             type=EventType.AGENT_STARTED,
             agent_name="triage_agent",
-            incident_id="inc-001",
+            incident_id="inc-sse-stream",
         )
 
+        received_text = ""
+
+        async def _stream_events() -> None:
+            nonlocal received_text
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                async with client.stream("GET", "/events/inc-sse-stream") as resp:
+                    async for chunk in resp.aiter_text():
+                        received_text += chunk
+
         async def _send_and_close() -> None:
-            await asyncio.sleep(0.01)
-            await bus.publish("inc-001", event)
-            await bus.close_incident("inc-001")
+            await asyncio.sleep(0.05)
+            await bus.publish("inc-sse-stream", event)
+            await bus.close_incident("inc-sse-stream")
 
-        import threading
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(_stream_events())
+            tg.create_task(_send_and_close())
 
-        def _run_in_thread() -> None:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(_send_and_close())
-
-        t = threading.Thread(target=_run_in_thread)
-        t.start()
-
-        with TestClient(app) as client:
-            resp = client.get("/events/inc-001")
-
-        t.join(timeout=5)
-        assert "agent_started" in resp.text
+        assert "agent_started" in received_text
 
     def test_approve_model_valid_actions(self) -> None:
         body = ApprovalDecision(action="approve")
