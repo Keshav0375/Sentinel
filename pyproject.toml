@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
 
 [project]
 name = "sentinel"
@@ -23,16 +23,20 @@ dependencies = [
     "sentence-transformers>=3.0.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "ruff>=0.4.0",
-    "pyright>=1.1.0",
+[project.scripts]
+sentinel = "sentinel.cli:main"
+
+[tool.poetry]
+packages = [
+    { include = "sentinel", from = "src" },
+    { include = "data" },
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/sentinel"]
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0.0"
+pytest-asyncio = ">=0.23.0"
+ruff = ">=0.4.0"
+pyright = ">=1.1.0"
 
 [tool.ruff]
 line-length = 100
