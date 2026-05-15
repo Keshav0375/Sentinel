@@ -1,0 +1,122 @@
+{
+  "incident_id": "inc-00aac4e8",
+  "trace": {
+    "object": "trace",
+    "id": "trace_522eec2fe6494c0ca8731f47eaadcb8a",
+    "workflow_name": "incident_pipeline",
+    "group_id": null,
+    "metadata": {
+      "incident_id": "inc-00aac4e8"
+    }
+  },
+  "spans": [
+    {
+      "object": "trace.span",
+      "id": "span_eb4a53e63c344a68958d4b67",
+      "trace_id": "trace_522eec2fe6494c0ca8731f47eaadcb8a",
+      "parent_id": "span_5de454ddb4944f508e8fb9cf",
+      "started_at": "2026-05-14T23:43:37.548189+00:00",
+      "ended_at": "2026-05-14T23:43:44.507424+00:00",
+      "span_data": {
+        "type": "generation",
+        "input": [
+          {
+            "content": "You are the Incident Orchestrator, Sentinel's top-level coordinator for autonomous DevOps incident response.\n\n## Your Role\nYou receive alert payloads and coordinate specialist agents to diagnose and resolve incidents. You do not perform analysis yourself \u2014 you delegate to specialists via handoffs and synthesize their findings.\n\n## Workflow\nFollow this sequence for every incident:\n1. Hand off to the Triage Agent \u2014 classify severity and identify the affected service.\n2. Hand off to the Log Analyst \u2014 analyze logs for the affected service in the incident time window.\n3. Hand off to the Deploy Correlator \u2014 check for suspicious recent deploys.\n4. Hand off to the Remediation Agent \u2014 draft a fix and obtain human approval.\n5. Hand off to the Comms Agent \u2014 produce a Slack summary of the full incident.\n6. Return a final incident summary: status, affected_service, root_cause, action_taken.\n\n## Tool-Call Cap\nYou and all sub-agents share a budget of 15 tool calls per incident. If the budget is exhausted before resolution, stop immediately and respond with status=escalated, explaining what analysis was completed and what remains.\n\n## Handoff Rules\n- Wait for each specialist's result before deciding the next step.\n- If triage marks is_duplicate=true, skip directly to Comms \u2014 no re-investigation needed.\n- If triage severity is P4, skip Log Analyst and Deploy Correlator \u2014 go straight to Comms.\n- If root cause cannot be determined after Log Analyst + Deploy Correlator, escalate rather than guess.\n- Never recommend a remediation action without routing through the Remediation Agent and its HITL gate.\n\n## Output Format\nAfter all handoffs complete, return:\n- status: resolved | pending_approval | escalated\n- affected_service: the confirmed service name\n- severity: P1 | P2 | P3 | P4\n- root_cause_summary: one sentence\n- action_taken: what was approved and executed (or \"none\" if escalated)\n- next_steps: list of remaining items if any",
+            "role": "system"
+          },
+          {
+            "role": "user",
+            "content": "New incident ID: inc-00aac4e8\nAlert payload: {\"alert_id\":\"dda6b005-1f3b-4c9b-a613-a6206e58cfef\",\"source\":\"datadog\",\"service\":\"api-gateway\",\"metric\":\"error_rate\",\"threshold\":0.05,\"current_value\":0.34,\"severity\":\"critical\",\"timestamp\":\"2026-05-14T23:43:33.571561Z\",\"metadata\":{\"scenario_id\":\"bad_deploy_01\",\"failure_class\":\"bad_deploy\"}}"
+          }
+        ],
+        "output": null,
+        "model": "llama-3.3-70b-versatile",
+        "model_config": {
+          "temperature": null,
+          "top_p": null,
+          "frequency_penalty": null,
+          "presence_penalty": null,
+          "tool_choice": null,
+          "parallel_tool_calls": null,
+          "truncation": null,
+          "max_tokens": null,
+          "reasoning": null,
+          "verbosity": null,
+          "metadata": null,
+          "store": null,
+          "prompt_cache_retention": null,
+          "include_usage": null,
+          "response_include": null,
+          "top_logprobs": null,
+          "extra_query": null,
+          "extra_body": null,
+          "extra_headers": null,
+          "extra_args": null,
+          "retry": null,
+          "context_management": null,
+          "base_url": "https://api.groq.com/openai/v1/"
+        },
+        "usage": null
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_5de454ddb4944f508e8fb9cf",
+      "trace_id": "trace_522eec2fe6494c0ca8731f47eaadcb8a",
+      "parent_id": "span_1f2ed8bac80f4586b6f178cb",
+      "started_at": "2026-05-14T23:43:37.546083+00:00",
+      "ended_at": "2026-05-14T23:43:44.508392+00:00",
+      "span_data": {
+        "type": "custom",
+        "name": "turn",
+        "data": {
+          "sdk_span_type": "turn",
+          "turn": 1,
+          "agent_name": "incident_orchestrator"
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_1f2ed8bac80f4586b6f178cb",
+      "trace_id": "trace_522eec2fe6494c0ca8731f47eaadcb8a",
+      "parent_id": "span_26d5ef7b926146ce887d022e",
+      "started_at": "2026-05-14T23:43:37.545852+00:00",
+      "ended_at": "2026-05-14T23:43:44.508547+00:00",
+      "span_data": {
+        "type": "agent",
+        "name": "incident_orchestrator",
+        "handoffs": [
+          "triage_agent",
+          "log_analyst_agent",
+          "deploy_correlator_agent",
+          "remediation_agent",
+          "comms_agent"
+        ],
+        "tools": [],
+        "output_type": "IncidentSummary"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_26d5ef7b926146ce887d022e",
+      "trace_id": "trace_522eec2fe6494c0ca8731f47eaadcb8a",
+      "parent_id": null,
+      "started_at": "2026-05-14T23:43:37.541666+00:00",
+      "ended_at": "2026-05-14T23:43:44.508638+00:00",
+      "span_data": {
+        "type": "custom",
+        "name": "task",
+        "data": {
+          "sdk_span_type": "task",
+          "name": "Agent workflow"
+        }
+      },
+      "error": null
+    }
+  ],
+  "saved_at": "2026-05-14T23:43:44.509459+00:00"
+}
