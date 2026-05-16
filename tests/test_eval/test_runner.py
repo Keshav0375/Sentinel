@@ -179,6 +179,19 @@ class TestSummaryStats:
 # ── run_scenario_eval ─────────────────────────────────────────────────────────
 
 
+def _fake_settings(tmp_path: Path) -> Any:
+    """Real Settings instance with test values — for run_scenario_eval tests."""
+    from sentinel.config import Settings  # noqa: PLC0415
+
+    return Settings(
+        groq_api_key="gsk_test",
+        sentinel_triage_model="groq/llama-3.1-8b-instant",
+        sentinel_analysis_model="groq/llama-3.3-70b-versatile",
+        sentinel_judge_model="groq/llama-3.1-8b-instant",
+        sentinel_db_path=tmp_path / "test.db",
+    )
+
+
 class TestRunScenarioEval:
     async def test_returns_eval_run_result(self, tmp_path: Path) -> None:
         scenario = _make_scenario_mock()
@@ -196,6 +209,7 @@ class TestRunScenarioEval:
             patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
+            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
             patch("sentinel.eval.runner.Runner.run", new_callable=AsyncMock),
             patch("sentinel.eval.runner.agent_trace") as mock_trace,
             patch(
@@ -211,12 +225,10 @@ class TestRunScenarioEval:
                 scenario,
                 short_term_memory=stm,
                 trajectories_dir=tmp_path,
-                groq_client=_make_groq_client(),
+                settings=_fake_settings(tmp_path),
                 judge_model="test-judge",
                 semantic_memory=MagicMock(),
                 episodic_memory=MagicMock(),
-                analysis_model="model-a",
-                triage_model="model-b",
             )
 
         assert isinstance(result, EvalRunResult)
@@ -238,6 +250,7 @@ class TestRunScenarioEval:
             patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
+            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
             patch(
                 "sentinel.eval.runner.Runner.run",
                 new_callable=AsyncMock,
@@ -257,12 +270,10 @@ class TestRunScenarioEval:
                 scenario,
                 short_term_memory=stm,
                 trajectories_dir=tmp_path,
-                groq_client=_make_groq_client(),
+                settings=_fake_settings(tmp_path),
                 judge_model="test-judge",
                 semantic_memory=MagicMock(),
                 episodic_memory=MagicMock(),
-                analysis_model="model-a",
-                triage_model="model-b",
             )
 
         assert result.pipeline_error == "LLM timeout"
@@ -299,6 +310,7 @@ class TestRunScenarioEval:
             patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
+            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
             patch("sentinel.eval.runner.Runner.run", new_callable=AsyncMock),
             patch("sentinel.eval.runner.agent_trace") as mock_trace,
             patch(
@@ -314,12 +326,10 @@ class TestRunScenarioEval:
                 scenario,
                 short_term_memory=stm,
                 trajectories_dir=tmp_path,
-                groq_client=_make_groq_client(),
+                settings=_fake_settings(tmp_path),
                 judge_model="test-judge",
                 semantic_memory=MagicMock(),
                 episodic_memory=MagicMock(),
-                analysis_model="a",
-                triage_model="b",
             )
 
         assert captured_trajectory.get("incident_id") == expected_incident_id
@@ -340,6 +350,7 @@ class TestRunScenarioEval:
             patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
+            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
             patch("sentinel.eval.runner.Runner.run", new_callable=AsyncMock),
             patch("sentinel.eval.runner.agent_trace") as mock_trace,
             patch(
@@ -355,12 +366,10 @@ class TestRunScenarioEval:
                 scenario,
                 short_term_memory=stm,
                 trajectories_dir=tmp_path,  # no file written
-                groq_client=_make_groq_client(),
+                settings=_fake_settings(tmp_path),
                 judge_model="test-judge",
                 semantic_memory=MagicMock(),
                 episodic_memory=MagicMock(),
-                analysis_model="a",
-                triage_model="b",
             )
 
         assert result.trajectory_missing is True
@@ -399,8 +408,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.SemanticMemory"),
             patch("sentinel.eval.runner.EpisodicMemory"),
             patch("sentinel.eval.runner.ShortTermMemory"),
-            patch("sentinel.eval.runner.AsyncOpenAI"),
-            patch("sentinel.eval.runner.set_default_openai_client"),
+            patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
             patch("sentinel.eval.runner.add_trace_processor"),
             patch("sentinel.eval.runner.list_scenarios", return_value=["bad_deploy_01"]),
@@ -431,8 +439,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.SemanticMemory"),
             patch("sentinel.eval.runner.EpisodicMemory"),
             patch("sentinel.eval.runner.ShortTermMemory"),
-            patch("sentinel.eval.runner.AsyncOpenAI"),
-            patch("sentinel.eval.runner.set_default_openai_client"),
+            patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
             patch("sentinel.eval.runner.add_trace_processor"),
             patch(
@@ -460,8 +467,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.SemanticMemory"),
             patch("sentinel.eval.runner.EpisodicMemory"),
             patch("sentinel.eval.runner.ShortTermMemory"),
-            patch("sentinel.eval.runner.AsyncOpenAI"),
-            patch("sentinel.eval.runner.set_default_openai_client"),
+            patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
             patch("sentinel.eval.runner.add_trace_processor"),
             patch("sentinel.eval.runner.list_scenarios", return_value=all_ids),

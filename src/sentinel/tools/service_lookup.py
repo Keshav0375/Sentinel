@@ -18,7 +18,7 @@ def make_service_lookup_tool(memory: SemanticMemory) -> FunctionTool:
         FunctionTool that agents can call to look up service metadata.
     """
 
-    @function_tool
+    @function_tool(strict_mode=False)
     async def get_service_metadata(service_name: str) -> str:
         """Get ownership, tier, on-call channel, dependencies, and runbook steps for a service.
 

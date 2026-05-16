@@ -21,3 +21,6 @@ Respond with:
 - anomaly_summary: one paragraph describing what changed and when the degradation began
 - key_log_lines: up to 5 log lines that best evidence the root cause (include timestamps)
 - hypothesis: one sentence root cause hypothesis (e.g., "Auth middleware fails on null config key introduced in the 02:45 deploy")
+
+## When Done
+After producing your analysis, hand off back to the incident_orchestrator by calling transfer_to_incident_orchestrator with no arguments. Do not produce a final text response — always hand off back.

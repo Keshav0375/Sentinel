@@ -23,7 +23,7 @@ def make_incident_search_tool(memory: EpisodicMemory) -> FunctionTool:
         FunctionTool that agents can call to retrieve past similar incidents.
     """
 
-    @function_tool
+    @function_tool(strict_mode=False)
     async def search_past_incidents(symptom_query: str, top_k: int) -> str:
         """Search past incidents by symptom similarity using vector embeddings.
 

@@ -7,13 +7,13 @@ from unittest.mock import MagicMock
 
 import pytest
 from agents import Agent
-from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-from openai import AsyncOpenAI
+from agents.extensions.models.litellm_model import LitellmModel
 
 from sentinel.agents.deploy_correlator import (
     DEPLOY_CORRELATOR_AGENT_NAME,
     build_deploy_correlator_agent,
 )
+from sentinel.config import Settings
 from sentinel.generator.alert_gen import load_scenario
 from sentinel.generator.scenarios import Scenario
 from sentinel.models.deploy import Deploy, DeployCorrelation
@@ -27,16 +27,15 @@ def scenario() -> Scenario:
 
 
 @pytest.fixture()
-def groq_client() -> AsyncOpenAI:
-    return AsyncOpenAI(api_key="test-key", base_url="https://api.groq.com/openai/v1")
-
-
-@pytest.fixture()
 def correlator_agent(
     scenario: Scenario,
-    groq_client: AsyncOpenAI,
+    fake_settings: Settings,
 ) -> Agent[DeployCorrelation]:
-    return build_deploy_correlator_agent(scenario, groq_client=groq_client)
+    return build_deploy_correlator_agent(
+        scenario,
+        model_string="groq/llama-3.1-8b-instant",
+        settings=fake_settings,
+    )
 
 
 @pytest.fixture()
@@ -207,7 +206,7 @@ def test_deploy_correlator_agent_no_extra_tools(
 def test_deploy_correlator_agent_output_type(
     correlator_agent: Agent[DeployCorrelation],
 ) -> None:
-    assert correlator_agent.output_type is not None
+    assert correlator_agent.output_type is None
 
 
 def test_deploy_correlator_agent_has_instructions(
@@ -231,32 +230,36 @@ def test_deploy_correlator_agent_instructions_mention_list_recent_deploys(
     assert "list_recent_deploys" in correlator_agent.instructions
 
 
-def test_deploy_correlator_agent_uses_groq_model(
+def test_deploy_correlator_agent_uses_litellm_model(
     correlator_agent: Agent[DeployCorrelation],
 ) -> None:
-    assert isinstance(correlator_agent.model, OpenAIChatCompletionsModel)
+    assert isinstance(correlator_agent.model, LitellmModel)
 
 
-def test_deploy_correlator_agent_default_model_name(
+def test_deploy_correlator_agent_model_string_forwarded(
     scenario: Scenario,
-    groq_client: AsyncOpenAI,
-) -> None:
-    agent = build_deploy_correlator_agent(scenario, groq_client=groq_client)
-    assert isinstance(agent.model, OpenAIChatCompletionsModel)
-    assert agent.model.model == "llama-3.1-8b-instant"
-
-
-def test_deploy_correlator_agent_custom_model_name(
-    scenario: Scenario,
-    groq_client: AsyncOpenAI,
+    fake_settings: Settings,
 ) -> None:
     agent = build_deploy_correlator_agent(
         scenario,
-        groq_client=groq_client,
-        model_name="llama-3.3-70b-versatile",
+        model_string="groq/llama-3.1-8b-instant",
+        settings=fake_settings,
     )
-    assert isinstance(agent.model, OpenAIChatCompletionsModel)
-    assert agent.model.model == "llama-3.3-70b-versatile"
+    assert isinstance(agent.model, LitellmModel)
+    assert agent.model.model == "groq/llama-3.1-8b-instant"
+
+
+def test_deploy_correlator_agent_custom_model_string(
+    scenario: Scenario,
+    fake_settings: Settings,
+) -> None:
+    agent = build_deploy_correlator_agent(
+        scenario,
+        model_string="groq/llama-3.3-70b-versatile",
+        settings=fake_settings,
+    )
+    assert isinstance(agent.model, LitellmModel)
+    assert agent.model.model == "groq/llama-3.3-70b-versatile"
 
 
 def test_deploy_correlator_agent_no_handoffs(
@@ -265,15 +268,23 @@ def test_deploy_correlator_agent_no_handoffs(
     assert len(correlator_agent.handoffs) == 0
 
 
-def test_deploy_correlator_agent_accepts_none_scenario(groq_client: AsyncOpenAI) -> None:
+def test_deploy_correlator_agent_accepts_none_scenario(fake_settings: Settings) -> None:
     """Agent constructs with None scenario; list_recent_deploys errors at call time."""
-    agent = build_deploy_correlator_agent(None, groq_client=groq_client)
+    agent = build_deploy_correlator_agent(
+        None,
+        model_string="groq/llama-3.1-8b-instant",
+        settings=fake_settings,
+    )
     assert isinstance(agent, Agent)
     assert len(agent.tools) == 1
 
 
-def test_deploy_correlator_agent_mock_scenario(groq_client: AsyncOpenAI) -> None:
+def test_deploy_correlator_agent_mock_scenario(fake_settings: Settings) -> None:
     """Agent constructs with a MagicMock scenario."""
     mock_scenario = MagicMock(spec=Scenario)
-    agent = build_deploy_correlator_agent(mock_scenario, groq_client=groq_client)
+    agent = build_deploy_correlator_agent(
+        mock_scenario,
+        model_string="groq/llama-3.1-8b-instant",
+        settings=fake_settings,
+    )
     assert isinstance(agent, Agent)

@@ -29,7 +29,7 @@ The agent makes 6-10 tool calls per incident. Every destructive action is gated 
 | Memory | SQLite (episodic + semantic), in-memory (short-term) | Cosmos DB vector + JSON, Redis |
 | HITL | CLI prompt (`input()`) or simple web UI | Slack interactive buttons, GitHub PR review |
 | Eval | LLM-as-judge, local JSON reports | LangFuse traces, dashboard |
-| Model routing | OpenAI API directly (single provider OK for MVP) | LiteLLM + Kong AI Gateway |
+| Model routing | LiteLLM multi-provider (groq/openai/anthropic/azure) | + Kong AI Gateway for token budgets |
 | Infra | `docker-compose` local | Bicep → ACA, Azure Front Door |
 | CI/CD | Basic GHA lint + test | GHA with eval gates, blue/green |
 | Scenarios | 10 scenarios, 4 failure classes | 40 scenarios, 8 classes |
@@ -42,17 +42,50 @@ The agent makes 6-10 tool calls per incident. Every destructive action is gated 
 ```
 Runtime:          Python 3.12+
 Agent framework:  openai-agents (OpenAI Agents SDK)
-LLM:              LLM: Groq API (OpenAI-compatible) — llama-3.3-70b-versatile for orchestration + analysis, llama-3.1-8b-instant for triage + eval judge. Gemini 2.5 Flash as backup via google-genai SDK.
+LLM:              LiteLLM (openai-agents[litellm]) — provider/model string selects
+                  provider at runtime. Defaults to Groq. See available_models.md.
+                  Supported: groq/, openai/, anthropic/, azure/
+                  Gemini excluded — will be added later via Google ADK.
 Tool schemas:     Pydantic v2
 Memory store:     SQLite (via aiosqlite) — episodic + semantic tables
 Short-term mem:   Python dict (per-incident, in-process)
-Embeddings:       Embeddings: sentence-transformers all-MiniLM-L6-v2 (local, zero cost) — 384 dims. Update SQLite embedding BLOB schema accordingly.
+Embeddings:       sentence-transformers all-MiniLM-L6-v2 (local, zero cost) — 384 dims.
 API layer:        FastAPI + uvicorn
 HTTP client:      httpx (async)
 Testing:          pytest + pytest-asyncio
 Containerization: Docker + docker-compose
 Linting:          ruff
 Type checking:    pyright or mypy
+```
+
+### 3.1 Provider Layer
+
+Sentinel uses a `provider/model` string format (matching LiteLLM conventions) to select the LLM backend at runtime. A single env-var change switches any agent's model — no code changes needed.
+
+**Format:** `<provider>/<model-name>` — e.g. `groq/llama-3.3-70b-versatile`, `anthropic/claude-sonnet-4-6`, `openai/gpt-4o`
+
+**Supported providers:**
+
+| Prefix | Backend | Key env var | Notes |
+|---|---|---|---|
+| `groq/` | Groq Cloud | `GROQ_API_KEY` | Default for dev — fast, free tier |
+| `openai/` | OpenAI direct | `OPENAI_API_KEY` | GPT-4o family |
+| `anthropic/` | Anthropic direct | `ANTHROPIC_API_KEY` | Claude family |
+| `azure/` | Azure OpenAI | `AZURE_API_KEY` + `AZURE_API_BASE` | Enterprise deployments |
+
+**Gemini:** Explicitly excluded from this layer. Will be added later via Google ADK integration (separate plan).
+
+**Bridge library:** `openai-agents[litellm]` — LiteLLM handles provider routing, auth, and response normalization. `resolve_model()` in `src/sentinel/providers/resolver.py` maps a `provider/model` string + Settings → `LitellmModel` instance.
+
+**Capability differences:** Not all providers support structured outputs (JSON mode). `get_capabilities()` in `src/sentinel/providers/capabilities.py` returns a `ProviderCapabilities` flag set per provider. Agent builders conditionally set `output_type=` only when the provider supports it; otherwise, a `coerce_output()` fallback parses plain-text responses into Pydantic models.
+
+**Directory:** `src/sentinel/providers/`
+```
+providers/
+├── __init__.py          # re-exports resolve_model, get_capabilities, apply_sdk_defaults
+├── resolver.py          # provider/model string → LitellmModel instance
+├── capabilities.py      # per-provider feature flags (structured_outputs, strict_schemas)
+└── output_coercion.py   # plain-text → Pydantic fallback for non-structured providers
 ```
 
 ---

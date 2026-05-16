@@ -4,23 +4,21 @@ from __future__ import annotations
 
 import pytest
 from agents import Agent
-from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-from openai import AsyncOpenAI
+from agents.extensions.models.litellm_model import LitellmModel
 
 from sentinel.agents.comms import COMMS_AGENT_NAME, build_comms_agent
+from sentinel.config import Settings
 from sentinel.models.comms import SlackSummary
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture()
-def groq_client() -> AsyncOpenAI:
-    return AsyncOpenAI(api_key="test-key", base_url="https://api.groq.com/openai/v1")
-
-
-@pytest.fixture()
-def comms_agent(groq_client: AsyncOpenAI) -> Agent[SlackSummary]:
-    return build_comms_agent(groq_client=groq_client)
+def comms_agent(fake_settings: Settings) -> Agent[SlackSummary]:
+    return build_comms_agent(
+        model_string="groq/llama-3.1-8b-instant",
+        settings=fake_settings,
+    )
 
 
 # ── SlackSummary model ────────────────────────────────────────────────────────
@@ -149,7 +147,8 @@ def test_comms_agent_no_extra_tools(comms_agent: Agent[SlackSummary]) -> None:
 
 
 def test_comms_agent_output_type(comms_agent: Agent[SlackSummary]) -> None:
-    assert comms_agent.output_type is not None
+    # Groq does not support native structured outputs via LiteLLM, so output_type is None
+    assert comms_agent.output_type is None
 
 
 def test_comms_agent_has_instructions(comms_agent: Agent[SlackSummary]) -> None:
@@ -182,22 +181,26 @@ def test_comms_agent_instructions_mention_incidents_channel(
     assert "#incidents" in comms_agent.instructions
 
 
-def test_comms_agent_uses_groq_model(comms_agent: Agent[SlackSummary]) -> None:
-    assert isinstance(comms_agent.model, OpenAIChatCompletionsModel)
+def test_comms_agent_uses_litellm_model(comms_agent: Agent[SlackSummary]) -> None:
+    assert isinstance(comms_agent.model, LitellmModel)
 
 
-def test_comms_agent_default_model_name(groq_client: AsyncOpenAI) -> None:
-    agent = build_comms_agent(groq_client=groq_client)
-    assert isinstance(agent.model, OpenAIChatCompletionsModel)
-    assert agent.model.model == "llama-3.1-8b-instant"
-
-
-def test_comms_agent_custom_model_name(groq_client: AsyncOpenAI) -> None:
+def test_comms_agent_model_string_forwarded(fake_settings: Settings) -> None:
     agent = build_comms_agent(
-        groq_client=groq_client, model_name="llama-3.3-70b-versatile"
+        model_string="groq/llama-3.1-8b-instant",
+        settings=fake_settings,
     )
-    assert isinstance(agent.model, OpenAIChatCompletionsModel)
-    assert agent.model.model == "llama-3.3-70b-versatile"
+    assert isinstance(agent.model, LitellmModel)
+    assert agent.model.model == "groq/llama-3.1-8b-instant"
+
+
+def test_comms_agent_custom_model_string(fake_settings: Settings) -> None:
+    agent = build_comms_agent(
+        model_string="groq/llama-3.3-70b-versatile",
+        settings=fake_settings,
+    )
+    assert isinstance(agent.model, LitellmModel)
+    assert agent.model.model == "groq/llama-3.3-70b-versatile"
 
 
 def test_comms_agent_no_handoffs(comms_agent: Agent[SlackSummary]) -> None:

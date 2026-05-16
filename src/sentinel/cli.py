@@ -47,7 +47,7 @@ def _serve(port: int = 8000, host: str = "0.0.0.0") -> None:
     _seed_database()
     print()
     print(f"  Starting dashboard on http://localhost:{port}")
-    print(f"  Press Ctrl+C to stop")
+    print("  Press Ctrl+C to stop")
     print()
 
     uvicorn.run(
@@ -69,7 +69,7 @@ def _run_scenario(scenario_id: str) -> None:
         sys.path.insert(0, scripts_dir)
 
     from run_scenario import run_scenario  # type: ignore[import-not-found]
-    asyncio.run(run_scenario(scenario_id))
+    asyncio.run(run_scenario(scenario_id))  # pyright: ignore[reportUnknownArgumentType]
 
 
 def _list_scenarios() -> None:

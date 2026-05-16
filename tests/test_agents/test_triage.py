@@ -7,11 +7,11 @@ from unittest.mock import MagicMock
 
 import pytest
 from agents import Agent
-from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-from openai import AsyncOpenAI
+from agents.extensions.models.litellm_model import LitellmModel
 
 from data.seed import seed
 from sentinel.agents.triage import TRIAGE_AGENT_NAME, build_triage_agent
+from sentinel.config import Settings
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.incident import Severity, TriageResult
@@ -38,21 +38,16 @@ def episodic_memory(db_path: Path) -> EpisodicMemory:
 
 
 @pytest.fixture()
-def groq_client() -> AsyncOpenAI:
-    return AsyncOpenAI(api_key="test-key", base_url="https://api.groq.com/openai/v1")
-
-
-@pytest.fixture()
 def triage_agent(
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
-    groq_client: AsyncOpenAI,
+    fake_settings: Settings,
 ) -> Agent[TriageResult]:
     return build_triage_agent(
         semantic_memory,
         episodic_memory,
-        groq_client=groq_client,
-        model_name="llama-3.1-8b-instant",
+        model_string="groq/llama-3.1-8b-instant",
+        settings=fake_settings,
     )
 
 
@@ -165,7 +160,7 @@ def test_triage_agent_no_extra_tools(triage_agent: Agent[TriageResult]) -> None:
 
 
 def test_triage_agent_output_type(triage_agent: Agent[TriageResult]) -> None:
-    assert triage_agent.output_type is not None
+    assert triage_agent.output_type is None
 
 
 def test_triage_agent_has_instructions(triage_agent: Agent[TriageResult]) -> None:
@@ -178,33 +173,38 @@ def test_triage_agent_instructions_mention_severity(triage_agent: Agent[TriageRe
     assert "P1" in triage_agent.instructions
 
 
-def test_triage_agent_uses_groq_model(triage_agent: Agent[TriageResult]) -> None:
-    assert isinstance(triage_agent.model, OpenAIChatCompletionsModel)
+def test_triage_agent_uses_litellm_model(triage_agent: Agent[TriageResult]) -> None:
+    assert isinstance(triage_agent.model, LitellmModel)
 
 
-def test_triage_agent_default_model_name(
+def test_triage_agent_model_string_forwarded(
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
-    groq_client: AsyncOpenAI,
-) -> None:
-    agent = build_triage_agent(semantic_memory, episodic_memory, groq_client=groq_client)
-    assert isinstance(agent.model, OpenAIChatCompletionsModel)
-    assert agent.model.model == "llama-3.1-8b-instant"
-
-
-def test_triage_agent_custom_model_name(
-    semantic_memory: SemanticMemory,
-    episodic_memory: EpisodicMemory,
-    groq_client: AsyncOpenAI,
+    fake_settings: Settings,
 ) -> None:
     agent = build_triage_agent(
         semantic_memory,
         episodic_memory,
-        groq_client=groq_client,
-        model_name="llama-3.3-70b-versatile",
+        model_string="groq/llama-3.1-8b-instant",
+        settings=fake_settings,
     )
-    assert isinstance(agent.model, OpenAIChatCompletionsModel)
-    assert agent.model.model == "llama-3.3-70b-versatile"
+    assert isinstance(agent.model, LitellmModel)
+    assert agent.model.model == "groq/llama-3.1-8b-instant"
+
+
+def test_triage_agent_custom_model_string(
+    semantic_memory: SemanticMemory,
+    episodic_memory: EpisodicMemory,
+    fake_settings: Settings,
+) -> None:
+    agent = build_triage_agent(
+        semantic_memory,
+        episodic_memory,
+        model_string="groq/llama-3.3-70b-versatile",
+        settings=fake_settings,
+    )
+    assert isinstance(agent.model, LitellmModel)
+    assert agent.model.model == "groq/llama-3.3-70b-versatile"
 
 
 def test_triage_agent_no_handoffs(triage_agent: Agent[TriageResult]) -> None:

@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import pytest
 from agents import Agent
-from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-from openai import AsyncOpenAI
+from agents.extensions.models.litellm_model import LitellmModel
 
 from sentinel.agents.remediation import REMEDIATION_AGENT_NAME, build_remediation_agent
+from sentinel.config import Settings
 from sentinel.models.remediation import (
     ApprovalStatus,
     RemediationAction,
@@ -26,13 +26,11 @@ from sentinel.models.remediation import (
 
 
 @pytest.fixture()
-def groq_client() -> AsyncOpenAI:
-    return AsyncOpenAI(api_key="test-key", base_url="https://api.groq.com/openai/v1")
-
-
-@pytest.fixture()
-def remediation_agent(groq_client: AsyncOpenAI) -> Agent[RemediationPlan]:
-    return build_remediation_agent(groq_client=groq_client)
+def remediation_agent(fake_settings: Settings) -> Agent[RemediationPlan]:
+    return build_remediation_agent(
+        model_string="groq/llama-3.3-70b-versatile",
+        settings=fake_settings,
+    )
 
 
 # ── RemediationPlan model ─────────────────────────────────────────────────────
@@ -207,7 +205,7 @@ def test_remediation_agent_no_direct_execution_tools(
 
 
 def test_remediation_agent_output_type(remediation_agent: Agent[RemediationPlan]) -> None:
-    assert remediation_agent.output_type is not None
+    assert remediation_agent.output_type is None
 
 
 def test_remediation_agent_has_instructions(remediation_agent: Agent[RemediationPlan]) -> None:
@@ -231,34 +229,42 @@ def test_remediation_agent_instructions_mention_rollback_and_hotfix(
     assert "hotfix" in remediation_agent.instructions.lower()
 
 
-def test_remediation_agent_uses_groq_model(remediation_agent: Agent[RemediationPlan]) -> None:
-    assert isinstance(remediation_agent.model, OpenAIChatCompletionsModel)
+def test_remediation_agent_uses_litellm_model(remediation_agent: Agent[RemediationPlan]) -> None:
+    assert isinstance(remediation_agent.model, LitellmModel)
 
 
-def test_remediation_agent_default_model_name(groq_client: AsyncOpenAI) -> None:
-    agent = build_remediation_agent(groq_client=groq_client)
-    assert isinstance(agent.model, OpenAIChatCompletionsModel)
-    assert agent.model.model == "llama-3.3-70b-versatile"
-
-
-def test_remediation_agent_custom_model_name(groq_client: AsyncOpenAI) -> None:
+def test_remediation_agent_model_string_forwarded(fake_settings: Settings) -> None:
     agent = build_remediation_agent(
-        groq_client=groq_client, model_name="llama-3.1-8b-instant"
+        model_string="groq/llama-3.3-70b-versatile",
+        settings=fake_settings,
     )
-    assert isinstance(agent.model, OpenAIChatCompletionsModel)
-    assert agent.model.model == "llama-3.1-8b-instant"
+    assert isinstance(agent.model, LitellmModel)
+    assert agent.model.model == "groq/llama-3.3-70b-versatile"
+
+
+def test_remediation_agent_custom_model_string(fake_settings: Settings) -> None:
+    agent = build_remediation_agent(
+        model_string="groq/llama-3.1-8b-instant",
+        settings=fake_settings,
+    )
+    assert isinstance(agent.model, LitellmModel)
+    assert agent.model.model == "groq/llama-3.1-8b-instant"
 
 
 def test_remediation_agent_no_handoffs(remediation_agent: Agent[RemediationPlan]) -> None:
     assert len(remediation_agent.handoffs) == 0
 
 
-def test_remediation_agent_custom_approval_fn(groq_client: AsyncOpenAI) -> None:
+def test_remediation_agent_custom_approval_fn(fake_settings: Settings) -> None:
     """Agent must accept an injectable approval_fn for test/Phase 2 use."""
     async def mock_approval(display: str) -> tuple[str, str | None]:
         return "approve", "auto-approved in test"
 
-    agent = build_remediation_agent(groq_client=groq_client, approval_fn=mock_approval)
+    agent = build_remediation_agent(
+        model_string="groq/llama-3.3-70b-versatile",
+        settings=fake_settings,
+        approval_fn=mock_approval,
+    )
     assert isinstance(agent, Agent)
     # HITL tool still present even with custom approval function
     names = {t.name for t in agent.tools}

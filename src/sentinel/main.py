@@ -15,11 +15,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from agents import Runner, add_trace_processor, set_default_openai_client
+from agents import Runner, add_trace_processor, handoff
 from agents import trace as agent_trace
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-from openai import AsyncOpenAI
 
 from sentinel.agents.comms import build_comms_agent
 from sentinel.agents.deploy_correlator import build_deploy_correlator_agent
@@ -39,7 +38,9 @@ from sentinel.api.health import make_health_router
 from sentinel.api.incidents import make_incidents_router
 from sentinel.api.scenarios import make_scenarios_router
 from sentinel.api.webhooks import AlertDeduplicator, PipelineFn, make_alert_router
-from sentinel.config import get_settings
+from sentinel.config import Settings, get_settings
+from sentinel.generator.alert_gen import load_scenario
+from sentinel.generator.scenarios import Scenario
 from sentinel.infra.dashboard_emitter import DashboardEventEmitter
 from sentinel.infra.db import create_tables
 from sentinel.infra.event_bus import EventBus
@@ -51,6 +52,8 @@ from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import AlertPayload
 from sentinel.models.incident import IncidentStatus
+from sentinel.providers import apply_sdk_defaults, get_capabilities
+from sentinel.tools.hitl import ApprovalFn
 
 _DASHBOARD_HTML = Path(__file__).resolve().parent / "dashboard" / "index.html"
 _EVAL_HTML = Path(__file__).resolve().parent / "dashboard" / "eval.html"
@@ -58,26 +61,89 @@ _EVAL_HTML = Path(__file__).resolve().parent / "dashboard" / "eval.html"
 logger = get_logger("sentinel.main")
 
 
+def _build_orchestrator_for_scenario(
+    scenario: Scenario | None,
+    settings: Settings,
+    semantic_memory: SemanticMemory,
+    episodic_memory: EpisodicMemory,
+    approval_fn: ApprovalFn | None = None,
+) -> Any:
+    """Build a full orchestrator pipeline with scenario data injected.
+
+    Rebuilds all agents per-incident so the log/deploy tools have access to
+    the scenario's synthetic data. The construction cost is negligible — it's
+    just Python object creation, not LLM calls.
+    """
+    triage_agent = build_triage_agent(
+        semantic_memory,
+        episodic_memory,
+        model_string=settings.sentinel_triage_model,
+        settings=settings,
+    )
+    log_analyst_agent = build_log_analyst_agent(
+        semantic_memory,
+        scenario,
+        model_string=settings.sentinel_analysis_model,
+        settings=settings,
+    )
+    deploy_correlator_agent = build_deploy_correlator_agent(
+        scenario,
+        model_string=settings.sentinel_triage_model,
+        settings=settings,
+    )
+    remediation_agent = build_remediation_agent(
+        model_string=settings.sentinel_analysis_model,
+        settings=settings,
+        approval_fn=approval_fn,
+    )
+    comms_agent = build_comms_agent(
+        model_string=settings.sentinel_triage_model,
+        settings=settings,
+    )
+    orchestrator = build_orchestrator_agent(
+        triage_agent,
+        log_analyst_agent,
+        deploy_correlator_agent,
+        remediation_agent,
+        comms_agent,
+        model_string=settings.sentinel_analysis_model,
+        settings=settings,
+    )
+
+    caps = get_capabilities(settings.sentinel_analysis_model)
+    back = handoff(orchestrator)
+    back.strict_json_schema = caps.strict_schemas
+    for specialist in [
+        triage_agent, log_analyst_agent, deploy_correlator_agent,
+        remediation_agent, comms_agent,
+    ]:
+        specialist.handoffs = [back]
+
+    return orchestrator
+
+
 def make_pipeline_fn(
-    orchestrator: Any,
+    settings: Settings,
+    semantic_memory: SemanticMemory,
+    episodic_memory: EpisodicMemory,
     short_term_memory: ShortTermMemory,
     max_turns: int = 15,
     event_bus: EventBus | None = None,
+    approval_fn: ApprovalFn | None = None,
 ) -> PipelineFn:
     """Build the async pipeline callback fired by the webhook for each new alert.
 
-    Extracted from ``lifespan`` so it can be unit-tested by injecting a mock
-    orchestrator without running the full app startup sequence.
+    Agents are rebuilt per-incident so scenario-based alerts get their synthetic
+    log/deploy data injected into the tools.
 
     Args:
-        orchestrator: The pre-built Orchestrator Agent (any context type).
+        settings: Validated Settings for model resolution and API keys.
+        semantic_memory: Shared semantic memory for service lookups.
+        episodic_memory: Shared episodic memory for past incident search.
         short_term_memory: Live STM — updated with terminal status on completion.
-        max_turns: Maximum agent turns before the SDK raises an error. Mirrors
-            ``sentinel_max_tool_calls`` from Settings.
-        event_bus: Optional EventBus — when provided, the incident_id is set in
-            ``_CURRENT_INCIDENT_ID`` so the dashboard approval_fn can resolve
-            HITL gates, and an ``incident_resolved`` event is published on
-            pipeline completion.
+        max_turns: Maximum agent turns before the SDK raises an error.
+        event_bus: Optional EventBus for dashboard streaming.
+        approval_fn: Optional HITL callback for the remediation agent.
 
     Returns:
         Async callable ``(incident_id, alert) → None`` suitable for passing to
@@ -86,16 +152,25 @@ def make_pipeline_fn(
 
     async def run_pipeline(incident_id: str, alert: AlertPayload) -> None:
         logger.info("pipeline_start", incident_id=incident_id, service=alert.service)
-        # Propagate incident_id into the async context so the dashboard
-        # approval_fn can create the correct HITL gate without an extra arg.
+
+        scenario_id = alert.metadata.get("scenario_id")
+        scenario: Scenario | None = None
+        if scenario_id:
+            try:
+                scenario = load_scenario(str(scenario_id))
+            except FileNotFoundError:
+                logger.warning("scenario_not_found", scenario_id=scenario_id)
+
+        orchestrator = _build_orchestrator_for_scenario(
+            scenario, settings, semantic_memory, episodic_memory, approval_fn
+        )
+
         token = set_current_incident(incident_id)
         try:
             input_text = (
                 f"New incident ID: {incident_id}\n"
                 f"Alert payload: {alert.model_dump_json()}"
             )
-            # Wrap in a named trace so SentinelTracer can associate spans
-            # with this incident via span.trace_metadata["incident_id"].
             with agent_trace(
                 "incident_pipeline",
                 metadata={"incident_id": incident_id},
@@ -107,7 +182,7 @@ def make_pipeline_fn(
                     incident_id, status=IncidentStatus.RESOLVED
                 )
             except KeyError:
-                pass  # incident was cleared externally during pipeline
+                pass
             if event_bus is not None:
                 from sentinel.infra.event_bus import EventType, PipelineEvent  # noqa: PLC0415
                 await event_bus.publish(
@@ -169,56 +244,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     episodic_memory = EpisodicMemory(settings.sentinel_db_path, embedding_client)
     short_term_memory = ShortTermMemory()
 
-    # ── LLM client ────────────────────────────────────────────────────────────
-    groq_client = AsyncOpenAI(
-        api_key=settings.groq_api_key,
-        base_url=settings.groq_base_url,
-    )
-    # Set as SDK default so Runner and any SDK-internal calls use Groq.
-    set_default_openai_client(groq_client)
+    # ── LLM + SDK defaults ────────────────────────────────────────────────────
+    apply_sdk_defaults(settings)
 
-    # ── Specialist agents ─────────────────────────────────────────────────────
-    triage_agent = build_triage_agent(
-        semantic_memory,
-        episodic_memory,
-        groq_client=groq_client,
-        model_name=settings.sentinel_triage_model,
-    )
-    log_analyst_agent = build_log_analyst_agent(
-        semantic_memory,
-        scenario=None,  # MVP: no pre-loaded scenario in production mode
-        groq_client=groq_client,
-        model_name=settings.sentinel_analysis_model,
-    )
-    deploy_correlator_agent = build_deploy_correlator_agent(
-        scenario=None,
-        groq_client=groq_client,
-        model_name=settings.sentinel_triage_model,
-    )
+    # ── Event bus + HITL ──────────────────────────────────────────────────────
     event_bus = EventBus()
     gate_registry = HitlGateRegistry()
     api_approval_fn = make_api_approval_fn(event_bus, gate_registry)
-
-    remediation_agent = build_remediation_agent(
-        groq_client=groq_client,
-        model_name=settings.sentinel_analysis_model,
-        approval_fn=api_approval_fn,
-    )
-    comms_agent = build_comms_agent(
-        groq_client=groq_client,
-        model_name=settings.sentinel_triage_model,
-    )
-
-    # ── Orchestrator ──────────────────────────────────────────────────────────
-    orchestrator = build_orchestrator_agent(
-        triage_agent,
-        log_analyst_agent,
-        deploy_correlator_agent,
-        remediation_agent,
-        comms_agent,
-        groq_client=groq_client,
-        model_name=settings.sentinel_analysis_model,
-    )
 
     # ── Trajectory tracing ────────────────────────────────────────────────────
     trajectories_dir = Path("reports/trajectories")
@@ -230,12 +262,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     add_trace_processor(dashboard_emitter)
 
     # ── API wiring ────────────────────────────────────────────────────────────
+    # Agents are built per-incident inside make_pipeline_fn so scenario-based
+    # alerts get their synthetic log/deploy data injected into the tools.
     deduplicator = AlertDeduplicator()
     pipeline_fn = make_pipeline_fn(
-        orchestrator,
+        settings,
+        semantic_memory,
+        episodic_memory,
         short_term_memory,
-        max_turns=settings.sentinel_max_tool_calls,
+        max_turns=settings.sentinel_max_tool_calls + 5,
         event_bus=event_bus,
+        approval_fn=api_approval_fn,
     )
 
     app.include_router(make_alert_router(deduplicator, short_term_memory, pipeline_fn))

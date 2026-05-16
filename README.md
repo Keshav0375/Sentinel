@@ -90,7 +90,27 @@ uvicorn sentinel.main:app --reload
 
 Dashboard: [http://localhost:8000](http://localhost:8000)
 
-### 3. Fire a scenario
+### 3. Switch providers (optional)
+
+Model strings use the `provider/model` format. Swap any provider with 3 env vars — no code changes.
+
+**Switch analysis to Anthropic Claude:**
+```env
+SENTINEL_ANALYSIS_MODEL=anthropic/claude-sonnet-4-6
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**Switch everything to OpenAI:**
+```env
+SENTINEL_TRIAGE_MODEL=openai/gpt-4o-mini
+SENTINEL_ANALYSIS_MODEL=openai/gpt-4o
+SENTINEL_JUDGE_MODEL=openai/gpt-4o-mini
+OPENAI_API_KEY=sk-...
+```
+
+See [available_models.md](available_models.md) for the full model table and provider capability matrix.
+
+### 4. Fire a scenario
 
 **From the dashboard** — select a scenario from the dropdown and click ⚡ Fire Scenario.
 
@@ -101,7 +121,7 @@ python scripts/run_scenario.py bad_deploy_01
 python scripts/run_scenario.py --list   # see all 10 scenarios
 ```
 
-### 4. Run the eval suite
+### 5. Run the eval suite
 
 ```bash
 python scripts/run_eval.py
@@ -133,7 +153,7 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 | Layer | Technology |
 |-------|-----------|
 | Agent framework | [openai-agents](https://github.com/openai/openai-agents-python) (Agents SDK) |
-| LLM | Groq API — `llama-3.3-70b-versatile` (analysis), `llama-3.1-8b-instant` (triage + eval judge) |
+| LLM | LiteLLM multi-provider — `groq/`, `openai/`, `anthropic/`, `azure/` via `provider/model` env var. Default: Groq (free tier). See [available_models.md](available_models.md). |
 | API layer | FastAPI + uvicorn |
 | Memory — episodic | SQLite via aiosqlite + cosine similarity |
 | Memory — semantic | SQLite (service map, runbooks) |
@@ -217,7 +237,7 @@ _Documented here for interview conversations about production readiness:_
 | Cloud deployment | Azure Container Apps + Bicep IaC |
 | Database | Cosmos DB (vector + JSON) replacing SQLite |
 | Cache | Redis for short-term memory |
-| Model routing | LiteLLM + Kong AI Gateway for token budgets |
+| Model routing | LiteLLM done (Phase 9) — Kong AI Gateway for token budgets is Phase 2 |
 | Observability | Self-hosted LangFuse for trace dashboards |
 | HITL channel | Slack interactive buttons (real Slack app) |
 | PR creation | GitHub App for real PR creation |

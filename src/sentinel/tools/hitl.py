@@ -35,7 +35,7 @@ def make_hitl_tool(
     """
     handler = approval_fn or _terminal_approval
 
-    @function_tool
+    @function_tool(strict_mode=False)
     async def request_human_approval(
         action: str,
         risk_level: str,
@@ -152,7 +152,11 @@ def _format_result(
 
 async def _terminal_approval(display: str) -> tuple[str, str | None]:
     """Default MVP approval handler: print request, wait for terminal input."""
-    print(display)  # noqa: T201
+    import sys  # noqa: PLC0415
+
+    sys.stdout.buffer.write(display.encode("utf-8", errors="replace"))
+    sys.stdout.buffer.write(b"\n")
+    sys.stdout.buffer.flush()
     response = await asyncio.to_thread(
         input, "\n>>> Enter 'approve' or 'reject': "
     )

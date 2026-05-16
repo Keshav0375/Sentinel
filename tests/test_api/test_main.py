@@ -8,12 +8,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
+from sentinel.config import Settings
 from sentinel.main import create_app, make_pipeline_fn
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
 from sentinel.models.incident import IncidentStatus
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+_ORCH_PATCH = "sentinel.main._build_orchestrator_for_scenario"
+
+
+def _fake_settings() -> Settings:
+    return Settings(groq_api_key="gsk_test", _env_file=None)
 
 
 def _make_alert(service: str = "api-gateway") -> AlertPayload:
@@ -31,6 +38,13 @@ def _populated_stm(incident_id: str = "inc-test0001") -> ShortTermMemory:
     stm = ShortTermMemory()
     stm.create(incident_id, _make_alert())
     return stm
+
+
+def _make_fn(stm: ShortTermMemory, **kwargs: Any) -> Any:
+    """Build make_pipeline_fn with mock dependencies."""
+    return make_pipeline_fn(
+        _fake_settings(), MagicMock(), MagicMock(), stm, **kwargs
+    )
 
 
 # ── create_app ────────────────────────────────────────────────────────────────
@@ -69,7 +83,7 @@ def test_module_level_app_is_fastapi() -> None:
 
 def test_make_pipeline_fn_returns_callable() -> None:
     stm = ShortTermMemory()
-    fn = make_pipeline_fn(MagicMock(), stm)
+    fn = _make_fn(stm)
     assert callable(fn)
 
 
@@ -78,8 +92,11 @@ async def test_pipeline_fn_marks_incident_resolved_on_success() -> None:
     stm = _populated_stm()
     mock_result = MagicMock()
 
-    with patch("sentinel.main.Runner.run", new_callable=AsyncMock, return_value=mock_result):
-        fn = make_pipeline_fn(MagicMock(), stm)
+    with (
+        patch(_ORCH_PATCH, return_value=MagicMock()),
+        patch("sentinel.main.Runner.run", new_callable=AsyncMock, return_value=mock_result),
+    ):
+        fn = _make_fn(stm)
         await fn("inc-test0001", _make_alert())
 
     assert stm.get_context("inc-test0001")["status"] == IncidentStatus.RESOLVED
@@ -89,12 +106,15 @@ async def test_pipeline_fn_marks_incident_resolved_on_success() -> None:
 async def test_pipeline_fn_marks_incident_escalated_on_exception() -> None:
     stm = _populated_stm()
 
-    with patch(
-        "sentinel.main.Runner.run",
-        new_callable=AsyncMock,
-        side_effect=RuntimeError("LLM timeout"),
+    with (
+        patch(_ORCH_PATCH, return_value=MagicMock()),
+        patch(
+            "sentinel.main.Runner.run",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("LLM timeout"),
+        ),
     ):
-        fn = make_pipeline_fn(MagicMock(), stm)
+        fn = _make_fn(stm)
         await fn("inc-test0001", _make_alert())
 
     assert stm.get_context("inc-test0001")["status"] == IncidentStatus.ESCALATED
@@ -105,13 +125,15 @@ async def test_pipeline_fn_does_not_raise_on_exception() -> None:
     """Exceptions inside the pipeline must be caught — never propagate to caller."""
     stm = _populated_stm()
 
-    with patch(
-        "sentinel.main.Runner.run",
-        new_callable=AsyncMock,
-        side_effect=Exception("catastrophic failure"),
+    with (
+        patch(_ORCH_PATCH, return_value=MagicMock()),
+        patch(
+            "sentinel.main.Runner.run",
+            new_callable=AsyncMock,
+            side_effect=Exception("catastrophic failure"),
+        ),
     ):
-        fn = make_pipeline_fn(MagicMock(), stm)
-        # If this raises, the test fails
+        fn = _make_fn(stm)
         await fn("inc-test0001", _make_alert())
 
 
@@ -123,12 +145,15 @@ async def test_pipeline_fn_handles_cleared_incident_gracefully() -> None:
     mock_result = MagicMock()
 
     async def clear_during_pipeline(*args: Any, **kwargs: Any) -> MagicMock:
-        stm.clear("inc-cleared01")  # simulate concurrent clear
+        stm.clear("inc-cleared01")
         return mock_result
 
-    with patch("sentinel.main.Runner.run", side_effect=clear_during_pipeline):
-        fn = make_pipeline_fn(MagicMock(), stm)
-        await fn("inc-cleared01", _make_alert())  # must not raise KeyError
+    with (
+        patch(_ORCH_PATCH, return_value=MagicMock()),
+        patch("sentinel.main.Runner.run", side_effect=clear_during_pipeline),
+    ):
+        fn = _make_fn(stm)
+        await fn("inc-cleared01", _make_alert())
 
 
 @pytest.mark.asyncio
@@ -141,8 +166,11 @@ async def test_pipeline_fn_passes_incident_id_in_input() -> None:
         captured.append(input_text)
         return MagicMock()
 
-    with patch("sentinel.main.Runner.run", side_effect=capture_input):
-        fn = make_pipeline_fn(MagicMock(), stm)
+    with (
+        patch(_ORCH_PATCH, return_value=MagicMock()),
+        patch("sentinel.main.Runner.run", side_effect=capture_input),
+    ):
+        fn = _make_fn(stm)
         await fn("inc-idcheck0", _make_alert())
 
     assert len(captured) == 1
@@ -159,8 +187,11 @@ async def test_pipeline_fn_respects_max_turns() -> None:
         captured_kwargs.append(kwargs)
         return MagicMock()
 
-    with patch("sentinel.main.Runner.run", side_effect=capture_kwargs):
-        fn = make_pipeline_fn(MagicMock(), stm, max_turns=7)
+    with (
+        patch(_ORCH_PATCH, return_value=MagicMock()),
+        patch("sentinel.main.Runner.run", side_effect=capture_kwargs),
+    ):
+        fn = _make_fn(stm, max_turns=7)
         await fn("inc-test0001", _make_alert())
 
     assert captured_kwargs[0]["max_turns"] == 7
@@ -172,15 +203,15 @@ async def test_pipeline_fn_default_max_turns() -> None:
     stm = _populated_stm()
     captured: list[dict[str, Any]] = []
 
-    async def capture(**kwargs: Any) -> MagicMock:
-        return MagicMock()
-
     async def capture_kwargs(agent: Any, input_text: str, **kwargs: Any) -> MagicMock:
         captured.append(kwargs)
         return MagicMock()
 
-    with patch("sentinel.main.Runner.run", side_effect=capture_kwargs):
-        fn = make_pipeline_fn(MagicMock(), stm)  # default max_turns=15
+    with (
+        patch(_ORCH_PATCH, return_value=MagicMock()),
+        patch("sentinel.main.Runner.run", side_effect=capture_kwargs),
+    ):
+        fn = _make_fn(stm)
         await fn("inc-test0001", _make_alert())
 
     assert captured[0]["max_turns"] == 15

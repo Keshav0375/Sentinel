@@ -16,7 +16,7 @@ def make_remediation_tools() -> list[FunctionTool]:
         List of [draft_rollback_pr, draft_hotfix] FunctionTools.
     """
 
-    @function_tool
+    @function_tool(strict_mode=False)
     async def draft_rollback_pr(deploy_id: str, justification: str) -> str:
         """Draft a pull request to roll back a specific deploy.
 
@@ -30,7 +30,7 @@ def make_remediation_tools() -> list[FunctionTool]:
         """
         return _draft_rollback_pr(deploy_id, justification)
 
-    @function_tool
+    @function_tool(strict_mode=False)
     async def draft_hotfix(file_path: str, fix_description: str) -> str:
         """Draft a minimal hotfix patch for a specific file.
 

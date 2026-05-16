@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from agents import Agent
-from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-from openai import AsyncOpenAI
 
 from sentinel.agents.loader import load_prompt
+from sentinel.config import Settings
 from sentinel.generator.scenarios import Scenario
 from sentinel.models.deploy import DeployCorrelation
+from sentinel.providers import get_capabilities, resolve_model
 from sentinel.tools.deploy_checker import make_deploy_checker_tool
 
 DEPLOY_CORRELATOR_AGENT_NAME = "deploy_correlator_agent"
@@ -17,8 +19,8 @@ DEPLOY_CORRELATOR_AGENT_NAME = "deploy_correlator_agent"
 def build_deploy_correlator_agent(
     scenario: Scenario | None,
     *,
-    groq_client: AsyncOpenAI,
-    model_name: str = "llama-3.1-8b-instant",
+    model_string: str,
+    settings: Settings,
 ) -> Agent[DeployCorrelation]:
     """Create a configured Deploy Correlator Agent with injected dependencies.
 
@@ -32,17 +34,21 @@ def build_deploy_correlator_agent(
         scenario: Active scenario supplying synthetic deploy history in the
             MVP. ``None`` causes ``list_recent_deploys`` to return an error
             response at call time rather than crashing at construction.
-        groq_client: Pre-configured AsyncOpenAI client pointed at Groq's API.
-        model_name: Groq model to use. Defaults to llama-3.1-8b-instant (the
-            fast classification model, equivalent to gpt-4o-mini — deploy
-            correlation is a structured ranking task that does not require the
-            larger analysis model).
+        model_string: Provider/model string (e.g. 'groq/llama-3.1-8b-instant').
+        settings: Validated Settings instance for API key lookup.
 
     Returns:
         Configured Agent that produces a ``DeployCorrelation`` as structured
-        output.
+        output when the provider supports it, or plain text otherwise.
     """
-    llm = OpenAIChatCompletionsModel(model=model_name, openai_client=groq_client)
+    llm = resolve_model(model_string, settings)
+    caps = get_capabilities(model_string)
+
+    kwargs: dict[str, Any] = {}
+    if caps.supports_structured_outputs:
+        kwargs["output_type"] = DeployCorrelation
+    if caps.default_model_settings:
+        kwargs["model_settings"] = caps.default_model_settings
 
     return Agent(
         name=DEPLOY_CORRELATOR_AGENT_NAME,
@@ -50,6 +56,6 @@ def build_deploy_correlator_agent(
         tools=[
             make_deploy_checker_tool(scenario),
         ],
-        output_type=DeployCorrelation,
         model=llm,
+        **kwargs,
     )

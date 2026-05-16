@@ -26,7 +26,7 @@ def make_deploy_checker_tool(scenario: Scenario | None) -> FunctionTool:
         FunctionTool that agents can call to retrieve deploy history.
     """
 
-    @function_tool
+    @function_tool(strict_mode=False)
     async def list_recent_deploys(service_name: str, hours_back: int) -> str:
         """List deploys to a service within the last N hours, newest first.
 

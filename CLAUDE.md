@@ -106,7 +106,10 @@ result = await Runner.run(orchestrator, input="<alert payload>")
 ## Key Commands
 
 ```bash
-# Run the app
+# Run the app (Poetry)
+poetry run sentinel serve
+
+# Run the app (direct)
 uvicorn sentinel.main:app --reload
 
 # Run tests
@@ -126,7 +129,20 @@ python scripts/run_scenario.py bad_deploy_01
 
 # Run eval suite
 python scripts/run_eval.py
+
+# Sync Poetry venv after dependency changes
+poetry lock && poetry install
 ```
+
+## Post-Implementation Startup Check (Non-Negotiable)
+
+After ANY change that touches `pyproject.toml`, dependencies, imports, or module-level code:
+
+1. Run `poetry lock && poetry install` if `pyproject.toml` changed
+2. Run `poetry run sentinel serve` and verify the server starts without import errors
+3. If adding a new dependency or extra (e.g. `openai-agents[litellm]`), the Poetry lock file MUST be regenerated — `pyproject.toml` alone is not enough
+
+The app must boot cleanly before reporting the task as done. A passing test suite does not guarantee the app starts — tests use their own fixtures and may not trigger the full import chain.
 
 ## HITL Safety Rule (Non-Negotiable)
 

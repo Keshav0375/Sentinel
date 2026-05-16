@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from agents import Runner, add_trace_processor, set_default_openai_client
+from agents import Runner, add_trace_processor
 from agents import trace as agent_trace
 from openai import AsyncOpenAI
 
@@ -30,7 +30,7 @@ from sentinel.agents.log_analyst import build_log_analyst_agent
 from sentinel.agents.orchestrator import build_orchestrator_agent
 from sentinel.agents.remediation import build_remediation_agent
 from sentinel.agents.triage import build_triage_agent
-from sentinel.config import get_settings
+from sentinel.config import Settings, get_settings
 from sentinel.eval.judge import evaluate_trajectory
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario
 from sentinel.generator.scenarios import Scenario
@@ -43,6 +43,7 @@ from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.eval_result import TrajectoryScore
 from sentinel.models.incident import IncidentStatus
+from sentinel.providers import apply_sdk_defaults
 
 logger = get_logger("sentinel.eval.runner")
 
@@ -69,13 +70,11 @@ async def run_scenario_eval(
     *,
     short_term_memory: ShortTermMemory,
     trajectories_dir: Path,
-    groq_client: AsyncOpenAI,
+    settings: Settings,
     judge_model: str,
     max_turns: int = 15,
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
-    analysis_model: str,
-    triage_model: str,
 ) -> EvalRunResult:
     """Run one scenario end-to-end and return a scored result.
 
@@ -90,13 +89,11 @@ async def run_scenario_eval(
         short_term_memory: Shared STM — keyed by incident_id so concurrent
             scenarios don't collide.
         trajectories_dir: Directory where SentinelTracer writes trajectory JSON.
-        groq_client: AsyncOpenAI Groq client for agent LLM calls.
-        judge_model: Model name for the eval judge.
+        settings: Validated Settings — used for provider resolution.
+        judge_model: Bare model name for the eval judge (Groq-compatible).
         max_turns: Tool-call cap per pipeline run.
         semantic_memory: Service metadata store.
         episodic_memory: Past-incident similarity store.
-        analysis_model: Model name for analysis-heavy agents.
-        triage_model: Model name for fast triage/comms agents.
 
     Returns:
         ``EvalRunResult`` with scenario_id, incident_id, score, and error info.
@@ -115,28 +112,28 @@ async def run_scenario_eval(
     triage_agent = build_triage_agent(
         semantic_memory,
         episodic_memory,
-        groq_client=groq_client,
-        model_name=triage_model,
+        model_string=settings.sentinel_triage_model,
+        settings=settings,
     )
     log_analyst_agent = build_log_analyst_agent(
         semantic_memory,
         scenario,
-        groq_client=groq_client,
-        model_name=analysis_model,
+        model_string=settings.sentinel_analysis_model,
+        settings=settings,
     )
     deploy_correlator_agent = build_deploy_correlator_agent(
         scenario,
-        groq_client=groq_client,
-        model_name=triage_model,
+        model_string=settings.sentinel_triage_model,
+        settings=settings,
     )
     remediation_agent = build_remediation_agent(
-        groq_client=groq_client,
-        model_name=analysis_model,
+        model_string=settings.sentinel_analysis_model,
+        settings=settings,
         approval_fn=_auto_approve,
     )
     comms_agent = build_comms_agent(
-        groq_client=groq_client,
-        model_name=triage_model,
+        model_string=settings.sentinel_triage_model,
+        settings=settings,
     )
     orchestrator = build_orchestrator_agent(
         triage_agent,
@@ -144,8 +141,14 @@ async def run_scenario_eval(
         deploy_correlator_agent,
         remediation_agent,
         comms_agent,
-        groq_client=groq_client,
-        model_name=analysis_model,
+        model_string=settings.sentinel_analysis_model,
+        settings=settings,
+    )
+
+    # Judge uses Groq directly (not LiteLLM) — strip provider prefix if present.
+    groq_client = AsyncOpenAI(
+        api_key=settings.groq_api_key,
+        base_url=settings.groq_base_url,
     )
 
     # ── Set up incident in STM ─────────────────────────────────────────────────
@@ -302,11 +305,7 @@ async def run_eval(
     episodic_memory = EpisodicMemory(resolved_db, embedding_client)
     short_term_memory = ShortTermMemory()
 
-    groq_client = AsyncOpenAI(
-        api_key=settings.groq_api_key,
-        base_url=settings.groq_base_url,
-    )
-    set_default_openai_client(groq_client)
+    apply_sdk_defaults(settings)
 
     # Register tracer once — it collects spans for all scenarios via incident_id.
     tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
@@ -330,13 +329,11 @@ async def run_eval(
                 scenario,
                 short_term_memory=short_term_memory,
                 trajectories_dir=resolved_traj,
-                groq_client=groq_client,
+                settings=settings,
                 judge_model=resolved_judge,
-                max_turns=settings.sentinel_max_tool_calls,
+                max_turns=settings.sentinel_max_tool_calls + 5,
                 semantic_memory=semantic_memory,
                 episodic_memory=episodic_memory,
-                analysis_model=settings.sentinel_analysis_model,
-                triage_model=settings.sentinel_triage_model,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(

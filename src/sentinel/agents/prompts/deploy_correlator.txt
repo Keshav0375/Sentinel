@@ -25,3 +25,6 @@ Respond with:
 - Do not assign confidence > 0.5 without both timing proximity and file/module scope evidence.
 - If no deploys exist in the search window, set suspect_deploy=null, confidence=0.0, and state this in evidence.
 - Do not infer causality from timing alone — require corroboration from log evidence.
+
+## When Done
+After producing your deploy correlation, hand off back to the incident_orchestrator by calling transfer_to_incident_orchestrator with no arguments. Do not produce a final text response — always hand off back.
