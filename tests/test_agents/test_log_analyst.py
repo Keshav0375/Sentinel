@@ -7,11 +7,11 @@ from unittest.mock import MagicMock
 
 import pytest
 from agents import Agent
-from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-from openai import AsyncOpenAI
+from agents.extensions.models.litellm_model import LitellmModel
 
 from data.seed import seed
 from sentinel.agents.log_analyst import LOG_ANALYST_AGENT_NAME, build_log_analyst_agent
+from sentinel.config import Settings
 from sentinel.generator.alert_gen import load_scenario
 from sentinel.generator.scenarios import Scenario
 from sentinel.memory.semantic import SemanticMemory
@@ -38,21 +38,16 @@ def scenario() -> Scenario:
 
 
 @pytest.fixture()
-def groq_client() -> AsyncOpenAI:
-    return AsyncOpenAI(api_key="test-key", base_url="https://api.groq.com/openai/v1")
-
-
-@pytest.fixture()
 def log_analyst_agent(
     semantic_memory: SemanticMemory,
     scenario: Scenario,
-    groq_client: AsyncOpenAI,
+    fake_settings: Settings,
 ) -> Agent[LogAnalysis]:
     return build_log_analyst_agent(
         semantic_memory,
         scenario,
-        groq_client=groq_client,
-        model_name="llama-3.3-70b-versatile",
+        model_string="groq/llama-3.3-70b-versatile",
+        settings=fake_settings,
     )
 
 
@@ -154,7 +149,7 @@ def test_log_analyst_agent_no_extra_tools(log_analyst_agent: Agent[LogAnalysis])
 
 
 def test_log_analyst_agent_output_type(log_analyst_agent: Agent[LogAnalysis]) -> None:
-    assert log_analyst_agent.output_type is not None
+    assert log_analyst_agent.output_type is None
 
 
 def test_log_analyst_agent_has_instructions(log_analyst_agent: Agent[LogAnalysis]) -> None:
@@ -176,33 +171,38 @@ def test_log_analyst_agent_instructions_mention_hypothesis(
     assert "hypothesis" in log_analyst_agent.instructions.lower()
 
 
-def test_log_analyst_agent_uses_groq_model(log_analyst_agent: Agent[LogAnalysis]) -> None:
-    assert isinstance(log_analyst_agent.model, OpenAIChatCompletionsModel)
+def test_log_analyst_agent_uses_litellm_model(log_analyst_agent: Agent[LogAnalysis]) -> None:
+    assert isinstance(log_analyst_agent.model, LitellmModel)
 
 
-def test_log_analyst_agent_default_model_name(
+def test_log_analyst_agent_model_string_forwarded(
     semantic_memory: SemanticMemory,
     scenario: Scenario,
-    groq_client: AsyncOpenAI,
-) -> None:
-    agent = build_log_analyst_agent(semantic_memory, scenario, groq_client=groq_client)
-    assert isinstance(agent.model, OpenAIChatCompletionsModel)
-    assert agent.model.model == "llama-3.3-70b-versatile"
-
-
-def test_log_analyst_agent_custom_model_name(
-    semantic_memory: SemanticMemory,
-    scenario: Scenario,
-    groq_client: AsyncOpenAI,
+    fake_settings: Settings,
 ) -> None:
     agent = build_log_analyst_agent(
         semantic_memory,
         scenario,
-        groq_client=groq_client,
-        model_name="llama-3.1-8b-instant",
+        model_string="groq/llama-3.3-70b-versatile",
+        settings=fake_settings,
     )
-    assert isinstance(agent.model, OpenAIChatCompletionsModel)
-    assert agent.model.model == "llama-3.1-8b-instant"
+    assert isinstance(agent.model, LitellmModel)
+    assert agent.model.model == "groq/llama-3.3-70b-versatile"
+
+
+def test_log_analyst_agent_custom_model_string(
+    semantic_memory: SemanticMemory,
+    scenario: Scenario,
+    fake_settings: Settings,
+) -> None:
+    agent = build_log_analyst_agent(
+        semantic_memory,
+        scenario,
+        model_string="groq/llama-3.1-8b-instant",
+        settings=fake_settings,
+    )
+    assert isinstance(agent.model, LitellmModel)
+    assert agent.model.model == "groq/llama-3.1-8b-instant"
 
 
 def test_log_analyst_agent_no_handoffs(log_analyst_agent: Agent[LogAnalysis]) -> None:
@@ -212,19 +212,29 @@ def test_log_analyst_agent_no_handoffs(log_analyst_agent: Agent[LogAnalysis]) ->
 
 def test_log_analyst_agent_accepts_none_scenario(
     semantic_memory: SemanticMemory,
-    groq_client: AsyncOpenAI,
+    fake_settings: Settings,
 ) -> None:
     """Agent constructs with no scenario; fetch_logs returns error at call time."""
-    agent = build_log_analyst_agent(semantic_memory, None, groq_client=groq_client)
+    agent = build_log_analyst_agent(
+        semantic_memory,
+        None,
+        model_string="groq/llama-3.3-70b-versatile",
+        settings=fake_settings,
+    )
     assert isinstance(agent, Agent)
     assert len(agent.tools) == 2
 
 
 def test_log_analyst_agent_mock_memory(
     scenario: Scenario,
-    groq_client: AsyncOpenAI,
+    fake_settings: Settings,
 ) -> None:
     """Agent should construct with a mocked SemanticMemory."""
     mock_mem = MagicMock(spec=SemanticMemory)
-    agent = build_log_analyst_agent(mock_mem, scenario, groq_client=groq_client)
+    agent = build_log_analyst_agent(
+        mock_mem,
+        scenario,
+        model_string="groq/llama-3.3-70b-versatile",
+        settings=fake_settings,
+    )
     assert isinstance(agent, Agent)

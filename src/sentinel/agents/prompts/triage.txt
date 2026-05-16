@@ -24,3 +24,6 @@ Respond with exactly these fields:
 - affected_service: service name string
 - is_duplicate: true | false
 - recommended_action: brief description of the next investigation step (e.g., "Analyze logs for api-gateway from 03:00–03:15 UTC" or "Duplicate of inc-abc123, no further action needed")
+
+## When Done
+After producing your triage classification, hand off back to the incident_orchestrator by calling transfer_to_incident_orchestrator with no arguments. Do not produce a final text response — always hand off back.

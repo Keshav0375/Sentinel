@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from agents import Agent, Tool
-from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-from openai import AsyncOpenAI
 
 from sentinel.agents.loader import load_prompt
+from sentinel.config import Settings
 from sentinel.models.remediation import RemediationPlan
+from sentinel.providers import get_capabilities, resolve_model
 from sentinel.tools.hitl import ApprovalFn, make_hitl_tool
 from sentinel.tools.remediation_tools import make_remediation_tools
 
@@ -16,8 +18,8 @@ REMEDIATION_AGENT_NAME = "remediation_agent"
 
 def build_remediation_agent(
     *,
-    groq_client: AsyncOpenAI,
-    model_name: str = "llama-3.3-70b-versatile",
+    model_string: str,
+    settings: Settings,
     approval_fn: ApprovalFn | None = None,
 ) -> Agent[RemediationPlan]:
     """Create a configured Remediation Agent with HITL gate.
@@ -32,10 +34,8 @@ def build_remediation_agent(
     gate, and there is no "execute" tool — only "draft" + "request approval."
 
     Args:
-        groq_client: Pre-configured AsyncOpenAI client pointed at Groq's API.
-        model_name: Groq model to use. Defaults to llama-3.3-70b-versatile
-            (the capable reasoning model, equivalent to gpt-4o — remediation
-            decisions require careful evidence evaluation and risk assessment).
+        model_string: Provider/model string (e.g. 'groq/llama-3.3-70b-versatile').
+        settings: Validated Settings instance for API key lookup.
         approval_fn: Optional HITL callback. Defaults to terminal ``input()``
             in the MVP. Inject a mock or async webhook handler in tests or
             Phase 2 (Slack interactive buttons).
@@ -44,7 +44,8 @@ def build_remediation_agent(
         Configured Agent that produces a ``RemediationPlan`` as structured
         output after obtaining human approval.
     """
-    llm = OpenAIChatCompletionsModel(model=model_name, openai_client=groq_client)
+    llm = resolve_model(model_string, settings)
+    caps = get_capabilities(model_string)
 
     # make_remediation_tools() returns [draft_rollback_pr, draft_hotfix]
     tools: list[Tool] = [
@@ -52,10 +53,16 @@ def build_remediation_agent(
         make_hitl_tool(approval_fn=approval_fn),
     ]
 
+    kwargs: dict[str, Any] = {}
+    if caps.supports_structured_outputs:
+        kwargs["output_type"] = RemediationPlan
+    if caps.default_model_settings:
+        kwargs["model_settings"] = caps.default_model_settings
+
     return Agent(
         name=REMEDIATION_AGENT_NAME,
         instructions=load_prompt("remediation.txt"),
         tools=tools,
-        output_type=RemediationPlan,
         model=llm,
+        **kwargs,
     )

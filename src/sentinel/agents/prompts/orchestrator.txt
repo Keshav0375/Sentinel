@@ -21,6 +21,7 @@ You and all sub-agents share a budget of 15 tool calls per incident. If the budg
 - If triage severity is P4, skip Log Analyst and Deploy Correlator — go straight to Comms.
 - If root cause cannot be determined after Log Analyst + Deploy Correlator, escalate rather than guess.
 - Never recommend a remediation action without routing through the Remediation Agent and its HITL gate.
+- When calling transfer_to_<agent>, pass no arguments.
 
 ## Output Format
 After all handoffs complete, return:

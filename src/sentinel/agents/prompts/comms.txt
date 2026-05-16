@@ -26,3 +26,6 @@ Verify the drafted message contains all six sections in order:
 Respond with:
 - slack_message: the full formatted Slack message string produced by draft_slack_summary
 - recipients: always include "#incidents"; also add "#oncall-<team>" for P1 or P2 incidents
+
+## When Done
+After producing your Slack summary, hand off back to the incident_orchestrator by calling transfer_to_incident_orchestrator with no arguments. Do not produce a final text response — always hand off back.

@@ -1,0 +1,1601 @@
+{
+  "incident_id": "smoke-c6eb4385",
+  "trace": {
+    "object": "trace",
+    "id": "trace_4b4bfd42ec8c44259ac88084db484885",
+    "workflow_name": "incident_pipeline",
+    "group_id": null,
+    "metadata": {
+      "incident_id": "smoke-c6eb4385"
+    }
+  },
+  "spans": [
+    {
+      "object": "trace.span",
+      "id": "span_065d2d478d9f4996b1a5a443",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_eef5bbdcdbd34dff8819f6f1",
+      "started_at": "2026-05-16T05:10:03.714870+00:00",
+      "ended_at": "2026-05-16T05:10:04.163417+00:00",
+      "span_data": {
+        "type": "generation",
+        "input": [
+          {
+            "content": "You are the Incident Orchestrator, Sentinel's top-level coordinator for autonomous DevOps incident response.\n\n## Your Role\nYou receive alert payloads and coordinate specialist agents to diagnose and resolve incidents. You do not perform analysis yourself \u2014 you delegate to specialists via handoffs and synthesize their findings.\n\n## Workflow\nFollow this sequence for every incident:\n1. Hand off to the Triage Agent \u2014 classify severity and identify the affected service.\n2. Hand off to the Log Analyst \u2014 analyze logs for the affected service in the incident time window.\n3. Hand off to the Deploy Correlator \u2014 check for suspicious recent deploys.\n4. Hand off to the Remediation Agent \u2014 draft a fix and obtain human approval.\n5. Hand off to the Comms Agent \u2014 produce a Slack summary of the full incident.\n6. Return a final incident summary: status, affected_service, root_cause, action_taken.\n\n## Tool-Call Cap\nYou and all sub-agents share a budget of 15 tool calls per incident. If the budget is exhausted before resolution, stop immediately and respond with status=escalated, explaining what analysis was completed and what remains.\n\n## Handoff Rules\n- Wait for each specialist's result before deciding the next step.\n- If triage marks is_duplicate=true, skip directly to Comms \u2014 no re-investigation needed.\n- If triage severity is P4, skip Log Analyst and Deploy Correlator \u2014 go straight to Comms.\n- If root cause cannot be determined after Log Analyst + Deploy Correlator, escalate rather than guess.\n- Never recommend a remediation action without routing through the Remediation Agent and its HITL gate.\n- When calling transfer_to_<agent>, pass no arguments.\n\n## Output Format\nAfter all handoffs complete, return:\n- status: resolved | pending_approval | escalated\n- affected_service: the confirmed service name\n- severity: P1 | P2 | P3 | P4\n- root_cause_summary: one sentence\n- action_taken: what was approved and executed (or \"none\" if escalated)\n- next_steps: list of remaining items if any",
+            "role": "system"
+          },
+          {
+            "role": "user",
+            "content": "New incident ID: smoke-c6eb4385\nAlert payload: {\"alert_id\":\"c6eb4385-8eb9-433b-b6e4-14e5539fa1ec\",\"source\":\"datadog\",\"service\":\"api-gateway\",\"metric\":\"error_rate\",\"threshold\":0.05,\"current_value\":0.34,\"severity\":\"critical\",\"timestamp\":\"2026-05-10T03:00:01Z\",\"metadata\":{\"scenario_id\":\"bad_deploy_01\",\"failure_class\":\"bad_deploy\"}}"
+          }
+        ],
+        "output": [
+          {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "null",
+                  "name": "transfer_to_triage_agent"
+                },
+                "id": "1wy8kbxms",
+                "type": "function"
+              }
+            ],
+            "function_call": null,
+            "provider_specific_fields": null
+          }
+        ],
+        "model": "groq/llama-3.3-70b-versatile",
+        "model_config": {
+          "temperature": null,
+          "top_p": null,
+          "frequency_penalty": null,
+          "presence_penalty": null,
+          "tool_choice": null,
+          "parallel_tool_calls": null,
+          "truncation": null,
+          "max_tokens": null,
+          "reasoning": null,
+          "verbosity": null,
+          "metadata": null,
+          "store": null,
+          "prompt_cache_retention": null,
+          "include_usage": null,
+          "response_include": null,
+          "top_logprobs": null,
+          "extra_query": null,
+          "extra_body": null,
+          "extra_headers": null,
+          "extra_args": null,
+          "retry": null,
+          "context_management": null,
+          "base_url": "",
+          "model_impl": "litellm"
+        },
+        "usage": {
+          "requests": 1,
+          "input_tokens": 1069,
+          "output_tokens": 12,
+          "total_tokens": 1081,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_b496bd2bd3b4404aa0b72aaa",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_eef5bbdcdbd34dff8819f6f1",
+      "started_at": "2026-05-16T05:10:04.166278+00:00",
+      "ended_at": "2026-05-16T05:10:04.166421+00:00",
+      "span_data": {
+        "type": "handoff",
+        "from_agent": "incident_orchestrator",
+        "to_agent": "triage_agent"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_eef5bbdcdbd34dff8819f6f1",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_309a53af2fdc4cc8a392e3b2",
+      "started_at": "2026-05-16T05:10:03.714412+00:00",
+      "ended_at": "2026-05-16T05:10:04.166577+00:00",
+      "span_data": {
+        "type": "custom",
+        "name": "turn",
+        "data": {
+          "sdk_span_type": "turn",
+          "turn": 1,
+          "agent_name": "incident_orchestrator",
+          "usage": {
+            "input_tokens": 1069,
+            "output_tokens": 12,
+            "cached_input_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_309a53af2fdc4cc8a392e3b2",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_072981a3fd834cec9197760d",
+      "started_at": "2026-05-16T05:10:03.714328+00:00",
+      "ended_at": "2026-05-16T05:10:04.166626+00:00",
+      "span_data": {
+        "type": "agent",
+        "name": "incident_orchestrator",
+        "handoffs": [
+          "triage_agent",
+          "log_analyst_agent",
+          "deploy_correlator_agent",
+          "remediation_agent",
+          "comms_agent"
+        ],
+        "tools": [],
+        "output_type": "str"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_1933f37620ec4a95991f905c",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_a443f5860d9f493b9b4f2cd0",
+      "started_at": "2026-05-16T05:10:04.167278+00:00",
+      "ended_at": "2026-05-16T05:10:04.443790+00:00",
+      "span_data": {
+        "type": "generation",
+        "input": [
+          {
+            "content": "You are the Triage Agent, responsible for severity classification and service identification at the start of every incident.\n\n## Your Role\nClassify the incoming alert: assign a severity level, confirm the affected service, detect duplicates, and recommend the initial investigation path.\n\n## Tools\n- Use get_service_metadata to look up the affected service's team, tier, dependencies, and runbook.\n- Use search_past_incidents to search episodic memory for similar past incidents.\n\n## Severity Classification\n- P1 (Critical): Service down or >30% error rate on a critical-tier service. SLA: 15 minutes.\n- P2 (High): Degraded performance or >10% error rate on critical, OR >30% on a standard-tier service. SLA: 1 hour.\n- P3 (Warning): Elevated errors below P2 thresholds, or impact on a non-critical service. SLA: 4 hours.\n- P4 (Low): Informational alert, no confirmed user impact. SLA: next business day.\n\nUse the alert's current_value, threshold, and the service tier from get_service_metadata to assign severity. When in doubt, escalate \u2014 it is safer to over-classify than under-classify a P1.\n\n## Duplicate Detection\nCall search_past_incidents with the alert message or symptom description as the query. If the top result has similarity > 0.85 and was created within the last 2 hours, mark is_duplicate=true and include the matching incident ID in recommended_action.\n\n## Output Format\nRespond with exactly these fields:\n- severity: P1 | P2 | P3 | P4\n- affected_service: service name string\n- is_duplicate: true | false\n- recommended_action: brief description of the next investigation step (e.g., \"Analyze logs for api-gateway from 03:00\u201303:15 UTC\" or \"Duplicate of inc-abc123, no further action needed\")\n\n## When Done\nAfter producing your triage classification, hand off back to the incident_orchestrator by calling transfer_to_incident_orchestrator with no arguments. Do not produce a final text response \u2014 always hand off back.",
+            "role": "system"
+          },
+          {
+            "role": "user",
+            "content": "New incident ID: smoke-c6eb4385\nAlert payload: {\"alert_id\":\"c6eb4385-8eb9-433b-b6e4-14e5539fa1ec\",\"source\":\"datadog\",\"service\":\"api-gateway\",\"metric\":\"error_rate\",\"threshold\":0.05,\"current_value\":0.34,\"severity\":\"critical\",\"timestamp\":\"2026-05-10T03:00:01Z\",\"metadata\":{\"scenario_id\":\"bad_deploy_01\",\"failure_class\":\"bad_deploy\"}}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "1wy8kbxms",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_triage_agent",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "1wy8kbxms",
+            "content": "{\"assistant\": \"triage_agent\"}"
+          }
+        ],
+        "output": [
+          {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"service_name\":\"api-gateway\"}",
+                  "name": "get_service_metadata"
+                },
+                "id": "fd92qrh2h",
+                "type": "function"
+              },
+              {
+                "function": {
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}",
+                  "name": "search_past_incidents"
+                },
+                "id": "3xx2w2e0w",
+                "type": "function"
+              },
+              {
+                "function": {
+                  "arguments": "{\"service_name\":\"api-gateway\"}",
+                  "name": "get_service_metadata"
+                },
+                "id": "kcmfvbcrc",
+                "type": "function"
+              },
+              {
+                "function": {
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}",
+                  "name": "search_past_incidents"
+                },
+                "id": "9ybn0t59q",
+                "type": "function"
+              }
+            ],
+            "function_call": null,
+            "provider_specific_fields": null
+          }
+        ],
+        "model": "groq/llama-3.1-8b-instant",
+        "model_config": {
+          "temperature": null,
+          "top_p": null,
+          "frequency_penalty": null,
+          "presence_penalty": null,
+          "tool_choice": null,
+          "parallel_tool_calls": null,
+          "truncation": null,
+          "max_tokens": null,
+          "reasoning": null,
+          "verbosity": null,
+          "metadata": null,
+          "store": null,
+          "prompt_cache_retention": null,
+          "include_usage": null,
+          "response_include": null,
+          "top_logprobs": null,
+          "extra_query": null,
+          "extra_body": null,
+          "extra_headers": null,
+          "extra_args": null,
+          "retry": null,
+          "context_management": null,
+          "base_url": "",
+          "model_impl": "litellm"
+        },
+        "usage": {
+          "requests": 1,
+          "input_tokens": 1204,
+          "output_tokens": 93,
+          "total_tokens": 1297,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_00254853914b449983a99537",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_a443f5860d9f493b9b4f2cd0",
+      "started_at": "2026-05-16T05:10:04.445817+00:00",
+      "ended_at": "2026-05-16T05:10:04.485013+00:00",
+      "span_data": {
+        "type": "function",
+        "name": "get_service_metadata",
+        "input": "{\"service_name\":\"api-gateway\"}",
+        "output": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)",
+        "mcp_data": null
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_2c2e6f93c15e4c89bc506a40",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_a443f5860d9f493b9b4f2cd0",
+      "started_at": "2026-05-16T05:10:04.445681+00:00",
+      "ended_at": "2026-05-16T05:10:04.488585+00:00",
+      "span_data": {
+        "type": "function",
+        "name": "get_service_metadata",
+        "input": "{\"service_name\":\"api-gateway\"}",
+        "output": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)",
+        "mcp_data": null
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_8e1f7200135544bcab44628d",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_a443f5860d9f493b9b4f2cd0",
+      "started_at": "2026-05-16T05:10:04.445859+00:00",
+      "ended_at": "2026-05-16T05:10:04.518483+00:00",
+      "span_data": {
+        "type": "function",
+        "name": "search_past_incidents",
+        "input": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}",
+        "output": "No similar past incidents found.",
+        "mcp_data": null
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_52cc79925032462983ad7f35",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_a443f5860d9f493b9b4f2cd0",
+      "started_at": "2026-05-16T05:10:04.445764+00:00",
+      "ended_at": "2026-05-16T05:10:04.537991+00:00",
+      "span_data": {
+        "type": "function",
+        "name": "search_past_incidents",
+        "input": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}",
+        "output": "No similar past incidents found.",
+        "mcp_data": null
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_a443f5860d9f493b9b4f2cd0",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_53b8074dc1814be69a9ef4e9",
+      "started_at": "2026-05-16T05:10:04.166924+00:00",
+      "ended_at": "2026-05-16T05:10:04.538644+00:00",
+      "span_data": {
+        "type": "custom",
+        "name": "turn",
+        "data": {
+          "sdk_span_type": "turn",
+          "turn": 2,
+          "agent_name": "triage_agent",
+          "usage": {
+            "input_tokens": 1204,
+            "output_tokens": 93,
+            "cached_input_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_56a7a5e8bee8465ab4bdbd6f",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_fc9bb61cd5cf4c3a9d0a47e1",
+      "started_at": "2026-05-16T05:10:04.539951+00:00",
+      "ended_at": "2026-05-16T05:10:05.081691+00:00",
+      "span_data": {
+        "type": "generation",
+        "input": [
+          {
+            "content": "You are the Triage Agent, responsible for severity classification and service identification at the start of every incident.\n\n## Your Role\nClassify the incoming alert: assign a severity level, confirm the affected service, detect duplicates, and recommend the initial investigation path.\n\n## Tools\n- Use get_service_metadata to look up the affected service's team, tier, dependencies, and runbook.\n- Use search_past_incidents to search episodic memory for similar past incidents.\n\n## Severity Classification\n- P1 (Critical): Service down or >30% error rate on a critical-tier service. SLA: 15 minutes.\n- P2 (High): Degraded performance or >10% error rate on critical, OR >30% on a standard-tier service. SLA: 1 hour.\n- P3 (Warning): Elevated errors below P2 thresholds, or impact on a non-critical service. SLA: 4 hours.\n- P4 (Low): Informational alert, no confirmed user impact. SLA: next business day.\n\nUse the alert's current_value, threshold, and the service tier from get_service_metadata to assign severity. When in doubt, escalate \u2014 it is safer to over-classify than under-classify a P1.\n\n## Duplicate Detection\nCall search_past_incidents with the alert message or symptom description as the query. If the top result has similarity > 0.85 and was created within the last 2 hours, mark is_duplicate=true and include the matching incident ID in recommended_action.\n\n## Output Format\nRespond with exactly these fields:\n- severity: P1 | P2 | P3 | P4\n- affected_service: service name string\n- is_duplicate: true | false\n- recommended_action: brief description of the next investigation step (e.g., \"Analyze logs for api-gateway from 03:00\u201303:15 UTC\" or \"Duplicate of inc-abc123, no further action needed\")\n\n## When Done\nAfter producing your triage classification, hand off back to the incident_orchestrator by calling transfer_to_incident_orchestrator with no arguments. Do not produce a final text response \u2014 always hand off back.",
+            "role": "system"
+          },
+          {
+            "role": "user",
+            "content": "New incident ID: smoke-c6eb4385\nAlert payload: {\"alert_id\":\"c6eb4385-8eb9-433b-b6e4-14e5539fa1ec\",\"source\":\"datadog\",\"service\":\"api-gateway\",\"metric\":\"error_rate\",\"threshold\":0.05,\"current_value\":0.34,\"severity\":\"critical\",\"timestamp\":\"2026-05-10T03:00:01Z\",\"metadata\":{\"scenario_id\":\"bad_deploy_01\",\"failure_class\":\"bad_deploy\"}}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "1wy8kbxms",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_triage_agent",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "1wy8kbxms",
+            "content": "{\"assistant\": \"triage_agent\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "fd92qrh2h",
+                "type": "function",
+                "function": {
+                  "name": "get_service_metadata",
+                  "arguments": "{\"service_name\":\"api-gateway\"}"
+                }
+              },
+              {
+                "id": "3xx2w2e0w",
+                "type": "function",
+                "function": {
+                  "name": "search_past_incidents",
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}"
+                }
+              },
+              {
+                "id": "kcmfvbcrc",
+                "type": "function",
+                "function": {
+                  "name": "get_service_metadata",
+                  "arguments": "{\"service_name\":\"api-gateway\"}"
+                }
+              },
+              {
+                "id": "9ybn0t59q",
+                "type": "function",
+                "function": {
+                  "name": "search_past_incidents",
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "fd92qrh2h",
+            "content": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "3xx2w2e0w",
+            "content": "No similar past incidents found."
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "kcmfvbcrc",
+            "content": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "9ybn0t59q",
+            "content": "No similar past incidents found."
+          }
+        ],
+        "output": [
+          {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "null",
+                  "name": "transfer_to_incident_orchestrator"
+                },
+                "id": "mg57ket7x",
+                "type": "function"
+              }
+            ],
+            "function_call": null,
+            "provider_specific_fields": null
+          }
+        ],
+        "model": "groq/llama-3.1-8b-instant",
+        "model_config": {
+          "temperature": null,
+          "top_p": null,
+          "frequency_penalty": null,
+          "presence_penalty": null,
+          "tool_choice": null,
+          "parallel_tool_calls": null,
+          "truncation": null,
+          "max_tokens": null,
+          "reasoning": null,
+          "verbosity": null,
+          "metadata": null,
+          "store": null,
+          "prompt_cache_retention": null,
+          "include_usage": null,
+          "response_include": null,
+          "top_logprobs": null,
+          "extra_query": null,
+          "extra_body": null,
+          "extra_headers": null,
+          "extra_args": null,
+          "retry": null,
+          "context_management": null,
+          "base_url": "",
+          "model_impl": "litellm"
+        },
+        "usage": {
+          "requests": 1,
+          "input_tokens": 1903,
+          "output_tokens": 63,
+          "total_tokens": 1966,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_519c755519394dc59fde6e6e",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_fc9bb61cd5cf4c3a9d0a47e1",
+      "started_at": "2026-05-16T05:10:05.083347+00:00",
+      "ended_at": "2026-05-16T05:10:05.083456+00:00",
+      "span_data": {
+        "type": "handoff",
+        "from_agent": "triage_agent",
+        "to_agent": "incident_orchestrator"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_fc9bb61cd5cf4c3a9d0a47e1",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_53b8074dc1814be69a9ef4e9",
+      "started_at": "2026-05-16T05:10:04.539003+00:00",
+      "ended_at": "2026-05-16T05:10:05.083578+00:00",
+      "span_data": {
+        "type": "custom",
+        "name": "turn",
+        "data": {
+          "sdk_span_type": "turn",
+          "turn": 3,
+          "agent_name": "triage_agent",
+          "usage": {
+            "input_tokens": 1903,
+            "output_tokens": 63,
+            "cached_input_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_53b8074dc1814be69a9ef4e9",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_072981a3fd834cec9197760d",
+      "started_at": "2026-05-16T05:10:04.166872+00:00",
+      "ended_at": "2026-05-16T05:10:05.083630+00:00",
+      "span_data": {
+        "type": "agent",
+        "name": "triage_agent",
+        "handoffs": [
+          "incident_orchestrator"
+        ],
+        "tools": [
+          "get_service_metadata",
+          "search_past_incidents"
+        ],
+        "output_type": "str"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_707a19409846415888316db0",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_a4231e2faecc4f3ca54e96fa",
+      "started_at": "2026-05-16T05:10:05.084747+00:00",
+      "ended_at": "2026-05-16T05:10:05.411420+00:00",
+      "span_data": {
+        "type": "generation",
+        "input": [
+          {
+            "content": "You are the Incident Orchestrator, Sentinel's top-level coordinator for autonomous DevOps incident response.\n\n## Your Role\nYou receive alert payloads and coordinate specialist agents to diagnose and resolve incidents. You do not perform analysis yourself \u2014 you delegate to specialists via handoffs and synthesize their findings.\n\n## Workflow\nFollow this sequence for every incident:\n1. Hand off to the Triage Agent \u2014 classify severity and identify the affected service.\n2. Hand off to the Log Analyst \u2014 analyze logs for the affected service in the incident time window.\n3. Hand off to the Deploy Correlator \u2014 check for suspicious recent deploys.\n4. Hand off to the Remediation Agent \u2014 draft a fix and obtain human approval.\n5. Hand off to the Comms Agent \u2014 produce a Slack summary of the full incident.\n6. Return a final incident summary: status, affected_service, root_cause, action_taken.\n\n## Tool-Call Cap\nYou and all sub-agents share a budget of 15 tool calls per incident. If the budget is exhausted before resolution, stop immediately and respond with status=escalated, explaining what analysis was completed and what remains.\n\n## Handoff Rules\n- Wait for each specialist's result before deciding the next step.\n- If triage marks is_duplicate=true, skip directly to Comms \u2014 no re-investigation needed.\n- If triage severity is P4, skip Log Analyst and Deploy Correlator \u2014 go straight to Comms.\n- If root cause cannot be determined after Log Analyst + Deploy Correlator, escalate rather than guess.\n- Never recommend a remediation action without routing through the Remediation Agent and its HITL gate.\n- When calling transfer_to_<agent>, pass no arguments.\n\n## Output Format\nAfter all handoffs complete, return:\n- status: resolved | pending_approval | escalated\n- affected_service: the confirmed service name\n- severity: P1 | P2 | P3 | P4\n- root_cause_summary: one sentence\n- action_taken: what was approved and executed (or \"none\" if escalated)\n- next_steps: list of remaining items if any",
+            "role": "system"
+          },
+          {
+            "role": "user",
+            "content": "New incident ID: smoke-c6eb4385\nAlert payload: {\"alert_id\":\"c6eb4385-8eb9-433b-b6e4-14e5539fa1ec\",\"source\":\"datadog\",\"service\":\"api-gateway\",\"metric\":\"error_rate\",\"threshold\":0.05,\"current_value\":0.34,\"severity\":\"critical\",\"timestamp\":\"2026-05-10T03:00:01Z\",\"metadata\":{\"scenario_id\":\"bad_deploy_01\",\"failure_class\":\"bad_deploy\"}}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "1wy8kbxms",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_triage_agent",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "1wy8kbxms",
+            "content": "{\"assistant\": \"triage_agent\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "fd92qrh2h",
+                "type": "function",
+                "function": {
+                  "name": "get_service_metadata",
+                  "arguments": "{\"service_name\":\"api-gateway\"}"
+                }
+              },
+              {
+                "id": "3xx2w2e0w",
+                "type": "function",
+                "function": {
+                  "name": "search_past_incidents",
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}"
+                }
+              },
+              {
+                "id": "kcmfvbcrc",
+                "type": "function",
+                "function": {
+                  "name": "get_service_metadata",
+                  "arguments": "{\"service_name\":\"api-gateway\"}"
+                }
+              },
+              {
+                "id": "9ybn0t59q",
+                "type": "function",
+                "function": {
+                  "name": "search_past_incidents",
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "fd92qrh2h",
+            "content": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "3xx2w2e0w",
+            "content": "No similar past incidents found."
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "kcmfvbcrc",
+            "content": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "9ybn0t59q",
+            "content": "No similar past incidents found."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "mg57ket7x",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_incident_orchestrator",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "mg57ket7x",
+            "content": "{\"assistant\": \"incident_orchestrator\"}"
+          }
+        ],
+        "output": [
+          {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "null",
+                  "name": "transfer_to_triage_agent"
+                },
+                "id": "5hyeeb8hq",
+                "type": "function"
+              }
+            ],
+            "function_call": null,
+            "provider_specific_fields": null
+          }
+        ],
+        "model": "groq/llama-3.3-70b-versatile",
+        "model_config": {
+          "temperature": null,
+          "top_p": null,
+          "frequency_penalty": null,
+          "presence_penalty": null,
+          "tool_choice": null,
+          "parallel_tool_calls": null,
+          "truncation": null,
+          "max_tokens": null,
+          "reasoning": null,
+          "verbosity": null,
+          "metadata": null,
+          "store": null,
+          "prompt_cache_retention": null,
+          "include_usage": null,
+          "response_include": null,
+          "top_logprobs": null,
+          "extra_query": null,
+          "extra_body": null,
+          "extra_headers": null,
+          "extra_args": null,
+          "retry": null,
+          "context_management": null,
+          "base_url": "",
+          "model_impl": "litellm"
+        },
+        "usage": {
+          "requests": 1,
+          "input_tokens": 1835,
+          "output_tokens": 13,
+          "total_tokens": 1848,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_8abddf789e9f4afcbbcacbff",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_a4231e2faecc4f3ca54e96fa",
+      "started_at": "2026-05-16T05:10:05.412731+00:00",
+      "ended_at": "2026-05-16T05:10:05.412853+00:00",
+      "span_data": {
+        "type": "handoff",
+        "from_agent": "incident_orchestrator",
+        "to_agent": "triage_agent"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_a4231e2faecc4f3ca54e96fa",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_8ea98acc3d654f3cbb584cbe",
+      "started_at": "2026-05-16T05:10:05.083938+00:00",
+      "ended_at": "2026-05-16T05:10:05.412960+00:00",
+      "span_data": {
+        "type": "custom",
+        "name": "turn",
+        "data": {
+          "sdk_span_type": "turn",
+          "turn": 4,
+          "agent_name": "incident_orchestrator",
+          "usage": {
+            "input_tokens": 1835,
+            "output_tokens": 13,
+            "cached_input_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_8ea98acc3d654f3cbb584cbe",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_072981a3fd834cec9197760d",
+      "started_at": "2026-05-16T05:10:05.083861+00:00",
+      "ended_at": "2026-05-16T05:10:05.412998+00:00",
+      "span_data": {
+        "type": "agent",
+        "name": "incident_orchestrator",
+        "handoffs": [
+          "triage_agent",
+          "log_analyst_agent",
+          "deploy_correlator_agent",
+          "remediation_agent",
+          "comms_agent"
+        ],
+        "tools": [],
+        "output_type": "str"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_92b7b2777f9b49539d9083a8",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_60a2441eaa994be3809a8182",
+      "started_at": "2026-05-16T05:10:05.413712+00:00",
+      "ended_at": "2026-05-16T05:10:05.873866+00:00",
+      "span_data": {
+        "type": "generation",
+        "input": [
+          {
+            "content": "You are the Triage Agent, responsible for severity classification and service identification at the start of every incident.\n\n## Your Role\nClassify the incoming alert: assign a severity level, confirm the affected service, detect duplicates, and recommend the initial investigation path.\n\n## Tools\n- Use get_service_metadata to look up the affected service's team, tier, dependencies, and runbook.\n- Use search_past_incidents to search episodic memory for similar past incidents.\n\n## Severity Classification\n- P1 (Critical): Service down or >30% error rate on a critical-tier service. SLA: 15 minutes.\n- P2 (High): Degraded performance or >10% error rate on critical, OR >30% on a standard-tier service. SLA: 1 hour.\n- P3 (Warning): Elevated errors below P2 thresholds, or impact on a non-critical service. SLA: 4 hours.\n- P4 (Low): Informational alert, no confirmed user impact. SLA: next business day.\n\nUse the alert's current_value, threshold, and the service tier from get_service_metadata to assign severity. When in doubt, escalate \u2014 it is safer to over-classify than under-classify a P1.\n\n## Duplicate Detection\nCall search_past_incidents with the alert message or symptom description as the query. If the top result has similarity > 0.85 and was created within the last 2 hours, mark is_duplicate=true and include the matching incident ID in recommended_action.\n\n## Output Format\nRespond with exactly these fields:\n- severity: P1 | P2 | P3 | P4\n- affected_service: service name string\n- is_duplicate: true | false\n- recommended_action: brief description of the next investigation step (e.g., \"Analyze logs for api-gateway from 03:00\u201303:15 UTC\" or \"Duplicate of inc-abc123, no further action needed\")\n\n## When Done\nAfter producing your triage classification, hand off back to the incident_orchestrator by calling transfer_to_incident_orchestrator with no arguments. Do not produce a final text response \u2014 always hand off back.",
+            "role": "system"
+          },
+          {
+            "role": "user",
+            "content": "New incident ID: smoke-c6eb4385\nAlert payload: {\"alert_id\":\"c6eb4385-8eb9-433b-b6e4-14e5539fa1ec\",\"source\":\"datadog\",\"service\":\"api-gateway\",\"metric\":\"error_rate\",\"threshold\":0.05,\"current_value\":0.34,\"severity\":\"critical\",\"timestamp\":\"2026-05-10T03:00:01Z\",\"metadata\":{\"scenario_id\":\"bad_deploy_01\",\"failure_class\":\"bad_deploy\"}}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "1wy8kbxms",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_triage_agent",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "1wy8kbxms",
+            "content": "{\"assistant\": \"triage_agent\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "fd92qrh2h",
+                "type": "function",
+                "function": {
+                  "name": "get_service_metadata",
+                  "arguments": "{\"service_name\":\"api-gateway\"}"
+                }
+              },
+              {
+                "id": "3xx2w2e0w",
+                "type": "function",
+                "function": {
+                  "name": "search_past_incidents",
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}"
+                }
+              },
+              {
+                "id": "kcmfvbcrc",
+                "type": "function",
+                "function": {
+                  "name": "get_service_metadata",
+                  "arguments": "{\"service_name\":\"api-gateway\"}"
+                }
+              },
+              {
+                "id": "9ybn0t59q",
+                "type": "function",
+                "function": {
+                  "name": "search_past_incidents",
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "fd92qrh2h",
+            "content": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "3xx2w2e0w",
+            "content": "No similar past incidents found."
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "kcmfvbcrc",
+            "content": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "9ybn0t59q",
+            "content": "No similar past incidents found."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "mg57ket7x",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_incident_orchestrator",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "mg57ket7x",
+            "content": "{\"assistant\": \"incident_orchestrator\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "5hyeeb8hq",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_triage_agent",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "5hyeeb8hq",
+            "content": "{\"assistant\": \"triage_agent\"}"
+          }
+        ],
+        "output": [
+          {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "null",
+                  "name": "transfer_to_incident_orchestrator"
+                },
+                "id": "0qraf0501",
+                "type": "function"
+              }
+            ],
+            "function_call": null,
+            "provider_specific_fields": null
+          }
+        ],
+        "model": "groq/llama-3.1-8b-instant",
+        "model_config": {
+          "temperature": null,
+          "top_p": null,
+          "frequency_penalty": null,
+          "presence_penalty": null,
+          "tool_choice": null,
+          "parallel_tool_calls": null,
+          "truncation": null,
+          "max_tokens": null,
+          "reasoning": null,
+          "verbosity": null,
+          "metadata": null,
+          "store": null,
+          "prompt_cache_retention": null,
+          "include_usage": null,
+          "response_include": null,
+          "top_logprobs": null,
+          "extra_query": null,
+          "extra_body": null,
+          "extra_headers": null,
+          "extra_args": null,
+          "retry": null,
+          "context_management": null,
+          "base_url": "",
+          "model_impl": "litellm"
+        },
+        "usage": {
+          "requests": 1,
+          "input_tokens": 1970,
+          "output_tokens": 16,
+          "total_tokens": 1986,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_4a6c78e29c07471aa660885d",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_60a2441eaa994be3809a8182",
+      "started_at": "2026-05-16T05:10:05.874679+00:00",
+      "ended_at": "2026-05-16T05:10:05.874800+00:00",
+      "span_data": {
+        "type": "handoff",
+        "from_agent": "triage_agent",
+        "to_agent": "incident_orchestrator"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_60a2441eaa994be3809a8182",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_f74438e1a8af4a7db005a3d7",
+      "started_at": "2026-05-16T05:10:05.413218+00:00",
+      "ended_at": "2026-05-16T05:10:05.874906+00:00",
+      "span_data": {
+        "type": "custom",
+        "name": "turn",
+        "data": {
+          "sdk_span_type": "turn",
+          "turn": 5,
+          "agent_name": "triage_agent",
+          "usage": {
+            "input_tokens": 1970,
+            "output_tokens": 16,
+            "cached_input_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_f74438e1a8af4a7db005a3d7",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_072981a3fd834cec9197760d",
+      "started_at": "2026-05-16T05:10:05.413164+00:00",
+      "ended_at": "2026-05-16T05:10:05.874932+00:00",
+      "span_data": {
+        "type": "agent",
+        "name": "triage_agent",
+        "handoffs": [
+          "incident_orchestrator"
+        ],
+        "tools": [
+          "get_service_metadata",
+          "search_past_incidents"
+        ],
+        "output_type": "str"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_405c7144a3a547e395dd3d86",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_f010b8c0c4be4f479f05de29",
+      "started_at": "2026-05-16T05:10:05.875524+00:00",
+      "ended_at": "2026-05-16T05:10:06.320696+00:00",
+      "span_data": {
+        "type": "generation",
+        "input": [
+          {
+            "content": "You are the Incident Orchestrator, Sentinel's top-level coordinator for autonomous DevOps incident response.\n\n## Your Role\nYou receive alert payloads and coordinate specialist agents to diagnose and resolve incidents. You do not perform analysis yourself \u2014 you delegate to specialists via handoffs and synthesize their findings.\n\n## Workflow\nFollow this sequence for every incident:\n1. Hand off to the Triage Agent \u2014 classify severity and identify the affected service.\n2. Hand off to the Log Analyst \u2014 analyze logs for the affected service in the incident time window.\n3. Hand off to the Deploy Correlator \u2014 check for suspicious recent deploys.\n4. Hand off to the Remediation Agent \u2014 draft a fix and obtain human approval.\n5. Hand off to the Comms Agent \u2014 produce a Slack summary of the full incident.\n6. Return a final incident summary: status, affected_service, root_cause, action_taken.\n\n## Tool-Call Cap\nYou and all sub-agents share a budget of 15 tool calls per incident. If the budget is exhausted before resolution, stop immediately and respond with status=escalated, explaining what analysis was completed and what remains.\n\n## Handoff Rules\n- Wait for each specialist's result before deciding the next step.\n- If triage marks is_duplicate=true, skip directly to Comms \u2014 no re-investigation needed.\n- If triage severity is P4, skip Log Analyst and Deploy Correlator \u2014 go straight to Comms.\n- If root cause cannot be determined after Log Analyst + Deploy Correlator, escalate rather than guess.\n- Never recommend a remediation action without routing through the Remediation Agent and its HITL gate.\n- When calling transfer_to_<agent>, pass no arguments.\n\n## Output Format\nAfter all handoffs complete, return:\n- status: resolved | pending_approval | escalated\n- affected_service: the confirmed service name\n- severity: P1 | P2 | P3 | P4\n- root_cause_summary: one sentence\n- action_taken: what was approved and executed (or \"none\" if escalated)\n- next_steps: list of remaining items if any",
+            "role": "system"
+          },
+          {
+            "role": "user",
+            "content": "New incident ID: smoke-c6eb4385\nAlert payload: {\"alert_id\":\"c6eb4385-8eb9-433b-b6e4-14e5539fa1ec\",\"source\":\"datadog\",\"service\":\"api-gateway\",\"metric\":\"error_rate\",\"threshold\":0.05,\"current_value\":0.34,\"severity\":\"critical\",\"timestamp\":\"2026-05-10T03:00:01Z\",\"metadata\":{\"scenario_id\":\"bad_deploy_01\",\"failure_class\":\"bad_deploy\"}}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "1wy8kbxms",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_triage_agent",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "1wy8kbxms",
+            "content": "{\"assistant\": \"triage_agent\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "fd92qrh2h",
+                "type": "function",
+                "function": {
+                  "name": "get_service_metadata",
+                  "arguments": "{\"service_name\":\"api-gateway\"}"
+                }
+              },
+              {
+                "id": "3xx2w2e0w",
+                "type": "function",
+                "function": {
+                  "name": "search_past_incidents",
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}"
+                }
+              },
+              {
+                "id": "kcmfvbcrc",
+                "type": "function",
+                "function": {
+                  "name": "get_service_metadata",
+                  "arguments": "{\"service_name\":\"api-gateway\"}"
+                }
+              },
+              {
+                "id": "9ybn0t59q",
+                "type": "function",
+                "function": {
+                  "name": "search_past_incidents",
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "fd92qrh2h",
+            "content": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "3xx2w2e0w",
+            "content": "No similar past incidents found."
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "kcmfvbcrc",
+            "content": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "9ybn0t59q",
+            "content": "No similar past incidents found."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "mg57ket7x",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_incident_orchestrator",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "mg57ket7x",
+            "content": "{\"assistant\": \"incident_orchestrator\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "5hyeeb8hq",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_triage_agent",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "5hyeeb8hq",
+            "content": "{\"assistant\": \"triage_agent\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "0qraf0501",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_incident_orchestrator",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "0qraf0501",
+            "content": "{\"assistant\": \"incident_orchestrator\"}"
+          }
+        ],
+        "output": [
+          {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "null",
+                  "name": "transfer_to_log_analyst_agent"
+                },
+                "id": "d35nfbvt4",
+                "type": "function"
+              }
+            ],
+            "function_call": null,
+            "provider_specific_fields": null
+          }
+        ],
+        "model": "groq/llama-3.3-70b-versatile",
+        "model_config": {
+          "temperature": null,
+          "top_p": null,
+          "frequency_penalty": null,
+          "presence_penalty": null,
+          "tool_choice": null,
+          "parallel_tool_calls": null,
+          "truncation": null,
+          "max_tokens": null,
+          "reasoning": null,
+          "verbosity": null,
+          "metadata": null,
+          "store": null,
+          "prompt_cache_retention": null,
+          "include_usage": null,
+          "response_include": null,
+          "top_logprobs": null,
+          "extra_query": null,
+          "extra_body": null,
+          "extra_headers": null,
+          "extra_args": null,
+          "retry": null,
+          "context_management": null,
+          "base_url": "",
+          "model_impl": "litellm"
+        },
+        "usage": {
+          "requests": 1,
+          "input_tokens": 1902,
+          "output_tokens": 15,
+          "total_tokens": 1917,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_9f26d9b5f44c47c18a85dbfb",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_f010b8c0c4be4f479f05de29",
+      "started_at": "2026-05-16T05:10:06.321445+00:00",
+      "ended_at": "2026-05-16T05:10:06.321538+00:00",
+      "span_data": {
+        "type": "handoff",
+        "from_agent": "incident_orchestrator",
+        "to_agent": "log_analyst_agent"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_f010b8c0c4be4f479f05de29",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_9ed3d9283d044282a3546342",
+      "started_at": "2026-05-16T05:10:05.875101+00:00",
+      "ended_at": "2026-05-16T05:10:06.321615+00:00",
+      "span_data": {
+        "type": "custom",
+        "name": "turn",
+        "data": {
+          "sdk_span_type": "turn",
+          "turn": 6,
+          "agent_name": "incident_orchestrator",
+          "usage": {
+            "input_tokens": 1902,
+            "output_tokens": 15,
+            "cached_input_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_9ed3d9283d044282a3546342",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_072981a3fd834cec9197760d",
+      "started_at": "2026-05-16T05:10:05.875063+00:00",
+      "ended_at": "2026-05-16T05:10:06.321644+00:00",
+      "span_data": {
+        "type": "agent",
+        "name": "incident_orchestrator",
+        "handoffs": [
+          "triage_agent",
+          "log_analyst_agent",
+          "deploy_correlator_agent",
+          "remediation_agent",
+          "comms_agent"
+        ],
+        "tools": [],
+        "output_type": "str"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_de2c2db734284a3f8bbeac2c",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_2a77449718ec481b829c6208",
+      "started_at": "2026-05-16T05:10:06.322430+00:00",
+      "ended_at": "2026-05-16T05:10:06.846158+00:00",
+      "span_data": {
+        "type": "generation",
+        "input": [
+          {
+            "content": "You are the Log Analyst, responsible for fetching and interpreting service logs to identify the root cause of an incident.\n\n## Your Role\nGiven a service name and time window from triage, fetch logs, identify error patterns, and produce a root cause hypothesis.\n\n## Tools\n- Use fetch_logs to retrieve logs for the affected service. Start with ERROR and CRITICAL levels. If the signal is weak, broaden to WARNING.\n- Use get_service_metadata if you need to understand the service's dependencies \u2014 errors often propagate from upstream callers or failing dependencies.\n\n## Analysis Methodology\n1. Fetch logs for the exact time window of the incident (use triage result for service and timestamps).\n2. Identify recurring error patterns \u2014 group by message template, not exact string.\n3. Find the earliest ERROR log \u2014 it is often closer to the root cause than later logs, which may be cascading effects.\n4. Look for stack traces: the innermost frame is usually the failing code path.\n5. Correlate error timestamps with deploy or configuration changes mentioned in alert metadata.\n6. Distinguish signal from noise: ignore INFO logs from unrelated services unless they show a clear timing correlation with the incident.\n\n## Output Format\nRespond with:\n- error_patterns: list of recurring error message templates (e.g., \"NullPointerException in AuthMiddleware.validate()\")\n- anomaly_summary: one paragraph describing what changed and when the degradation began\n- key_log_lines: up to 5 log lines that best evidence the root cause (include timestamps)\n- hypothesis: one sentence root cause hypothesis (e.g., \"Auth middleware fails on null config key introduced in the 02:45 deploy\")\n\n## When Done\nAfter producing your analysis, hand off back to the incident_orchestrator by calling transfer_to_incident_orchestrator with no arguments. Do not produce a final text response \u2014 always hand off back.",
+            "role": "system"
+          },
+          {
+            "role": "user",
+            "content": "New incident ID: smoke-c6eb4385\nAlert payload: {\"alert_id\":\"c6eb4385-8eb9-433b-b6e4-14e5539fa1ec\",\"source\":\"datadog\",\"service\":\"api-gateway\",\"metric\":\"error_rate\",\"threshold\":0.05,\"current_value\":0.34,\"severity\":\"critical\",\"timestamp\":\"2026-05-10T03:00:01Z\",\"metadata\":{\"scenario_id\":\"bad_deploy_01\",\"failure_class\":\"bad_deploy\"}}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "1wy8kbxms",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_triage_agent",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "1wy8kbxms",
+            "content": "{\"assistant\": \"triage_agent\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "fd92qrh2h",
+                "type": "function",
+                "function": {
+                  "name": "get_service_metadata",
+                  "arguments": "{\"service_name\":\"api-gateway\"}"
+                }
+              },
+              {
+                "id": "3xx2w2e0w",
+                "type": "function",
+                "function": {
+                  "name": "search_past_incidents",
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}"
+                }
+              },
+              {
+                "id": "kcmfvbcrc",
+                "type": "function",
+                "function": {
+                  "name": "get_service_metadata",
+                  "arguments": "{\"service_name\":\"api-gateway\"}"
+                }
+              },
+              {
+                "id": "9ybn0t59q",
+                "type": "function",
+                "function": {
+                  "name": "search_past_incidents",
+                  "arguments": "{\"symptom_query\":\"api gateway error rate higher than threshold\",\"top_k\":3}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "fd92qrh2h",
+            "content": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "3xx2w2e0w",
+            "content": "No similar past incidents found."
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "kcmfvbcrc",
+            "content": "name: api-gateway\nteam: team-platform\ntier: critical\noncall_channel: #oncall-platform\nrepo_url: https://github.com/acme-corp/api-gateway\ndescription: Edge proxy routing all external HTTP traffic to internal services. Handles TLS termination, rate limiting, auth verification, and circuit breaking.\ndependencies: auth-service, user-service, payment-service, order-service\nrunbooks (3):\n  [bad_deploy] Check deploy history: run `kubectl rollout history deployment/api-gateway` to list recent deploys \u2192 Identify the most recent deploy timestamp and correlate with the alert onset time \u2192 Review the deploy diff: check commit in GitHub at https://github.com/acme-corp/api-gateway/commits ... (7 steps total)\n  [downstream_outage] Check which upstream dependency is causing failures: inspect gateway logs for upstream error messages \u2192 Verify auth-service health: `curl -s http://auth-service/health/live` \u2192 Verify user-service health: `curl -s http://user-service/health/live` ... (7 steps total)\n  [config_regression] Check for recent ConfigMap changes: `kubectl describe configmap api-gateway-config` \u2192 Compare with previous config version in git: https://github.com/acme-corp/api-gateway/blob/main/k8s/configmap.yaml \u2192 Identify the changed config key and correlate with error pattern in logs ... (7 steps total)"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "9ybn0t59q",
+            "content": "No similar past incidents found."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "mg57ket7x",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_incident_orchestrator",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "mg57ket7x",
+            "content": "{\"assistant\": \"incident_orchestrator\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "5hyeeb8hq",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_triage_agent",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "5hyeeb8hq",
+            "content": "{\"assistant\": \"triage_agent\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "0qraf0501",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_incident_orchestrator",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "0qraf0501",
+            "content": "{\"assistant\": \"incident_orchestrator\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "d35nfbvt4",
+                "type": "function",
+                "function": {
+                  "name": "transfer_to_log_analyst_agent",
+                  "arguments": "null"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "d35nfbvt4",
+            "content": "{\"assistant\": \"log_analyst_agent\"}"
+          }
+        ],
+        "output": null,
+        "model": "groq/llama-3.3-70b-versatile",
+        "model_config": {
+          "temperature": null,
+          "top_p": null,
+          "frequency_penalty": null,
+          "presence_penalty": null,
+          "tool_choice": null,
+          "parallel_tool_calls": null,
+          "truncation": null,
+          "max_tokens": null,
+          "reasoning": null,
+          "verbosity": null,
+          "metadata": null,
+          "store": null,
+          "prompt_cache_retention": null,
+          "include_usage": null,
+          "response_include": null,
+          "top_logprobs": null,
+          "extra_query": null,
+          "extra_body": null,
+          "extra_headers": null,
+          "extra_args": null,
+          "retry": null,
+          "context_management": null,
+          "base_url": "",
+          "model_impl": "litellm"
+        },
+        "usage": null
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_2a77449718ec481b829c6208",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_2d66deae840b469ebc41dfca",
+      "started_at": "2026-05-16T05:10:06.321843+00:00",
+      "ended_at": "2026-05-16T05:10:06.846539+00:00",
+      "span_data": {
+        "type": "custom",
+        "name": "turn",
+        "data": {
+          "sdk_span_type": "turn",
+          "turn": 7,
+          "agent_name": "log_analyst_agent"
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_2d66deae840b469ebc41dfca",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": "span_072981a3fd834cec9197760d",
+      "started_at": "2026-05-16T05:10:06.321797+00:00",
+      "ended_at": "2026-05-16T05:10:06.846687+00:00",
+      "span_data": {
+        "type": "agent",
+        "name": "log_analyst_agent",
+        "handoffs": [
+          "incident_orchestrator"
+        ],
+        "tools": [
+          "fetch_logs",
+          "get_service_metadata"
+        ],
+        "output_type": "str"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "span_072981a3fd834cec9197760d",
+      "trace_id": "trace_4b4bfd42ec8c44259ac88084db484885",
+      "parent_id": null,
+      "started_at": "2026-05-16T05:10:03.712509+00:00",
+      "ended_at": "2026-05-16T05:10:06.846766+00:00",
+      "span_data": {
+        "type": "custom",
+        "name": "task",
+        "data": {
+          "sdk_span_type": "task",
+          "name": "Agent workflow",
+          "usage": {
+            "input_tokens": 9883,
+            "output_tokens": 212,
+            "cached_input_tokens": 0,
+            "requests": 6,
+            "total_tokens": 10095
+          }
+        }
+      },
+      "error": null
+    }
+  ],
+  "saved_at": "2026-05-16T05:10:06.847436+00:00"
+}

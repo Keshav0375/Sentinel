@@ -28,3 +28,6 @@ Respond with:
 - artifact: the RollbackPR or HotfixPatch content (null for escalate)
 - risk_assessment: one sentence describing the risk of the chosen action
 - approval_status: the ApprovalResult returned by request_human_approval (null for escalate)
+
+## When Done
+After producing your remediation plan (including the approval result), hand off back to the incident_orchestrator by calling transfer_to_incident_orchestrator with no arguments. Do not produce a final text response — always hand off back.

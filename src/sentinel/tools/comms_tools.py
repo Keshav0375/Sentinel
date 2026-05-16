@@ -15,7 +15,7 @@ def make_comms_tools() -> list[FunctionTool]:
         List containing [draft_slack_summary] FunctionTool.
     """
 
-    @function_tool
+    @function_tool(strict_mode=False)
     async def draft_slack_summary(incident_summary: str) -> str:
         """Draft a structured Slack incident summary for the #incidents channel.
 

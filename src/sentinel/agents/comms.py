@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from agents import Agent, Tool
-from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-from openai import AsyncOpenAI
 
 from sentinel.agents.loader import load_prompt
+from sentinel.config import Settings
 from sentinel.models.comms import SlackSummary
+from sentinel.providers import get_capabilities, resolve_model
 from sentinel.tools.comms_tools import make_comms_tools
 
 COMMS_AGENT_NAME = "comms_agent"
@@ -15,8 +17,8 @@ COMMS_AGENT_NAME = "comms_agent"
 
 def build_comms_agent(
     *,
-    groq_client: AsyncOpenAI,
-    model_name: str = "llama-3.1-8b-instant",
+    model_string: str,
+    settings: Settings,
 ) -> Agent[SlackSummary]:
     """Create a configured Comms Agent with injected dependencies.
 
@@ -26,24 +28,30 @@ def build_comms_agent(
     a ``SlackSummary`` with the message text and the list of target channels.
 
     Args:
-        groq_client: Pre-configured AsyncOpenAI client pointed at Groq's API.
-        model_name: Groq model to use. Defaults to llama-3.1-8b-instant (the
-            fast model, equivalent to gpt-4o-mini — Slack summary drafting is
-            a formatting task, not a complex reasoning task).
+        model_string: Provider/model string (e.g. 'groq/llama-3.1-8b-instant').
+        settings: Validated Settings instance for API key lookup.
 
     Returns:
-        Configured Agent that produces a ``SlackSummary`` as structured output.
+        Configured Agent that produces a ``SlackSummary`` as structured output
+        when the provider supports it, or plain text otherwise.
     """
-    llm = OpenAIChatCompletionsModel(model=model_name, openai_client=groq_client)
+    llm = resolve_model(model_string, settings)
+    caps = get_capabilities(model_string)
 
     # make_comms_tools() returns list[FunctionTool]; annotate as list[Tool]
     # so pyright accepts it as the Agent.tools parameter (list is invariant).
     tools: list[Tool] = [*make_comms_tools()]
 
+    kwargs: dict[str, Any] = {}
+    if caps.supports_structured_outputs:
+        kwargs["output_type"] = SlackSummary
+    if caps.default_model_settings:
+        kwargs["model_settings"] = caps.default_model_settings
+
     return Agent(
         name=COMMS_AGENT_NAME,
         instructions=load_prompt("comms.txt"),
         tools=tools,
-        output_type=SlackSummary,
         model=llm,
+        **kwargs,
     )

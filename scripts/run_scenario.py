@@ -25,9 +25,8 @@ _SRC = _PROJECT_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from agents import Runner, add_trace_processor, set_default_openai_client  # noqa: E402
+from agents import Runner, add_trace_processor, handoff  # noqa: E402
 from agents import trace as agent_trace  # noqa: E402
-from openai import AsyncOpenAI  # noqa: E402
 
 from sentinel.agents.comms import build_comms_agent  # noqa: E402
 from sentinel.agents.deploy_correlator import build_deploy_correlator_agent  # noqa: E402
@@ -45,6 +44,7 @@ from sentinel.memory.episodic import EpisodicMemory  # noqa: E402
 from sentinel.memory.semantic import SemanticMemory  # noqa: E402
 from sentinel.memory.short_term import ShortTermMemory  # noqa: E402
 from sentinel.models.incident import IncidentStatus  # noqa: E402
+from sentinel.providers import apply_sdk_defaults, get_capabilities  # noqa: E402
 
 _SEP = "=" * 62
 
@@ -56,6 +56,16 @@ def _print_header(title: str) -> None:
     print(_SEP)
 
 
+def _safe_print(text: str) -> None:
+    """Print text with fallback for Windows cp1252 encoding."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        sys.stdout.buffer.write(text.encode("utf-8", errors="replace"))
+        sys.stdout.buffer.write(b"\n")
+        sys.stdout.buffer.flush()
+
+
 def _print_timeline(stm: ShortTermMemory, incident_id: str) -> None:
     """Print the incident timeline from ShortTermMemory."""
     try:
@@ -64,8 +74,8 @@ def _print_timeline(stm: ShortTermMemory, incident_id: str) -> None:
         print("  (incident was cleared)")
         return
 
-    print(f"  status:  {ctx['status']}")
-    print(f"  service: {ctx['alert'].service}")
+    _safe_print(f"  status:  {ctx['status']}")
+    _safe_print(f"  service: {ctx['alert'].service}")
     print()
 
     timeline = ctx["timeline"]
@@ -75,11 +85,21 @@ def _print_timeline(stm: ShortTermMemory, incident_id: str) -> None:
 
     for i, entry in enumerate(timeline, 1):
         ts = entry.timestamp.strftime("%H:%M:%S")
-        print(f"  [{i:02d}] {ts}  [{entry.agent_name}] {entry.action}")
+        _safe_print(f"  [{i:02d}] {ts}  [{entry.agent_name}] {entry.action}")
         summary = entry.result_summary
         if len(summary) > 120:
             summary = summary[:117] + "..."
-        print(f"        -> {summary}")
+        _safe_print(f"        -> {summary}")
+
+
+async def _auto_approval(display: str) -> tuple[str, str | None]:
+    """Auto-approve HITL gate for non-interactive runs."""
+    import sys  # noqa: PLC0415
+
+    sys.stdout.buffer.write(display.encode("utf-8", errors="replace"))
+    sys.stdout.buffer.write(b"\n>>> AUTO-APPROVED (--auto-approve flag)\n")
+    sys.stdout.buffer.flush()
+    return ("approve", "auto-approved for demo/test run")
 
 
 async def run_scenario(
@@ -87,6 +107,7 @@ async def run_scenario(
     *,
     db_path: Path | None = None,
     trajectories_dir: Path | None = None,
+    auto_approve: bool = False,
 ) -> None:
     """Build the full pipeline, run it against a scenario, print the trajectory.
 
@@ -97,6 +118,7 @@ async def run_scenario(
         scenario_id: Scenario to run (e.g. ``"bad_deploy_01"``).
         db_path: Override the SQLite path from Settings.
         trajectories_dir: Override the trajectory output directory.
+        auto_approve: If True, auto-approve all HITL gates (for CI/demo).
     """
     settings = get_settings()
     # Keep INFO logs quiet during the demo — HITL prompts go to stdout directly.
@@ -133,10 +155,9 @@ async def run_scenario(
     short_term_memory = ShortTermMemory()
     print(f"  [OK] embedding model: {settings.sentinel_embedding_model}")
 
-    # ── Groq client ────────────────────────────────────────────────────────────
-    groq_client = AsyncOpenAI(api_key=settings.groq_api_key, base_url=settings.groq_base_url)
-    set_default_openai_client(groq_client)
-    print(f"  [OK] LLM: {settings.groq_base_url}")
+    # ── SDK defaults + provider layer ─────────────────────────────────────────
+    apply_sdk_defaults(settings)
+    print(f"  [OK] provider: {settings.sentinel_analysis_model.split('/')[0]}")
 
     # ── Build agents with scenario injected ───────────────────────────────────
     # Inject the scenario into log and deploy tools so they return
@@ -144,27 +165,29 @@ async def run_scenario(
     triage_agent = build_triage_agent(
         semantic_memory,
         episodic_memory,
-        groq_client=groq_client,
-        model_name=settings.sentinel_triage_model,
+        model_string=settings.sentinel_triage_model,
+        settings=settings,
     )
     log_analyst_agent = build_log_analyst_agent(
         semantic_memory,
         scenario,  # synthetic logs from this scenario
-        groq_client=groq_client,
-        model_name=settings.sentinel_analysis_model,
+        model_string=settings.sentinel_analysis_model,
+        settings=settings,
     )
     deploy_correlator_agent = build_deploy_correlator_agent(
         scenario,  # synthetic deploys from this scenario
-        groq_client=groq_client,
-        model_name=settings.sentinel_triage_model,
+        model_string=settings.sentinel_triage_model,
+        settings=settings,
     )
+    approval_fn = _auto_approval if auto_approve else None
     remediation_agent = build_remediation_agent(
-        groq_client=groq_client,
-        model_name=settings.sentinel_analysis_model,
+        model_string=settings.sentinel_analysis_model,
+        settings=settings,
+        approval_fn=approval_fn,
     )
     comms_agent = build_comms_agent(
-        groq_client=groq_client,
-        model_name=settings.sentinel_triage_model,
+        model_string=settings.sentinel_triage_model,
+        settings=settings,
     )
     orchestrator = build_orchestrator_agent(
         triage_agent,
@@ -172,9 +195,23 @@ async def run_scenario(
         deploy_correlator_agent,
         remediation_agent,
         comms_agent,
-        groq_client=groq_client,
-        model_name=settings.sentinel_analysis_model,
+        model_string=settings.sentinel_analysis_model,
+        settings=settings,
     )
+
+    # Wire handoff-back so specialists return control to the orchestrator.
+    caps = get_capabilities(settings.sentinel_analysis_model)
+    back = handoff(orchestrator)
+    back.strict_json_schema = caps.strict_schemas
+    for specialist in [
+        triage_agent,
+        log_analyst_agent,
+        deploy_correlator_agent,
+        remediation_agent,
+        comms_agent,
+    ]:
+        specialist.handoffs = [back]
+
     print("  [OK] agents built (scenario injected into log/deploy tools)")
 
     # ── Incident setup ─────────────────────────────────────────────────────────
@@ -186,8 +223,11 @@ async def run_scenario(
 
     # ── Run pipeline ───────────────────────────────────────────────────────────
     _print_header(f"Running pipeline  [{incident_id}]")
-    print("  HITL approval prompts will appear when the Remediation Agent runs.")
-    print("  Type 'approve' or 'reject' and press Enter.\n")
+    if auto_approve:
+        print("  HITL gates will be AUTO-APPROVED (--auto-approve flag).\n")
+    else:
+        print("  HITL approval prompts will appear when the Remediation Agent runs.")
+        print("  Type 'approve' or 'reject' and press Enter.\n")
 
     input_text = (
         f"New incident ID: {incident_id}\n"
@@ -200,7 +240,7 @@ async def run_scenario(
             await Runner.run(
                 orchestrator,
                 input_text,
-                max_turns=settings.sentinel_max_tool_calls,
+                max_turns=settings.sentinel_max_tool_calls + 5,
             )
         elapsed = (datetime.now(UTC) - start).total_seconds()
         print(f"\n  [OK] pipeline completed in {elapsed:.1f}s")
@@ -240,22 +280,25 @@ async def run_scenario(
 def _usage() -> None:
     print(
         "Usage:\n"
-        "  python scripts/run_scenario.py <scenario_id>\n"
+        "  python scripts/run_scenario.py <scenario_id> [--auto-approve]\n"
         "  python scripts/run_scenario.py --list\n\n"
+        "Options:\n"
+        "  --auto-approve   Auto-approve all HITL gates (for CI/demo)\n\n"
         "Examples:\n"
         "  python scripts/run_scenario.py bad_deploy_01\n"
+        "  python scripts/run_scenario.py bad_deploy_01 --auto-approve\n"
         "  python scripts/run_scenario.py db_pool_01\n"
-        "  python scripts/run_scenario.py downstream_outage_01\n"
     )
 
 
 def main() -> None:
     """CLI entry point — parse args and run the scenario."""
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
         _usage()
-        sys.exit(0 if "--help" in sys.argv[1:] else 1)
+        sys.exit(0 if "--help" in args else 1)
 
-    if sys.argv[1] == "--list":
+    if args[0] == "--list":
         scenarios = list_scenarios()
         if scenarios:
             print("Available scenarios:")
@@ -265,9 +308,10 @@ def main() -> None:
             print("No scenarios found.")
         return
 
-    scenario_id = sys.argv[1]
+    scenario_id = args[0]
+    auto_approve = "--auto-approve" in args
     try:
-        asyncio.run(run_scenario(scenario_id))
+        asyncio.run(run_scenario(scenario_id, auto_approve=auto_approve))
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         print("\nAvailable scenarios:", file=sys.stderr)

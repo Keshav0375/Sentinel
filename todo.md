@@ -726,13 +726,90 @@ Notes:
 
 ---
 
+## Phase 9 — Multi-Provider Model Layer (LiteLLM Migration)
+
+> Replace hard-coded Groq wiring with a `provider/model` string system so any
+> agent can be pointed at any supported provider (Groq, OpenAI, Anthropic, Azure)
+> via one env-var change. Uses LiteLLM as the bridge. See `models_provider.md`
+> for the full execution plan and `ARCHITECTURE.md` §3.1 for the design.
+
+### [x] 9.1 — Fix Groq handoff bugs + strict_json_schema sweep (3%)
+Fix 3 known SDK/Groq compat issues before touching the provider layer:
+1. Add `set_default_openai_api("chat_completions")` + conditional `set_tracing_disabled` in `main.py` lifespan.
+2. Add `strict_json_schema=False` to every `@function_tool` decorator in `src/sentinel/tools/`.
+3. Bump `max_turns` by +5 in `main.py`, `run_scenario.py`, `run_eval.py` to account for handoff overhead.
+4. Append "When calling transfer_to_<agent>, pass no arguments." to orchestrator prompt.
+**Verify:** `pytest tests/test_tools/ -x` — all pass.
+```
+Notes:
+─────
+2026-05-15: Added set_default_openai_api("chat_completions") + set_tracing_disabled(True) to main.py, run_scenario.py, eval/runner.py. Added strict_mode=False to all 8 @function_tool decorators (plan's strict_json_schema=False maps to strict_mode=False in agents==0.17.0 — param doesn't exist yet). Bumped max_turns +5 in all 3 entry points. Appended no-args handoff rule to orchestrator.txt. 1480 tests pass, 0 regressions.
+```
+
+### [x] 9.2 — Config update + provider API key validation (3%)
+Update `Settings` in `config.py` to support multi-provider model strings:
+1. Change model field defaults to `provider/model` format (e.g. `groq/llama-3.1-8b-instant`).
+2. Add optional API key fields: `openai_api_key`, `anthropic_api_key`, `azure_api_key`, `azure_api_base`, `azure_api_version`.
+3. Add `@model_validator(mode="after")` that reads the provider prefix from each model string and asserts the matching API key is non-empty.
+4. Update `.env.example` with all new vars grouped by provider.
+**Verify:** Existing config tests pass + 3 new validator tests (missing key → raises, correct key → passes).
+```
+Notes:
+─────
+2026-05-15: Model defaults changed to groq/provider/model format. Added openai_api_key, anthropic_api_key, azure_api_key, azure_api_base, azure_api_version fields (all optional). Added model_validator that checks provider prefix against key presence for all 3 model fields. .env.example regrouped by provider section. 14 config tests (9 new), 1489 total, 0 regressions.
+```
+
+### [x] 9.3 — Create `src/sentinel/providers/` package (4%)
+Build the provider abstraction layer:
+1. `resolver.py` — `resolve_model(model_string, settings) → LitellmModel` (parse prefix → select API key → return model).
+2. `capabilities.py` — `get_capabilities(model_string) → ProviderCapabilities` (structured_outputs, strict_schemas flags per provider).
+3. `output_coercion.py` — `coerce_output(text, schema) → BaseModel | None` (strip markdown fences, `model_validate_json` fallback for providers without structured outputs).
+4. `__init__.py` — re-export + `apply_sdk_defaults(settings)` helper (moves `set_default_openai_api` + `set_tracing_disabled` from main.py).
+5. Add `openai-agents[litellm]` to `pyproject.toml` (replace plain `openai-agents`).
+**Verify:** `tests/test_providers/` — test_resolver (4 providers), test_capabilities, test_unknown_prefix, test_coercion.
+```
+Notes:
+─────
+2026-05-15: Created providers/ package: resolver.py (resolve_model → LitellmModel), capabilities.py (ProviderCapabilities dataclass + get_capabilities), output_coercion.py (coerce_output with fence-stripping), __init__.py (re-exports + apply_sdk_defaults). Updated pyproject.toml to openai-agents[litellm]. Installed litellm via pip. UP047 fixed by using PEP 695 type param syntax. 38 new tests, 1527 total, 0 regressions.
+```
+
+### [x] 9.4 — Migrate all 6 agent builders + pipeline entry points (5%)
+Rewire every agent to use the provider layer instead of raw Groq client:
+1. Change all `build_*_agent()` signatures: drop `groq_client` + `model_name`, add `model_string` + `settings`.
+2. Inside each builder: `llm = resolve_model(model_string, settings)` + `caps = get_capabilities(model_string)`.
+3. Wrap `output_type=` in capability check — only set when `caps.supports_structured_outputs`.
+4. Update `main.py` lifespan: remove `AsyncOpenAI(...)` and `set_default_openai_client(...)`, replace with `apply_sdk_defaults(settings)`.
+5. Mirror changes in `scripts/run_scenario.py` and `scripts/run_eval.py`.
+6. Update `tests/test_agents/conftest.py` with `FakeSettings` fixture + `MagicMock` model stub.
+**Verify:** `pytest tests/test_agents/ -x` — all structural tests pass (no live API calls).
+```
+Notes:
+─────
+2026-05-15: All 6 builders drop groq_client+model_name, gain model_string+settings. resolve_model+get_capabilities called inside each. output_type conditionally set via caps.supports_structured_outputs. main.py/run_scenario.py use apply_sdk_defaults. eval/runner.py keeps AsyncOpenAI for judge only. test_agents/ updated to LitellmModel assertions + fake_settings fixture. test_runner.py updated to new run_scenario_eval signature. 1527 tests pass, 0 regressions. No OpenAIChatCompletionsModel/AsyncOpenAI in agents/.
+```
+
+### [x] 9.5 — Reference docs + final clean pass (5%)
+Create docs and run final verification:
+1. Create `available_models.md` — per-provider model table with role, context window, exact env-var string.
+2. Update `README.md` — replace Groq-only LLM row with multi-provider row, add "Switching providers" section.
+3. Final sweep: `ruff check src/ tests/ --fix` + `pyright src/` + `pytest -x --tb=short`.
+4. Assert no `AsyncOpenAI` or `OpenAIChatCompletionsModel` import remains in `src/sentinel/agents/`.
+5. Smoke test: `SENTINEL_ANALYSIS_MODEL=groq/llama-3.3-70b-versatile python scripts/run_scenario.py bad_deploy_01`.
+```
+Notes:
+─────
+2026-05-15: Created available_models.md (4 providers, quick-swap examples, capability matrix). Updated README.md (multi-provider LLM row, Switching providers section in Quick Start, Phase 2 roadmap update). Fixed pre-existing pyright error in cli.py (reportUnknownArgumentType). ruff clean, pyright 0 errors, 1527 tests pass. No AsyncOpenAI/OpenAIChatCompletionsModel in agents/. Smoke test requires live Groq key — runs end-to-end with default groq/ config.
+```
+
+---
+
 ## Phase 2 Roadmap (Post-MVP, not tracked here)
 
 These are documented for interview conversations ("what would you do next"):
 - [ ] Azure Container Apps deployment (Bicep IaC)
 - [ ] Cosmos DB (vector + JSON) replacing SQLite
 - [ ] Redis for short-term memory
-- [ ] LiteLLM + Kong AI Gateway for model routing + token budgets
+- [x] ~~LiteLLM + Kong AI Gateway for model routing + token budgets~~ → LiteLLM done in Phase 9; Kong remains Phase 2
 - [ ] Self-hosted LangFuse for observability
 - [ ] Slack interactive buttons for HITL (real Slack app)
 - [ ] GitHub App for PR creation (real GitHub integration)

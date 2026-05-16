@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sentinel.generator.scenarios import Scenario
@@ -38,9 +39,9 @@ def load_scenario(
 def generate_alert(scenario: Scenario) -> AlertPayload:
     """Create a runtime AlertPayload from a loaded Scenario.
 
-    alert_id is generated fresh (UUID4) and timestamp defaults to now(UTC)
-    so each call to this function produces a unique, time-stamped alert even
-    when replaying the same scenario multiple times.
+    alert_id is generated fresh (UUID4). Timestamp is derived from the
+    scenario's last log entry so the LLM's time-windowed log queries
+    actually match the scenario data.
 
     Args:
         scenario: A fully-loaded and validated Scenario object.
@@ -48,6 +49,7 @@ def generate_alert(scenario: Scenario) -> AlertPayload:
     Returns:
         AlertPayload ready to POST to the webhook receiver.
     """
+    alert_ts = scenario.logs[-1].ts if scenario.logs else datetime.now(UTC)
     return AlertPayload(
         source=scenario.alert.source,
         service=scenario.alert.service,
@@ -55,6 +57,7 @@ def generate_alert(scenario: Scenario) -> AlertPayload:
         threshold=scenario.alert.threshold,
         current_value=scenario.alert.current_value,
         severity=scenario.alert.severity,
+        timestamp=alert_ts,
         metadata={
             "scenario_id": scenario.scenario_id,
             "failure_class": scenario.failure_class,
