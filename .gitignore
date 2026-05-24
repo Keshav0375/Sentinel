@@ -9,7 +9,7 @@ __pycache__/
 dist/
 build/
 .eggs/
-
+graphify-out/
 # ── Virtual environments ───────────────────────────────────────────────────────
 .env
 .env.*
