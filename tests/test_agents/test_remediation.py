@@ -221,6 +221,24 @@ def test_remediation_agent_instructions_mention_hitl(
     assert "request_human_approval" in remediation_agent.instructions
 
 
+def test_remediation_agent_hitl_required_for_all_paths(
+    remediation_agent: Agent[RemediationPlan],
+) -> None:
+    """HITL must be required for ALL paths including escalation.
+
+    The prompt must NOT contain language that allows skipping HITL for the
+    escalation path (e.g. 'null for escalate' in approval_status).
+    """
+    assert isinstance(remediation_agent.instructions, str)
+    prompt = remediation_agent.instructions.lower()
+    assert "every path" in prompt or "and escalate" in prompt or "zero exceptions" in prompt, (
+        "SAFETY: prompt must require HITL for ALL paths including escalation"
+    )
+    assert "null for escalate" not in prompt, (
+        "SAFETY: prompt must not allow null approval for escalation path"
+    )
+
+
 def test_remediation_agent_instructions_mention_rollback_and_hotfix(
     remediation_agent: Agent[RemediationPlan],
 ) -> None:

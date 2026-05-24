@@ -19,7 +19,14 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from agents import AgentSpanData, FunctionSpanData, Span, Trace, TracingProcessor
+from agents import (
+    AgentSpanData,
+    FunctionSpanData,
+    GenerationSpanData,
+    Span,
+    Trace,
+    TracingProcessor,
+)
 
 from sentinel.infra.event_bus import EventBus, EventType, PipelineEvent
 from sentinel.infra.logging import get_logger
@@ -39,6 +46,8 @@ class DashboardEventEmitter(TracingProcessor):
         self._bus = event_bus
         # trace_id → name of the most recently started agent in that trace
         self._active: dict[str, str] = {}
+        # agent_name → last non-empty text output from a generation span
+        self._last_output: dict[str, str] = {}
 
     # ── TracingProcessor interface ────────────────────────────────────────────
 
@@ -88,14 +97,27 @@ class DashboardEventEmitter(TracingProcessor):
             return
         data = span.span_data
 
-        if isinstance(data, AgentSpanData):
+        if isinstance(data, GenerationSpanData):
+            agent = self._active.get(span.trace_id, "agent")
+            if data.output:
+                for msg in data.output:
+                    content = msg.get("content") if isinstance(msg, dict) else None
+                    if content and isinstance(content, str) and len(content) > 20:
+                        self._last_output[agent] = content[:500]
+
+        elif isinstance(data, AgentSpanData):
             agent = self._active.get(span.trace_id, data.name or "agent")
+            output = self._last_output.pop(agent, None)
+            event_data: dict[str, object] = (
+                {"output": output} if output else {}
+            )
             self._emit(
                 incident_id,
                 PipelineEvent(
                     type=EventType.AGENT_COMPLETED,
                     agent_name=agent,
                     incident_id=incident_id,
+                    data=event_data,
                 ),
             )
 
@@ -117,6 +139,7 @@ class DashboardEventEmitter(TracingProcessor):
 
     def shutdown(self) -> None:
         self._active.clear()
+        self._last_output.clear()
 
     def force_flush(self) -> None:
         pass

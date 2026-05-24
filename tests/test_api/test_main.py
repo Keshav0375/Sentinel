@@ -43,7 +43,7 @@ def _populated_stm(incident_id: str = "inc-test0001") -> ShortTermMemory:
 def _make_fn(stm: ShortTermMemory, **kwargs: Any) -> Any:
     """Build make_pipeline_fn with mock dependencies."""
     return make_pipeline_fn(
-        _fake_settings(), MagicMock(), MagicMock(), stm, **kwargs
+        _fake_settings, MagicMock(), MagicMock(), stm, **kwargs
     )
 
 
