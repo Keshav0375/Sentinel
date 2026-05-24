@@ -10,7 +10,7 @@ The app must be launched from the project root so that the ``data`` package
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,7 @@ from sentinel.agents.log_analyst import build_log_analyst_agent
 from sentinel.agents.orchestrator import build_orchestrator_agent
 from sentinel.agents.remediation import build_remediation_agent
 from sentinel.agents.triage import build_triage_agent
+from sentinel.api.config_view import RuntimeConfig, make_config_router
 from sentinel.api.eval_report import make_eval_report_router
 from sentinel.api.events import (
     HitlGateRegistry,
@@ -37,6 +38,7 @@ from sentinel.api.events import (
 from sentinel.api.health import make_health_router
 from sentinel.api.incidents import make_incidents_router
 from sentinel.api.scenarios import make_scenarios_router
+from sentinel.api.trajectories import make_trajectories_router
 from sentinel.api.webhooks import AlertDeduplicator, PipelineFn, make_alert_router
 from sentinel.config import Settings, get_settings
 from sentinel.generator.alert_gen import load_scenario
@@ -123,7 +125,7 @@ def _build_orchestrator_for_scenario(
 
 
 def make_pipeline_fn(
-    settings: Settings,
+    settings_fn: Callable[[], Settings],
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     short_term_memory: ShortTermMemory,
@@ -137,7 +139,8 @@ def make_pipeline_fn(
     log/deploy data injected into the tools.
 
     Args:
-        settings: Validated Settings for model resolution and API keys.
+        settings_fn: Callable returning current Settings (supports runtime
+            model overrides via RuntimeConfig).
         semantic_memory: Shared semantic memory for service lookups.
         episodic_memory: Shared episodic memory for past incident search.
         short_term_memory: Live STM — updated with terminal status on completion.
@@ -151,6 +154,7 @@ def make_pipeline_fn(
     """
 
     async def run_pipeline(incident_id: str, alert: AlertPayload) -> None:
+        settings = settings_fn()
         logger.info("pipeline_start", incident_id=incident_id, service=alert.service)
 
         scenario_id = alert.metadata.get("scenario_id")
@@ -261,12 +265,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     dashboard_emitter = DashboardEventEmitter(event_bus)
     add_trace_processor(dashboard_emitter)
 
+    # ── Runtime config (dashboard model switching) ─────────────────────────────
+    runtime_config = RuntimeConfig(settings)
+
     # ── API wiring ────────────────────────────────────────────────────────────
     # Agents are built per-incident inside make_pipeline_fn so scenario-based
     # alerts get their synthetic log/deploy data injected into the tools.
     deduplicator = AlertDeduplicator()
     pipeline_fn = make_pipeline_fn(
-        settings,
+        runtime_config.effective_settings,
         semantic_memory,
         episodic_memory,
         short_term_memory,
@@ -281,6 +288,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.include_router(make_events_router(event_bus, gate_registry))
     app.include_router(make_scenarios_router())
     app.include_router(make_eval_report_router())
+    app.include_router(make_config_router(runtime_config))
+    app.include_router(make_trajectories_router(trajectories_dir))
 
     logger.info("sentinel_ready")
     yield

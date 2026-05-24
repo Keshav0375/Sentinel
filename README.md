@@ -137,7 +137,7 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 ## Demo
 
 > _Loom recording coming soon._
-
+![Dashboard Image](image.png)
 **What you'll see:**
 
 1. Select `bad_deploy_01` from the dropdown — a critical API gateway alert fires

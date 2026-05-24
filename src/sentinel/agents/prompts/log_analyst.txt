@@ -7,8 +7,11 @@ Given a service name and time window from triage, fetch logs, identify error pat
 - Use fetch_logs to retrieve logs for the affected service. Start with ERROR and CRITICAL levels. If the signal is weak, broaden to WARNING.
 - Use get_service_metadata if you need to understand the service's dependencies — errors often propagate from upstream callers or failing dependencies.
 
+## Budget
+You share a 15-tool-call budget with all other agents. Limit yourself to at most 2 fetch_logs calls (one ERROR, optionally one WARNING if signal is weak). Do not re-fetch the same service and time window with different keyword filters — analyze what you already have.
+
 ## Analysis Methodology
-1. Fetch logs for the exact time window of the incident (use triage result for service and timestamps).
+1. Fetch logs for the exact time window of the incident (use triage result for service and timestamps). Use a 30-minute window centered on the alert timestamp.
 2. Identify recurring error patterns — group by message template, not exact string.
 3. Find the earliest ERROR log — it is often closer to the root cause than later logs, which may be cascading effects.
 4. Look for stack traces: the innermost frame is usually the failing code path.

@@ -5,12 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Sentinel — Live Incident Dashboard</title>
   <style>
+    /* ══ Design Tokens ══════════════════════════════════════════════════════ */
     :root {
       --bg:         #0d1117;
       --surface:    #161b22;
       --surface-2:  #21262d;
+      --surface-3:  #2d333b;
       --border:     #30363d;
+      --border-light:#3d444d;
       --text:       #e6edf3;
+      --text-secondary: #c9d1d9;
       --muted:      #8b949e;
       --blue:       #388bfd;
       --blue-dim:   rgba(56,139,253,.15);
@@ -21,149 +25,276 @@
       --red:        #f85149;
       --red-dim:    rgba(248,81,73,.15);
       --purple:     #a371f7;
+      --purple-dim: rgba(163,113,247,.15);
+      --cyan:       #39d2c0;
       --r:          6px;
+      --r-lg:       10px;
       --sans:       -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
       --mono:       ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+      --sidebar-w:  260px;
+      --event-w:    340px;
+      --header-h:   auto;
+      --footer-h:   38px;
+      --transition: .25s ease;
     }
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;
-         line-height:1.5;min-height:100vh;display:flex;flex-direction:column}
 
-    /* ── Header ── */
+    /* ══ Reset ══════════════════════════════════════════════════════════════ */
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--bg);color:var(--text);font-family:var(--sans);
+         font-size:14px;line-height:1.5;height:100vh;display:flex;
+         flex-direction:column;overflow:hidden}
+    ::-webkit-scrollbar{width:6px}
+    ::-webkit-scrollbar-track{background:transparent}
+    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+    ::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+
+    /* ══ Header ════════════════════════════════════════════════════════════ */
     header{background:var(--surface);border-bottom:1px solid var(--border);
            padding:10px 20px;display:flex;align-items:center;
-           justify-content:space-between;gap:12px;flex-wrap:wrap;
-           position:sticky;top:0;z-index:100}
-    .brand{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600}
-    .brand-sub{color:var(--muted);font-weight:400;font-size:13px}
-    .fire-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+           justify-content:space-between;gap:16px;flex-wrap:wrap;
+           flex-shrink:0;z-index:100}
+    .brand{display:flex;align-items:center;gap:10px}
+    .brand-logo{font-size:22px;line-height:1}
+    .brand-text{display:flex;flex-direction:column}
+    .brand-name{font-size:16px;font-weight:700;letter-spacing:-.02em}
+    .brand-sub{color:var(--muted);font-size:11px;font-weight:400;
+               letter-spacing:.03em;text-transform:uppercase}
+    .header-center{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .model-badge{display:inline-flex;align-items:center;gap:4px;
+                 padding:3px 10px;border-radius:12px;font-size:11px;
+                 font-weight:600;background:var(--surface-2);
+                 border:1px solid var(--border);color:var(--text-secondary);
+                 cursor:pointer;transition:border-color var(--transition)}
+    .model-badge:hover{border-color:var(--blue)}
+    .model-badge .badge-label{color:var(--muted);font-weight:400}
+    .fire-row{display:flex;align-items:center;gap:8px}
     select{background:var(--bg);border:1px solid var(--border);color:var(--text);
-           padding:5px 9px;border-radius:var(--r);font-size:13px;font-family:var(--sans);
-           min-width:220px;cursor:pointer}
+           padding:6px 10px;border-radius:var(--r);font-size:13px;
+           font-family:var(--sans);min-width:200px;cursor:pointer}
     select:focus{outline:2px solid var(--blue);outline-offset:1px}
-    .btn{padding:5px 14px;border:none;border-radius:var(--r);font-size:13px;
-         font-family:var(--sans);font-weight:500;cursor:pointer;transition:opacity .15s}
-    .btn:hover{opacity:.85}  .btn:disabled{opacity:.4;cursor:not-allowed}
+    .btn{padding:6px 16px;border:none;border-radius:var(--r);font-size:13px;
+         font-family:var(--sans);font-weight:600;cursor:pointer;
+         transition:all .15s;display:inline-flex;align-items:center;gap:5px}
+    .btn:hover{filter:brightness(1.1)}.btn:active{transform:scale(.97)}
+    .btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
     .btn-primary{background:var(--blue);color:#fff}
     .btn-success{background:var(--green);color:#000}
-    .btn-danger {background:var(--red);color:#fff}
-    .btn-outline{background:transparent;color:var(--text);
-                 border:1px solid var(--border)}
+    .btn-danger{background:var(--red);color:#fff}
+    .btn-outline{background:transparent;color:var(--text);border:1px solid var(--border)}
+    .btn-sm{padding:4px 10px;font-size:12px}
 
-    /* ── Incident bar ── */
+    /* ══ Incident Bar ══════════════════════════════════════════════════════ */
     #inc-bar{background:var(--surface);border-bottom:1px solid var(--border);
-             padding:6px 20px;display:none;align-items:center;gap:16px;
-             font-size:12px;flex-wrap:wrap}
+             padding:7px 20px;display:none;align-items:center;gap:18px;
+             font-size:12px;flex-shrink:0}
     #inc-bar.on{display:flex}
     .itag{display:flex;align-items:center;gap:5px}
-    .itag-lbl{color:var(--muted)}
-    .sev{padding:1px 8px;border-radius:12px;font-size:11px;font-weight:700;
+    .itag-lbl{color:var(--muted);font-size:11px}
+    .sev{padding:2px 10px;border-radius:12px;font-size:11px;font-weight:700;
          text-transform:uppercase;letter-spacing:.04em}
     .sev-critical{background:var(--red-dim);color:var(--red)}
-    .sev-high    {background:var(--amber-dim);color:var(--amber)}
-    .sev-warning {background:var(--blue-dim);color:var(--blue)}
+    .sev-high{background:var(--amber-dim);color:var(--amber)}
+    .sev-warning{background:var(--blue-dim);color:var(--blue)}
     .sev-low,.sev-info{background:var(--green-dim);color:var(--green)}
     .pill{padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600}
-    .pill-running {background:var(--blue-dim);color:var(--blue)}
+    .pill-running{background:var(--blue-dim);color:var(--blue)}
     .pill-resolved{background:var(--green-dim);color:var(--green)}
     .pill-escalated{background:var(--red-dim);color:var(--red)}
 
-    /* ── Main ── */
-    main{flex:1;padding:20px;max-width:1400px;margin:0 auto;width:100%}
-    #empty{text-align:center;padding:80px 20px;color:var(--muted)}
-    #empty h2{font-size:20px;margin-bottom:8px;color:var(--text)}
+    /* ══ Three-Column Layout ═══════════════════════════════════════════════ */
+    .app-layout{display:flex;flex:1;overflow:hidden}
 
-    /* ── Pipeline ── */
+    /* ── Left: History Sidebar ─────────────────────────────────────────── */
+    .sidebar-left{width:var(--sidebar-w);background:var(--surface);
+                  border-right:1px solid var(--border);display:flex;
+                  flex-direction:column;flex-shrink:0;
+                  transition:width var(--transition),
+                             margin-left var(--transition);overflow:hidden}
+    .sidebar-left.collapsed{width:0;margin-left:0}
+    .panel-head{padding:12px 14px;display:flex;align-items:center;
+                justify-content:space-between;border-bottom:1px solid var(--border)}
+    .panel-title{font-size:12px;font-weight:700;text-transform:uppercase;
+                 letter-spacing:.08em;color:var(--muted)}
+    .toggle-btn{background:none;border:none;color:var(--muted);cursor:pointer;
+                font-size:14px;padding:2px 6px;border-radius:var(--r);
+                transition:color var(--transition),background var(--transition)}
+    .toggle-btn:hover{color:var(--text);background:var(--surface-2)}
+    .history-list{flex:1;overflow-y:auto;padding:6px 0}
+    .history-item{display:flex;align-items:center;gap:10px;padding:8px 14px;
+                  cursor:pointer;transition:background var(--transition);
+                  border-left:3px solid transparent}
+    .history-item:hover{background:var(--surface-2)}
+    .history-item.active{background:var(--blue-dim);border-left-color:var(--blue)}
+    .history-dot{width:8px;height:8px;border-radius:50%;background:var(--green);
+                 flex-shrink:0}
+    .history-info{flex:1;min-width:0}
+    .history-id{font-family:var(--mono);font-size:12px;font-weight:600;
+                white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .history-date{font-size:11px;color:var(--muted)}
+    .history-empty{padding:20px 14px;color:var(--muted);font-size:12px;
+                   text-align:center;font-style:italic}
+
+    /* ── History toggle (visible when collapsed) ───────────────────────── */
+    .sidebar-toggle-tab{position:fixed;left:0;top:50%;transform:translateY(-50%);
+                        z-index:50;background:var(--surface);
+                        border:1px solid var(--border);border-left:none;
+                        border-radius:0 var(--r) var(--r) 0;padding:8px 4px;
+                        cursor:pointer;color:var(--muted);font-size:12px;
+                        display:none;writing-mode:vertical-rl;
+                        transition:color var(--transition)}
+    .sidebar-toggle-tab:hover{color:var(--text)}
+    .sidebar-toggle-tab.on{display:block}
+
+    /* ── Center: Main Content ──────────────────────────────────────────── */
+    .main-content{flex:1;overflow-y:auto;padding:24px 28px;display:flex;
+                  flex-direction:column;align-items:center}
+    .main-inner{width:100%;max-width:720px}
+    #empty{text-align:center;padding:80px 20px}
+    #empty-icon{font-size:48px;margin-bottom:16px;opacity:.5}
+    #empty h2{font-size:18px;margin-bottom:6px;color:var(--text)}
+    #empty p{color:var(--muted);font-size:13px;max-width:360px;margin:0 auto}
     #pipeline{display:none}
     #pipeline.on{display:block}
-    .sec-lbl{font-size:11px;font-weight:700;text-transform:uppercase;
-             letter-spacing:.08em;color:var(--muted);margin-bottom:10px}
-    .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
-           gap:10px;margin-bottom:20px}
 
-    /* ── Agent card ── */
-    .acard{background:var(--surface);border:1px solid var(--border);
-           border-radius:var(--r);overflow:hidden;
-           transition:border-color .25s,box-shadow .25s}
-    .acard.active{border-color:var(--blue);
-                  box-shadow:0 0 0 1px var(--blue),0 0 14px rgba(56,139,253,.12)}
-    .acard.done  {border-color:var(--green)}
-    .acard.err   {border-color:var(--red)}
-    .acard.hitl  {border-color:var(--amber);
-                  box-shadow:0 0 0 1px var(--amber),0 0 14px rgba(210,153,34,.12)}
-    .ch{padding:9px 11px;display:flex;align-items:center;gap:7px;
-        border-bottom:1px solid var(--border)}
-    .dot{width:8px;height:8px;border-radius:50%;background:var(--border);
-         flex-shrink:0;transition:background .25s}
-    .acard.active .dot{background:var(--blue);animation:pulse 1.4s infinite}
-    .acard.done   .dot{background:var(--green)}
-    .acard.err    .dot{background:var(--red)}
-    .acard.hitl   .dot{background:var(--amber)}
+    /* ── Pipeline Flow ─────────────────────────────────────────────────── */
+    .pipeline-label{font-size:11px;font-weight:700;text-transform:uppercase;
+                    letter-spacing:.08em;color:var(--muted);margin-bottom:14px}
+    .pipeline-flow{display:flex;flex-direction:column;gap:0}
+    .pipe-connector{display:flex;justify-content:center;height:20px}
+    .pipe-connector::before{content:'';width:2px;height:100%;
+                            background:var(--border);border-radius:1px}
+
+    /* ── Agent Card ─────────────────────────────────────────────────────── */
+    .agent-card{background:var(--surface);border:1px solid var(--border);
+                border-radius:var(--r-lg);overflow:hidden;
+                transition:border-color var(--transition),box-shadow var(--transition)}
+    .agent-card.active{border-color:var(--blue);
+                       box-shadow:0 0 0 1px var(--blue),0 0 16px rgba(56,139,253,.1)}
+    .agent-card.done{border-color:var(--green)}
+    .agent-card.err{border-color:var(--red)}
+    .agent-card.hitl{border-color:var(--amber);
+                     box-shadow:0 0 0 1px var(--amber),0 0 16px rgba(210,153,34,.1)}
+    .card-header{padding:12px 16px;display:flex;align-items:flex-start;gap:10px;
+                 border-bottom:1px solid var(--border)}
+    .card-status{width:10px;height:10px;border-radius:50%;background:var(--border);
+                 flex-shrink:0;margin-top:3px;transition:background var(--transition)}
+    .agent-card.active .card-status{background:var(--blue);animation:pulse 1.4s infinite}
+    .agent-card.done .card-status{background:var(--green)}
+    .agent-card.err .card-status{background:var(--red)}
+    .agent-card.hitl .card-status{background:var(--amber)}
     @keyframes pulse{
       0%,100%{box-shadow:0 0 0 2px rgba(56,139,253,.3)}
-      50%     {box-shadow:0 0 0 5px rgba(56,139,253,.08)}}
-    .ct{font-size:13px;font-weight:600}
-    .cb{padding:9px 11px;min-height:44px}
+      50%{box-shadow:0 0 0 5px rgba(56,139,253,.06)}}
+    .card-info{flex:1}
+    .card-name{font-size:14px;font-weight:700;display:flex;align-items:center;gap:6px}
+    .card-desc{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.4}
+    .card-body{padding:10px 16px;min-height:36px}
     .tool-list{list-style:none}
-    .ti{padding:4px 0;border-bottom:1px solid var(--border);font-size:12px}
-    .ti:last-child{border-bottom:none}
-    .tn{font-family:var(--mono);font-weight:600;color:var(--purple);
-        display:flex;align-items:center;gap:4px;word-break:break-all}
-    .tr{color:var(--muted);margin-top:2px;font-family:var(--mono);font-size:11px;
-        max-height:72px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
-    .tp{color:var(--muted);font-style:italic;font-size:11px}
-    .ce{color:var(--muted);font-size:12px;font-style:italic}
+    .tool-item{padding:6px 0;border-bottom:1px solid var(--border);font-size:12px}
+    .tool-item:last-child{border-bottom:none}
+    .tool-name{font-family:var(--mono);font-weight:600;color:var(--purple);
+               display:flex;align-items:center;gap:5px;word-break:break-all}
+    .tool-result{color:var(--muted);margin-top:3px;font-family:var(--mono);
+                 font-size:11px;max-height:60px;overflow-y:auto;
+                 white-space:pre-wrap;word-break:break-all;line-height:1.4}
+    .tool-pending{color:var(--muted);font-style:italic;font-size:11px}
+    .card-empty{color:var(--muted);font-size:12px;font-style:italic}
+    .card-output{margin-top:6px;padding:8px 10px;background:var(--bg);
+                 border-radius:var(--r);font-size:12px;font-family:var(--mono);
+                 color:var(--text-secondary);line-height:1.4}
 
-    /* ── Resolution banner ── */
-    #res-banner{display:none;background:var(--green-dim);border:1px solid var(--green);
-                border-radius:var(--r);padding:10px 14px;margin-bottom:14px;
-                color:var(--green);font-weight:600;align-items:center;gap:8px}
+    /* ── Right: Event Feed ─────────────────────────────────────────────── */
+    .sidebar-right{width:var(--event-w);background:var(--surface);
+                   border-left:1px solid var(--border);display:flex;
+                   flex-direction:column;flex-shrink:0}
+    .event-feed{flex:1;overflow-y:auto;padding:6px 0}
+    .event-item{padding:8px 14px;border-bottom:1px solid var(--border);
+                display:flex;gap:10px;font-size:12px;
+                transition:background .15s}
+    .event-item:hover{background:var(--surface-2)}
+    .event-time{color:var(--muted);font-family:var(--mono);font-size:11px;
+                flex-shrink:0;min-width:56px}
+    .event-icon{flex-shrink:0;font-size:13px;width:18px;text-align:center}
+    .event-text{flex:1;line-height:1.5;color:var(--text-secondary)}
+    .event-text strong{color:var(--text);font-weight:600}
+    .event-item.ev-started .event-text{color:var(--blue)}
+    .event-item.ev-completed .event-text{color:var(--green)}
+    .event-item.ev-tool .event-text{color:var(--text-secondary)}
+    .event-item.ev-result .event-text{color:var(--muted)}
+    .event-item.ev-hitl .event-text{color:var(--amber)}
+    .event-item.ev-resolved .event-text{color:var(--green);font-weight:600}
+    .event-item.ev-error .event-text{color:var(--red)}
+    .event-item.ev-system .event-text{color:var(--muted);font-style:italic}
+
+    /* ══ Resolution Banner ═════════════════════════════════════════════════ */
+    #res-banner{display:none;background:var(--green-dim);
+                border:1px solid var(--green);border-radius:var(--r-lg);
+                padding:12px 16px;margin-bottom:16px;color:var(--green);
+                font-weight:600;align-items:center;gap:8px;cursor:pointer;
+                transition:filter .15s}
     #res-banner.on{display:flex}
+    #res-banner:hover{filter:brightness(1.1)}
+    #res-banner .banner-hint{font-weight:400;font-size:12px;margin-left:auto;
+                             color:var(--green);opacity:.7}
 
-    /* ── Timeline log ── */
-    #log-box{background:var(--bg);border:1px solid var(--border);
-             border-radius:var(--r);padding:10px;font-family:var(--mono);
-             font-size:11px;max-height:180px;overflow-y:auto;color:var(--muted)}
-    .le{margin-bottom:2px}
-    .le-started   {color:var(--blue)}
-    .le-completed {color:var(--green)}
-    .le-tool      {color:var(--purple)}
-    .le-result    {color:var(--muted)}
-    .le-hitl      {color:var(--amber)}
-    .le-resolved  {color:var(--green);font-weight:600}
-    .le-error     {color:var(--red)}
-    .le-system    {color:var(--muted);font-style:italic}
-
-    /* ── HITL overlay ── */
-    #hitl-wrap{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);
-               z-index:200;align-items:center;justify-content:center;padding:20px}
-    #hitl-wrap.on{display:flex}
-    .hcard{background:var(--surface);border:2px solid var(--amber);
-           border-radius:8px;padding:22px;max-width:580px;width:100%;
-           box-shadow:0 0 40px rgba(210,153,34,.18)}
-    .hcard h2{font-size:15px;color:var(--amber);margin-bottom:14px;
-              display:flex;align-items:center;gap:8px}
+    /* ══ HITL Overlay ══════════════════════════════════════════════════════ */
+    .modal-backdrop{display:none;position:fixed;inset:0;
+                    background:rgba(0,0,0,.72);z-index:200;
+                    align-items:center;justify-content:center;padding:20px}
+    .modal-backdrop.on{display:flex}
+    .modal-card{background:var(--surface);border-radius:var(--r-lg);
+                padding:24px;max-width:600px;width:100%;
+                box-shadow:0 4px 40px rgba(0,0,0,.4)}
+    .modal-card h2{font-size:16px;margin-bottom:16px;display:flex;
+                   align-items:center;gap:8px}
+    #hitl-modal .modal-card{border:2px solid var(--amber)}
+    #hitl-modal h2{color:var(--amber)}
     #hitl-text{background:var(--bg);border:1px solid var(--border);
-               border-radius:var(--r);padding:11px;font-family:var(--mono);
-               font-size:11.5px;white-space:pre-wrap;max-height:280px;
-               overflow-y:auto;margin-bottom:14px;color:var(--text)}
-    .hbtns{display:flex;gap:10px;flex-wrap:wrap}
-    #rej-comment{width:100%;margin-top:10px;background:var(--bg);
+               border-radius:var(--r);padding:12px;font-family:var(--mono);
+               font-size:12px;white-space:pre-wrap;max-height:280px;
+               overflow-y:auto;margin-bottom:16px}
+    .modal-actions{display:flex;gap:10px;flex-wrap:wrap}
+    #rej-comment{width:100%;margin-top:12px;background:var(--bg);
                  border:1px solid var(--border);border-radius:var(--r);
-                 color:var(--text);padding:7px;font-family:var(--sans);
+                 color:var(--text);padding:8px;font-family:var(--sans);
                  font-size:13px;display:none;resize:vertical;min-height:56px}
     #rej-comment.on{display:block}
     #rej-submit{margin-top:8px;display:none}
     #rej-submit.on{display:block}
 
-    /* ── Metrics bar ── */
+    /* ══ Resolution Modal ══════════════════════════════════════════════════ */
+    #resolve-modal .modal-card{border:2px solid var(--green);max-width:520px}
+    #resolve-modal h2{color:var(--green)}
+    .resolve-section{margin-bottom:14px}
+    .resolve-section:last-child{margin-bottom:0}
+    .resolve-label{font-size:11px;font-weight:700;text-transform:uppercase;
+                   letter-spacing:.06em;color:var(--muted);margin-bottom:4px}
+    .resolve-value{font-size:13px;color:var(--text-secondary);line-height:1.5}
+    .resolve-value code{font-family:var(--mono);background:var(--surface-2);
+                        padding:1px 6px;border-radius:3px;font-size:12px}
+
+    /* ══ Settings Modal ════════════════════════════════════════════════════ */
+    #settings-modal .modal-card{border:2px solid var(--blue);max-width:520px}
+    #settings-modal h2{color:var(--blue)}
+    .setting-row{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+    .setting-row:last-child{margin-bottom:0}
+    .setting-label{font-size:12px;font-weight:600;min-width:80px;color:var(--muted)}
+    .setting-row select{flex:1;min-width:0}
+    .setting-note{font-size:11px;color:var(--muted);margin-top:8px;
+                  padding:8px 10px;background:var(--bg);border-radius:var(--r);
+                  line-height:1.5}
+
+    /* ══ Footer ════════════════════════════════════════════════════════════ */
     footer{background:var(--surface);border-top:1px solid var(--border);
-           padding:7px 20px;display:flex;align-items:center;gap:22px;
-           font-size:12px;color:var(--muted);flex-wrap:wrap}
+           padding:8px 20px;display:flex;align-items:center;gap:24px;
+           font-size:12px;color:var(--muted);flex-wrap:wrap;flex-shrink:0}
     .met{display:flex;align-items:center;gap:5px}
+    .met-icon{font-size:13px;opacity:.7}
     .mv{font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
-    .flink{margin-left:auto;color:var(--muted);font-size:12px;text-decoration:none}
-    .flink:hover{color:var(--text)}
+    .footer-right{margin-left:auto;display:flex;align-items:center;gap:16px}
+    .footer-link{color:var(--muted);font-size:12px;text-decoration:none;
+                 transition:color .15s}
+    .footer-link:hover{color:var(--text)}
   </style>
 </head>
 <body>
@@ -171,13 +302,28 @@
 <!-- ═══ HEADER ═══════════════════════════════════════════════════════════════ -->
 <header>
   <div class="brand">
-    🛡 Sentinel
-    <span class="brand-sub">— Live Incident Dashboard</span>
+    <span class="brand-logo">&#x1f6e1;</span>
+    <div class="brand-text">
+      <span class="brand-name">Sentinel</span>
+      <span class="brand-sub">Incident Response</span>
+    </div>
   </div>
+
+  <div class="header-center" id="model-badges">
+    <div class="model-badge" onclick="openSettings()" title="Click to configure models">
+      <span class="badge-label">Triage</span>
+      <span id="badge-triage">loading...</span>
+    </div>
+    <div class="model-badge" onclick="openSettings()" title="Click to configure models">
+      <span class="badge-label">Analysis</span>
+      <span id="badge-analysis">loading...</span>
+    </div>
+  </div>
+
   <div class="fire-row">
-    <select id="sce-sel"><option value="">Loading scenarios…</option></select>
+    <select id="sce-sel"><option value="">Loading scenarios...</option></select>
     <button class="btn btn-primary" id="fire-btn" onclick="fireScenario()" disabled>
-      ⚡ Fire Scenario
+      Fire Scenario
     </button>
   </div>
 </header>
@@ -196,75 +342,203 @@
     <span id="ib-elapsed" class="mv">0s</span></div>
 </div>
 
-<!-- ═══ MAIN ═════════════════════════════════════════════════════════════════ -->
-<main>
-  <div id="empty">
-    <h2>No active incident</h2>
-    <p>Select a scenario above and click <strong>⚡ Fire Scenario</strong> to start the pipeline.</p>
-  </div>
+<!-- ═══ THREE-COLUMN LAYOUT ═══════════════════════════════════════════════ -->
+<div class="app-layout">
 
-  <div id="pipeline">
-    <div id="res-banner">✅ Incident resolved — pipeline complete.</div>
-
-    <div class="sec-lbl">Agent Pipeline</div>
-    <div class="cards" id="cards"></div>
-
-    <div class="sec-lbl" style="margin-top:16px">Event Log</div>
-    <div id="log-box"></div>
-  </div>
-</main>
-
-<!-- ═══ HITL OVERLAY ═════════════════════════════════════════════════════════ -->
-<div id="hitl-wrap">
-  <div class="hcard">
-    <h2>⚠️ Human Approval Required</h2>
-    <div id="hitl-text"></div>
-    <div class="hbtns">
-      <button class="btn btn-success" onclick="submitHitl('approve')">✅ Approve</button>
-      <button class="btn btn-outline" onclick="toggleReject()">❌ Reject…</button>
+  <!-- ── Left: History Sidebar ─────────────────────────────────────────── -->
+  <aside class="sidebar-left" id="sidebar-left">
+    <div class="panel-head">
+      <span class="panel-title">History</span>
+      <button class="toggle-btn" onclick="toggleHistory()" title="Collapse sidebar">&laquo;</button>
     </div>
-    <textarea id="rej-comment" placeholder="Reason for rejection (optional, press Enter to skip)"></textarea>
+    <div class="history-list" id="history-list">
+      <div class="history-empty">Loading history...</div>
+    </div>
+  </aside>
+  <div class="sidebar-toggle-tab" id="sidebar-tab" onclick="toggleHistory()" title="Show history">
+    History
+  </div>
+
+  <!-- ── Center: Main Pipeline ─────────────────────────────────────────── -->
+  <div class="main-content">
+    <div class="main-inner">
+      <div id="empty">
+        <div id="empty-icon">&#x1f6e1;</div>
+        <h2>No active incident</h2>
+        <p>Select a scenario above and click <strong>Fire Scenario</strong> to start the multi-agent pipeline.</p>
+      </div>
+
+      <div id="pipeline">
+        <div id="res-banner" onclick="openResolution()">
+          &#10003; Incident resolved &mdash; pipeline complete
+          <span class="banner-hint">Click for summary</span>
+        </div>
+        <div class="pipeline-label">Agent Pipeline</div>
+        <div class="pipeline-flow" id="pipeline-flow"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Right: Event Feed ─────────────────────────────────────────────── -->
+  <aside class="sidebar-right">
+    <div class="panel-head">
+      <span class="panel-title">Live Events</span>
+    </div>
+    <div class="event-feed" id="event-feed">
+      <div class="history-empty" id="event-empty">Events will appear here when a scenario is fired.</div>
+    </div>
+  </aside>
+
+</div>
+
+<!-- ═══ HITL MODAL ══════════════════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="hitl-modal">
+  <div class="modal-card">
+    <h2>&#9888;&#65039; Human Approval Required</h2>
+    <div id="hitl-text"></div>
+    <div class="modal-actions">
+      <button class="btn btn-success" onclick="submitHitl('approve')">Approve</button>
+      <button class="btn btn-outline" onclick="toggleReject()">Reject...</button>
+    </div>
+    <textarea id="rej-comment" placeholder="Reason for rejection (optional)"></textarea>
     <div id="rej-submit">
       <button class="btn btn-danger" onclick="submitHitl('reject')">Confirm Rejection</button>
     </div>
   </div>
 </div>
 
-<!-- ═══ METRICS BAR ═══════════════════════════════════════════════════════════ -->
+<!-- ═══ RESOLUTION MODAL ═══════════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="resolve-modal" onclick="closeModal('resolve-modal')">
+  <div class="modal-card" onclick="event.stopPropagation()">
+    <h2>&#10003; Incident Resolved</h2>
+    <div id="resolve-body"></div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="btn btn-outline" onclick="closeModal('resolve-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SETTINGS MODAL ════════════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="settings-modal" onclick="closeModal('settings-modal')">
+  <div class="modal-card" onclick="event.stopPropagation()">
+    <h2>&#9881; Model Configuration</h2>
+    <div class="setting-row">
+      <span class="setting-label">Triage</span>
+      <select id="cfg-triage"></select>
+    </div>
+    <div class="setting-row">
+      <span class="setting-label">Analysis</span>
+      <select id="cfg-analysis"></select>
+    </div>
+    <div class="setting-row">
+      <span class="setting-label">Judge</span>
+      <select id="cfg-judge"></select>
+    </div>
+    <div class="setting-note">
+      Changes take effect on the next scenario fire. Models require the matching
+      API key to be set in <code>.env</code> (e.g. <code>ANTHROPIC_API_KEY</code>
+      for <code>anthropic/</code> models).
+    </div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="btn btn-primary" onclick="saveConfig()">Save</button>
+      <button class="btn btn-outline" onclick="closeModal('settings-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ FOOTER ═════════════════════════════════════════════════════════════ -->
 <footer>
-  <div class="met">🔧 <span>Tools:</span> <span class="mv" id="m-tools">0</span></div>
-  <div class="met">⏱ <span>Elapsed:</span> <span class="mv" id="m-elapsed">—</span></div>
-  <div class="met">🧠 <span>Memory hits:</span> <span class="mv" id="m-mem">0</span></div>
-  <div class="met">🤖 <span>Agents active:</span> <span class="mv" id="m-agents">0</span></div>
-  <a class="flink" href="/eval">View eval results →</a>
+  <div class="met"><span class="met-icon">&#9881;</span><span>Tools</span>
+    <span class="mv" id="m-tools">0</span></div>
+  <div class="met"><span class="met-icon">&#9201;</span><span>Elapsed</span>
+    <span class="mv" id="m-elapsed">&mdash;</span></div>
+  <div class="met"><span class="met-icon">&#129504;</span><span>Memory</span>
+    <span class="mv" id="m-mem">0</span></div>
+  <div class="met"><span class="met-icon">&#129302;</span><span>Agents</span>
+    <span class="mv" id="m-agents">0</span></div>
+  <div class="footer-right">
+    <a class="footer-link" href="/eval">Eval Results &rarr;</a>
+    <a class="footer-link" href="/docs">API Docs &rarr;</a>
+  </div>
 </footer>
 
 <script>
 'use strict';
 
-// ── Constants ──────────────────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════════════
+   CONSTANTS
+   ══════════════════════════════════════════════════════════════════════════ */
+
 const AGENTS = [
-  {key:'triage_agent',            label:'Triage Agent',      icon:'🔍'},
-  {key:'log_analyst_agent',       label:'Log Analyst',       icon:'📋'},
-  {key:'deploy_correlator_agent', label:'Deploy Correlator', icon:'🚀'},
-  {key:'remediation_agent',       label:'Remediation',       icon:'🔧'},
-  {key:'comms_agent',             label:'Comms Agent',       icon:'📢'},
+  {key:'triage_agent',            label:'Triage Agent',      icon:'\u{1f50d}',
+   desc:'Classifies incident severity and identifies the affected service using metadata and past patterns'},
+  {key:'log_analyst_agent',       label:'Log Analyst',       icon:'\u{1f4cb}',
+   desc:'Analyzes application logs around the alert timestamp to identify root cause patterns'},
+  {key:'deploy_correlator_agent', label:'Deploy Correlator', icon:'\u{1f680}',
+   desc:'Checks recent deployments and correlates suspicious changes with the incident timeline'},
+  {key:'remediation_agent',       label:'Remediation',       icon:'\u{1f527}',
+   desc:'Drafts a remediation plan (rollback, hotfix, config change) and requests human approval'},
+  {key:'comms_agent',             label:'Comms Agent',       icon:'\u{1f4e2}',
+   desc:'Produces a structured Slack summary of the full incident for the on-call team'},
 ];
 
-const SEV_CLASS = {critical:'critical',high:'high',warning:'warning',low:'low',info:'info'};
+const SEV_MAP = {critical:'critical',high:'high',warning:'warning',low:'low',info:'info'};
 
-// ── State ──────────────────────────────────────────────────────────────────
+const MODEL_OPTIONS = {
+  groq: [
+    'groq/llama-3.3-70b-versatile',
+    'groq/llama-3.1-8b-instant',
+    'groq/llama-3.1-70b-versatile',
+    'groq/gemma2-9b-it',
+    'groq/mixtral-8x7b-32768',
+  ],
+  openai: [
+    'openai/gpt-4o',
+    'openai/gpt-4o-mini',
+  ],
+  anthropic: [
+    'anthropic/claude-sonnet-4-6',
+    'anthropic/claude-haiku-4-5',
+    'anthropic/claude-opus-4-6',
+  ],
+};
+
+const TOOL_LABELS = {
+  get_service_metadata: 'Looking up service metadata',
+  search_past_incidents: 'Searching for similar past incidents',
+  fetch_logs: 'Fetching application logs',
+  list_recent_deploys: 'Checking recent deployments',
+  draft_rollback_pr: 'Drafting rollback pull request',
+  request_human_approval: 'Requesting human approval',
+  draft_slack_summary: 'Drafting Slack notification',
+};
+
+/* ══════════════════════════════════════════════════════════════════════════
+   STATE
+   ══════════════════════════════════════════════════════════════════════════ */
+
 let scenarios = [];
-let currentInc = null;     // {id, scenario}
-let es = null;             // EventSource
+let currentInc = null;
+let eventSource = null;
 let elTimer = null;
 let startTs = 0;
+let nTools = 0, nMem = 0, nAgents = 0;
+let agentOutputs = {};
+let currentConfig = {};
 
-// metrics
-let nTools=0, nMem=0, nAgents=0;
+/* ══════════════════════════════════════════════════════════════════════════
+   INITIALIZATION
+   ══════════════════════════════════════════════════════════════════════════ */
 
-// ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
+  await Promise.all([
+    loadScenarios(),
+    loadConfig(),
+    loadHistory(),
+  ]);
+}
+
+async function loadScenarios() {
   try {
     const r = await fetch('/api/scenarios');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -276,42 +550,237 @@ async function init() {
     document.getElementById('fire-btn').disabled = false;
   } catch(e) {
     document.getElementById('sce-sel').innerHTML =
-      '<option value="">Failed to load scenarios — is the server running?</option>';
-    log('error', `Init error: ${e.message}`);
+      '<option value="">Failed to load scenarios</option>';
+    addEvent('error', 'system', `Failed to load scenarios: ${e.message}`);
   }
 }
 
-// ── Build cards ────────────────────────────────────────────────────────────
-function buildCards() {
-  document.getElementById('cards').innerHTML = AGENTS.map(a => `
-    <div class="acard" id="card-${a.key}">
-      <div class="ch">
-        <div class="dot"></div>
-        <span class="ct">${a.icon} ${a.label}</span>
-      </div>
-      <div class="cb">
-        <ul class="tool-list" id="tl-${a.key}"></ul>
-        <div class="ce" id="ce-${a.key}">Waiting…</div>
-      </div>
-    </div>`).join('');
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    if (!r.ok) return;
+    currentConfig = await r.json();
+    updateModelBadges();
+    populateSettingsDropdowns();
+  } catch { /* config display is optional */ }
 }
 
-// ── Fire scenario ──────────────────────────────────────────────────────────
+async function loadHistory() {
+  try {
+    const r = await fetch('/api/trajectories');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const items = await r.json();
+    renderHistory(items);
+  } catch {
+    document.getElementById('history-list').innerHTML =
+      '<div class="history-empty">No history available</div>';
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   MODEL CONFIG
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function updateModelBadges() {
+  const fmt = s => s.includes('/') ? s.split('/')[1] : s;
+  document.getElementById('badge-triage').textContent = fmt(currentConfig.triage_model || '');
+  document.getElementById('badge-analysis').textContent = fmt(currentConfig.analysis_model || '');
+}
+
+function populateSettingsDropdowns() {
+  const allModels = [].concat(...Object.values(MODEL_OPTIONS));
+  ['triage', 'analysis', 'judge'].forEach(role => {
+    const sel = document.getElementById(`cfg-${role}`);
+    const current = currentConfig[`${role}_model`] || '';
+    sel.innerHTML = allModels.map(m =>
+      `<option value="${esc(m)}" ${m === current ? 'selected' : ''}>${esc(m)}</option>`
+    ).join('');
+    if (current && !allModels.includes(current)) {
+      sel.innerHTML = `<option value="${esc(current)}" selected>${esc(current)}</option>` + sel.innerHTML;
+    }
+  });
+}
+
+function openSettings() {
+  document.getElementById('settings-modal').classList.add('on');
+}
+
+async function saveConfig() {
+  const body = {
+    triage_model: document.getElementById('cfg-triage').value,
+    analysis_model: document.getElementById('cfg-analysis').value,
+    judge_model: document.getElementById('cfg-judge').value,
+  };
+  try {
+    const r = await fetch('/api/config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert(err.detail || `Error: HTTP ${r.status}`);
+      return;
+    }
+    currentConfig = await r.json();
+    updateModelBadges();
+    closeModal('settings-modal');
+  } catch(e) {
+    alert(`Failed to save: ${e.message}`);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   HISTORY SIDEBAR
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function renderHistory(items) {
+  const list = document.getElementById('history-list');
+  if (!items.length) {
+    list.innerHTML = '<div class="history-empty">No past incidents yet. Fire a scenario to create one.</div>';
+    return;
+  }
+  list.innerHTML = items.map(item => {
+    const date = item.saved_at ? formatDate(item.saved_at) : 'Unknown date';
+    return `<div class="history-item" title="${esc(item.incident_id)}">
+      <div class="history-dot"></div>
+      <div class="history-info">
+        <div class="history-id">${esc(item.incident_id)}</div>
+        <div class="history-date">${esc(date)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleHistory() {
+  const sidebar = document.getElementById('sidebar-left');
+  const tab = document.getElementById('sidebar-tab');
+  sidebar.classList.toggle('collapsed');
+  tab.classList.toggle('on', sidebar.classList.contains('collapsed'));
+}
+
+function formatDate(iso) {
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    const diffMs = now - d;
+    const diffDays = Math.floor(diffMs / 86400000);
+    if (diffDays === 0) return 'Today ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    if (diffDays === 1) return 'Yesterday ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    return d.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' +
+           d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  } catch { return iso; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PIPELINE UI
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function buildPipeline() {
+  const flow = document.getElementById('pipeline-flow');
+  flow.innerHTML = AGENTS.map((a, i) => {
+    const connector = i < AGENTS.length - 1
+      ? '<div class="pipe-connector"></div>' : '';
+    return `<div class="agent-card" id="card-${a.key}">
+      <div class="card-header">
+        <div class="card-status"></div>
+        <div class="card-info">
+          <div class="card-name">${a.icon} ${a.label}</div>
+          <div class="card-desc">${a.desc}</div>
+        </div>
+      </div>
+      <div class="card-body" id="body-${a.key}">
+        <ul class="tool-list" id="tl-${a.key}"></ul>
+        <div class="card-empty" id="ce-${a.key}">Waiting...</div>
+      </div>
+    </div>${connector}`;
+  }).join('');
+}
+
+function setCardState(agentKey, state) {
+  const card = document.getElementById(`card-${agentKey}`);
+  if (!card) return;
+  card.classList.remove('active','done','err','hitl');
+  if (state) card.classList.add(state);
+  if (state === 'active') {
+    card.scrollIntoView({behavior:'smooth', block:'nearest'});
+  }
+}
+
+function hidePlaceholder(agentKey) {
+  const el = document.getElementById(`ce-${agentKey}`);
+  if (el) el.style.display = 'none';
+}
+
+function appendCardOutput(agentKey, text) {
+  hidePlaceholder(agentKey);
+  const body = document.getElementById(`body-${agentKey}`);
+  if (!body) return;
+  let out = body.querySelector('.card-output');
+  if (!out) {
+    out = document.createElement('div');
+    out.className = 'card-output';
+    body.appendChild(out);
+  }
+  out.textContent = text.slice(0, 300);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   EVENT FEED (RIGHT SIDEBAR)
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function addEvent(type, agentName, text) {
+  const feed = document.getElementById('event-feed');
+  const empty = document.getElementById('event-empty');
+  if (empty) empty.remove();
+
+  const item = document.createElement('div');
+  item.className = `event-item ev-${type}`;
+  const time = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const icon = eventIcon(type);
+  item.innerHTML = `<span class="event-time">${time}</span>
+    <span class="event-icon">${icon}</span>
+    <span class="event-text">${text}</span>`;
+  feed.appendChild(item);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function eventIcon(type) {
+  const map = {
+    started: '\u{1f916}', completed: '✅', tool: '⚙',
+    result: '→', hitl: '⚠️', resolved: '\u{1f389}',
+    error: '❌', system: '\u{1f4ac}',
+  };
+  return map[type] || '•';
+}
+
+function humanizeToolName(toolName) {
+  return TOOL_LABELS[toolName] || toolName.replace(/_/g, ' ');
+}
+
+function agentLabel(key) {
+  const a = AGENTS.find(a => a.key === key);
+  return a ? a.label : key;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   FIRE SCENARIO
+   ══════════════════════════════════════════════════════════════════════════ */
+
 async function fireScenario() {
   const sid = document.getElementById('sce-sel').value;
   if (!sid) return;
   const scen = scenarios.find(s => s.id === sid);
   if (!scen) return;
 
-  // Tear down previous run
-  if (es) { es.close(); es = null; }
+  if (eventSource) { eventSource.close(); eventSource = null; }
   if (elTimer) { clearInterval(elTimer); elTimer = null; }
   resetState();
   resetUI();
 
   const btn = document.getElementById('fire-btn');
   btn.disabled = true;
-  btn.textContent = '⏳ Starting…';
+  btn.textContent = 'Starting...';
 
   try {
     const r = await fetch('/webhooks/alert', {
@@ -327,59 +796,69 @@ async function fireScenario() {
     showPipeline();
     startElapsed();
     startSSE(incident_id);
-    log('system', `Incident ${incident_id} created — streaming started`);
+    addEvent('system', 'system', `Incident <strong>${esc(incident_id)}</strong> created &mdash; pipeline started`);
   } catch(e) {
-    log('error', `Fire error: ${e.message}`);
+    addEvent('error', 'system', `Failed to fire scenario: ${e.message}`);
     btn.disabled = false;
-    btn.textContent = '⚡ Fire Scenario';
+    btn.textContent = 'Fire Scenario';
   }
 }
 
-// ── SSE ────────────────────────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════════════
+   SSE STREAMING
+   ══════════════════════════════════════════════════════════════════════════ */
+
 function startSSE(incId) {
-  es = new EventSource(`/events/${incId}`);
-  es.onmessage = e => {
+  eventSource = new EventSource(`/events/${incId}`);
+  eventSource.onmessage = e => {
     try { dispatch(JSON.parse(e.data), incId); }
-    catch(err) { log('error', `Parse error: ${err.message}`); }
+    catch(err) { addEvent('error', 'system', `Parse error: ${err.message}`); }
   };
-  es.onerror = () => {
-    log('error', 'SSE stream closed or error');
-    es.close();
+  eventSource.onerror = () => {
+    addEvent('system', 'system', 'Event stream closed');
+    eventSource.close();
   };
 }
 
-// ── Dispatch ───────────────────────────────────────────────────────────────
 function dispatch(ev, incId) {
-  const ts = fmtTime(ev.timestamp);
   switch(ev.type) {
-    case 'agent_started':     onStarted(ev, ts);         break;
-    case 'agent_completed':   onCompleted(ev, ts);       break;
-    case 'tool_called':       onToolCalled(ev, ts);      break;
-    case 'tool_result':       onToolResult(ev, ts);      break;
-    case 'hitl_requested':    onHitlReq(ev, incId, ts);  break;
-    case 'hitl_resolved':     onHitlRes(ev, ts);         break;
-    case 'incident_resolved': onResolved(ev, ts);        break;
-    default: log('system', `[${ev.type}] ${ev.agent_name || ''}`);
+    case 'agent_started':     onStarted(ev);            break;
+    case 'agent_completed':   onCompleted(ev);           break;
+    case 'tool_called':       onToolCalled(ev);          break;
+    case 'tool_result':       onToolResult(ev);          break;
+    case 'hitl_requested':    onHitlReq(ev, incId);      break;
+    case 'hitl_resolved':     onHitlRes(ev);             break;
+    case 'incident_resolved': onResolved(ev);            break;
+    default:
+      addEvent('system', ev.agent_name || '', `${ev.type}: ${ev.agent_name || ''}`);
   }
 }
 
-// ── Handlers ───────────────────────────────────────────────────────────────
-function onStarted(ev, ts) {
-  cardState(ev.agent_name, 'active');
-  nAgents++; document.getElementById('m-agents').textContent = nAgents;
-  log('started', `[${ts}] 🤖 ${ev.agent_name} started`);
+/* ── Event Handlers ──────────────────────────────────────────────────────── */
+
+function onStarted(ev) {
+  setCardState(ev.agent_name, 'active');
+  nAgents++;
+  document.getElementById('m-agents').textContent = nAgents;
+  addEvent('started', ev.agent_name,
+    `<strong>${agentLabel(ev.agent_name)}</strong> started analyzing`);
 }
 
-function onCompleted(ev, ts) {
-  cardState(ev.agent_name, 'done');
+function onCompleted(ev) {
+  setCardState(ev.agent_name, 'done');
   const output = ev.data?.output;
-  if (output) appendOutput(ev.agent_name, String(output).slice(0, 200));
+  if (output) {
+    const text = String(output).slice(0, 300);
+    appendCardOutput(ev.agent_name, text);
+    agentOutputs[ev.agent_name] = text;
+  }
   nAgents = Math.max(0, nAgents - 1);
   document.getElementById('m-agents').textContent = nAgents;
-  log('completed', `[${ts}] ✅ ${ev.agent_name} completed`);
+  addEvent('completed', ev.agent_name,
+    `<strong>${agentLabel(ev.agent_name)}</strong> completed`);
 }
 
-function onToolCalled(ev, ts) {
+function onToolCalled(ev) {
   const agent = ev.agent_name;
   const toolName = ev.data?.tool_name || 'tool';
   const callId = ev.data?.call_id || toolName;
@@ -388,64 +867,138 @@ function onToolCalled(ev, ts) {
   const tl = document.getElementById(`tl-${agent}`);
   if (tl) {
     const li = document.createElement('li');
-    li.className = 'ti';
+    li.className = 'tool-item';
     li.id = `tc-${callId}`;
-    li.innerHTML = `<div class="tn">⚙ ${esc(toolName)}</div>
-      <div class="tp" id="tp-${callId}">Running…</div>`;
+    li.innerHTML = `<div class="tool-name">⚙ ${esc(toolName)}</div>
+      <div class="tool-pending" id="tp-${callId}">Running...</div>`;
     tl.appendChild(li);
   }
-  nTools++; document.getElementById('m-tools').textContent = nTools;
+  nTools++;
+  document.getElementById('m-tools').textContent = nTools;
   if (toolName === 'search_past_incidents') {
-    nMem++; document.getElementById('m-mem').textContent = nMem;
+    nMem++;
+    document.getElementById('m-mem').textContent = nMem;
   }
-  log('tool', `[${ts}] ⚙ ${toolName} (${agent})`);
+  addEvent('tool', agent,
+    `${humanizeToolName(toolName)} <span style="color:var(--muted)">via ${agentLabel(agent)}</span>`);
 }
 
-function onToolResult(ev, ts) {
+function onToolResult(ev) {
   const callId = ev.data?.call_id || ev.data?.tool_name || '';
   const output = ev.data?.output || '';
   const toolName = ev.data?.tool_name || 'tool';
   const el = document.getElementById(`tp-${callId}`);
   if (el) {
-    el.className = 'tr';
+    el.className = 'tool-result';
     el.textContent = String(output).slice(0, 200);
   }
-  log('result', `[${ts}] ✓ ${toolName} → ${String(output).slice(0, 80)}`);
+  const summary = String(output).slice(0, 80);
+  addEvent('result', ev.agent_name || '',
+    `${humanizeToolName(toolName)} → <span style="color:var(--muted)">${esc(summary)}</span>`);
 }
 
-function onHitlReq(ev, incId, ts) {
+function onHitlReq(ev, incId) {
   const display = ev.data?.display || 'Approval requested.';
   document.getElementById('hitl-text').textContent = display;
-  document.getElementById('hitl-wrap').dataset.incId = incId;
-  document.getElementById('hitl-wrap').classList.add('on');
+  document.getElementById('hitl-modal').dataset.incId = incId;
+  document.getElementById('hitl-modal').classList.add('on');
   document.getElementById('rej-comment').classList.remove('on');
   document.getElementById('rej-submit').classList.remove('on');
-  cardState('remediation_agent', 'hitl');
-  log('hitl', `[${ts}] ⚠️ HITL approval requested`);
+  setCardState('remediation_agent', 'hitl');
+  addEvent('hitl', 'remediation_agent',
+    '<strong>Human approval required</strong> &mdash; review the remediation plan');
 }
 
-function onHitlRes(ev, ts) {
-  document.getElementById('hitl-wrap').classList.remove('on');
+function onHitlRes(ev) {
+  document.getElementById('hitl-modal').classList.remove('on');
   const dec = ev.data?.decision || '';
-  cardState('remediation_agent', 'done');
-  log('hitl', `[${ts}] ✓ HITL resolved — ${dec}`);
+  setCardState('remediation_agent', 'done');
+  addEvent('hitl', 'remediation_agent',
+    `Approval decision: <strong>${esc(dec)}</strong>`);
 }
 
-function onResolved(ev, ts) {
+function onResolved(ev) {
   document.getElementById('res-banner').classList.add('on');
   document.getElementById('ib-status').className = 'pill pill-resolved';
   document.getElementById('ib-status').textContent = 'Resolved';
   if (elTimer) { clearInterval(elTimer); elTimer = null; }
-  if (es) { es.close(); es = null; }
-  log('resolved', `[${ts}] ✅ Incident resolved`);
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  addEvent('resolved', 'orchestrator',
+    '<strong>Incident resolved</strong> &mdash; all agents completed successfully');
+
   const btn = document.getElementById('fire-btn');
   btn.disabled = false;
-  btn.textContent = '⚡ Fire Scenario';
+  btn.textContent = 'Fire Scenario';
+
+  loadHistory();
 }
 
-// ── HITL submit ────────────────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════════════
+   RESOLUTION MODAL
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function cleanMd(s) {
+  return String(s)
+    .replace(/#{1,4}\s*/g, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^\|.*\|$/gm, '')
+    .replace(/^\s*[-|:]+\s*$/gm, '')
+    .replace(/^[-*]\s+/gm, '• ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function openResolution() {
+  const body = document.getElementById('resolve-body');
+  const alert = currentInc?.scenario?.alert;
+
+  let html = '';
+
+  html += section('Issue',
+    alert ? `${alert.metric} on <code>${esc(alert.service)}</code> &mdash; ` +
+            `current value ${alert.current_value} exceeds threshold ${alert.threshold}`
+           : 'Alert details not available');
+
+  html += section('Root Cause',
+    agentOutputs.log_analyst_agent
+      ? esc(cleanMd(agentOutputs.log_analyst_agent))
+      : agentOutputs.triage_agent
+        ? esc(cleanMd(agentOutputs.triage_agent))
+        : 'Root cause analysis not available');
+
+  html += section('Action Taken',
+    agentOutputs.remediation_agent
+      ? esc(cleanMd(agentOutputs.remediation_agent))
+      : 'No remediation action recorded');
+
+  html += section('Communication',
+    agentOutputs.comms_agent
+      ? esc(cleanMd(agentOutputs.comms_agent))
+      : 'Slack summary not available');
+
+  const elapsed = document.getElementById('m-elapsed').textContent;
+  html += section('Pipeline Stats',
+    `Completed in <strong>${elapsed}</strong> with <strong>${nTools}</strong> tool calls across <strong>5</strong> agents`);
+
+  body.innerHTML = html;
+  document.getElementById('resolve-modal').classList.add('on');
+}
+
+function section(label, content) {
+  return `<div class="resolve-section">
+    <div class="resolve-label">${label}</div>
+    <div class="resolve-value">${content}</div>
+  </div>`;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   HITL SUBMIT
+   ══════════════════════════════════════════════════════════════════════════ */
+
 async function submitHitl(action) {
-  const incId = document.getElementById('hitl-wrap').dataset.incId;
+  const incId = document.getElementById('hitl-modal').dataset.incId;
   if (!incId) return;
   const comment = action === 'reject'
     ? (document.getElementById('rej-comment').value.trim() || undefined)
@@ -458,10 +1011,10 @@ async function submitHitl(action) {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      log('error', `HITL submit failed: ${err.detail || r.status}`);
+      addEvent('error', 'system', `HITL submit failed: ${err.detail || r.status}`);
     }
   } catch(e) {
-    log('error', `HITL submit error: ${e.message}`);
+    addEvent('error', 'system', `HITL submit error: ${e.message}`);
   }
 }
 
@@ -472,27 +1025,12 @@ function toggleReject() {
   if (show) s.classList.add('on'); else s.classList.remove('on');
 }
 
-// ── UI helpers ─────────────────────────────────────────────────────────────
-function cardState(key, state) {
-  const card = document.getElementById(`card-${key}`);
-  if (!card) return;
-  card.classList.remove('active','done','err','hitl');
-  if (state) card.classList.add(state);
-}
+/* ══════════════════════════════════════════════════════════════════════════
+   UI HELPERS
+   ══════════════════════════════════════════════════════════════════════════ */
 
-function hidePlaceholder(key) {
-  const ce = document.getElementById(`ce-${key}`);
-  if (ce) ce.style.display = 'none';
-}
-
-function appendOutput(key, text) {
-  hidePlaceholder(key);
-  const tl = document.getElementById(`tl-${key}`);
-  if (!tl) return;
-  const li = document.createElement('li');
-  li.className = 'ti';
-  li.innerHTML = `<div class="tn">✓ Result</div><div class="tr">${esc(text)}</div>`;
-  tl.appendChild(li);
+function closeModal(id) {
+  document.getElementById(id).classList.remove('on');
 }
 
 function showIncBar(id, scen) {
@@ -501,7 +1039,7 @@ function showIncBar(id, scen) {
   document.getElementById('ib-svc').textContent = scen.alert.service || '';
   const sevEl = document.getElementById('ib-sev');
   sevEl.textContent = sev.toUpperCase();
-  sevEl.className = `sev sev-${SEV_CLASS[sev.toLowerCase()] || 'low'}`;
+  sevEl.className = `sev sev-${SEV_MAP[sev.toLowerCase()] || 'low'}`;
   document.getElementById('ib-status').className = 'pill pill-running';
   document.getElementById('ib-status').textContent = 'Running';
   document.getElementById('inc-bar').classList.add('on');
@@ -510,8 +1048,7 @@ function showIncBar(id, scen) {
 function showPipeline() {
   document.getElementById('empty').style.display = 'none';
   document.getElementById('res-banner').classList.remove('on');
-  document.getElementById('log-box').innerHTML = '';
-  buildCards();
+  buildPipeline();
   document.getElementById('pipeline').classList.add('on');
 }
 
@@ -529,6 +1066,7 @@ function startElapsed() {
 
 function resetState() {
   nTools = nMem = nAgents = 0;
+  agentOutputs = {};
   document.getElementById('m-tools').textContent = '0';
   document.getElementById('m-mem').textContent = '0';
   document.getElementById('m-agents').textContent = '0';
@@ -539,30 +1077,20 @@ function resetState() {
 
 function resetUI() {
   document.getElementById('inc-bar').classList.remove('on');
-  document.getElementById('hitl-wrap').classList.remove('on');
-}
-
-function log(type, msg) {
-  const box = document.getElementById('log-box');
-  const d = document.createElement('div');
-  d.className = `le le-${type}`;
-  d.textContent = msg;
-  box.appendChild(d);
-  box.scrollTop = box.scrollHeight;
-}
-
-function fmtTime(iso) {
-  try { return new Date(iso).toLocaleTimeString(); } catch { return ''; }
+  document.getElementById('hitl-modal').classList.remove('on');
+  document.getElementById('resolve-modal').classList.remove('on');
+  const feed = document.getElementById('event-feed');
+  feed.innerHTML = '';
 }
 
 function esc(s) {
-  return String(s)
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-// ── Boot ───────────────────────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════════════
+   BOOT
+   ══════════════════════════════════════════════════════════════════════════ */
+
 init();
 </script>
 </body>
