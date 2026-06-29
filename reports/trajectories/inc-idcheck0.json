@@ -1,0 +1,14 @@
+{
+  "incident_id": "inc-idcheck0",
+  "trace": {
+    "object": "trace",
+    "id": "trace_5a9ca2036be443ddb21e401f66e8f4de",
+    "workflow_name": "incident_pipeline",
+    "group_id": null,
+    "metadata": {
+      "incident_id": "inc-idcheck0"
+    }
+  },
+  "spans": [],
+  "saved_at": "2026-06-29T19:49:06.058040+00:00"
+}

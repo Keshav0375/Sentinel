@@ -1,0 +1,14 @@
+{
+  "incident_id": "inc-cleared01",
+  "trace": {
+    "object": "trace",
+    "id": "trace_76d16f6b8eff4bca859894de7a01bf48",
+    "workflow_name": "incident_pipeline",
+    "group_id": null,
+    "metadata": {
+      "incident_id": "inc-cleared01"
+    }
+  },
+  "spans": [],
+  "saved_at": "2026-06-29T19:49:05.954553+00:00"
+}
