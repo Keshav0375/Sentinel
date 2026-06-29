@@ -288,9 +288,7 @@ def test_format_header_contains_count() -> None:
         root_cause="bad deploy",
         resolution="rollback",
     )
-    result = _format_results(
-        MemoryQueryResult(records=[record], similarity_scores=[0.95])
-    )
+    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.95]))
     assert "Found 1" in result
 
 
@@ -303,9 +301,7 @@ def test_format_contains_incident_id() -> None:
         root_cause="bad deploy",
         resolution="rollback",
     )
-    result = _format_results(
-        MemoryQueryResult(records=[record], similarity_scores=[0.95])
-    )
+    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.95]))
     assert "inc-001" in result
 
 
@@ -319,9 +315,7 @@ def test_format_contains_all_fields() -> None:
         resolution="rollback",
         mttr_seconds=300,
     )
-    result = _format_results(
-        MemoryQueryResult(records=[record], similarity_scores=[0.95])
-    )
+    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.95]))
     assert "service:" in result
     assert "severity:" in result
     assert "symptoms:" in result
@@ -340,9 +334,7 @@ def test_format_similarity_score_formatted() -> None:
         root_cause="bad deploy",
         resolution="rollback",
     )
-    result = _format_results(
-        MemoryQueryResult(records=[record], similarity_scores=[0.9512])
-    )
+    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.9512]))
     assert "0.951" in result
 
 
@@ -356,9 +348,7 @@ def test_format_mttr_unknown_when_none() -> None:
         resolution="rollback",
         mttr_seconds=None,
     )
-    result = _format_results(
-        MemoryQueryResult(records=[record], similarity_scores=[0.9])
-    )
+    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.9]))
     assert "unknown" in result
 
 
@@ -372,9 +362,7 @@ def test_format_mttr_shown_when_present() -> None:
         resolution="rollback",
         mttr_seconds=600,
     )
-    result = _format_results(
-        MemoryQueryResult(records=[record], similarity_scores=[0.9])
-    )
+    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.9]))
     assert "600s" in result
 
 
@@ -395,11 +383,7 @@ def test_format_multiple_records_all_shown() -> None:
         root_cause="pool exhaustion",
         resolution="scale up",
     )
-    result = _format_results(
-        MemoryQueryResult(
-            records=[r1, r2], similarity_scores=[0.95, 0.72]
-        )
-    )
+    result = _format_results(MemoryQueryResult(records=[r1, r2], similarity_scores=[0.95, 0.72]))
     assert "inc-001" in result
     assert "inc-002" in result
     assert "Found 2" in result

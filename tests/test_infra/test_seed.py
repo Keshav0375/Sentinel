@@ -90,9 +90,7 @@ async def test_seed_service_dependencies_is_valid_json(tmp_path: Path) -> None:
 async def test_seed_api_gateway_has_dependencies(tmp_path: Path) -> None:
     db_path = tmp_path / "test.db"
     await seed(db_path, verbose=False)
-    rows = await _fetch_all(
-        db_path, "SELECT dependencies FROM services WHERE name='api-gateway'"
-    )
+    rows = await _fetch_all(db_path, "SELECT dependencies FROM services WHERE name='api-gateway'")
     deps = json.loads(rows[0]["dependencies"])
     assert "auth-service" in deps
     assert "payment-service" in deps
@@ -102,9 +100,7 @@ async def test_seed_api_gateway_has_dependencies(tmp_path: Path) -> None:
 async def test_seed_leaf_service_has_empty_deps(tmp_path: Path) -> None:
     db_path = tmp_path / "test.db"
     await seed(db_path, verbose=False)
-    rows = await _fetch_all(
-        db_path, "SELECT dependencies FROM services WHERE name='user-service'"
-    )
+    rows = await _fetch_all(db_path, "SELECT dependencies FROM services WHERE name='user-service'")
     deps = json.loads(rows[0]["dependencies"])
     assert deps == []
 
@@ -145,10 +141,7 @@ async def test_seed_each_service_has_at_least_one_runbook(tmp_path: Path) -> Non
         "SELECT service_name, COUNT(*) as cnt FROM runbooks GROUP BY service_name",
     )
     services_with_runbooks = {r["service_name"] for r in rows}
-    all_services = {
-        r["name"]
-        for r in await _fetch_all(db_path, "SELECT name FROM services")
-    }
+    all_services = {r["name"] for r in await _fetch_all(db_path, "SELECT name FROM services")}
     assert services_with_runbooks == all_services, (
         f"Services without runbooks: {all_services - services_with_runbooks}"
     )

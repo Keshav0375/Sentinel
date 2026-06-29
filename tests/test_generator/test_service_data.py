@@ -19,10 +19,7 @@ def load_json(filename: str) -> dict:
 
 
 def load_all_scenarios() -> list[dict]:
-    return [
-        json.loads(p.read_text())
-        for p in sorted(SCENARIOS_DIR.glob("*.json"))
-    ]
+    return [json.loads(p.read_text()) for p in sorted(SCENARIOS_DIR.glob("*.json"))]
 
 
 VALID_TIERS = {"critical", "standard", "best-effort"}
@@ -91,18 +88,21 @@ def test_service_map_dependencies_reference_known_services() -> None:
     all_names = {svc["name"] for svc in data["services"]}
     for svc in data["services"]:
         for dep in svc["dependencies"]:
-            assert dep in all_names, (
-                f"Service '{svc['name']}' has unknown dependency: '{dep}'"
-            )
+            assert dep in all_names, f"Service '{svc['name']}' has unknown dependency: '{dep}'"
 
 
 def test_service_map_contains_scenario_services() -> None:
     data = load_json("service_map.json")
     service_names = {svc["name"] for svc in data["services"]}
     required = {
-        "api-gateway", "user-service", "auth-service",
-        "payment-service", "order-service", "notification-service",
-        "analytics-pipeline", "cdn-proxy",
+        "api-gateway",
+        "user-service",
+        "auth-service",
+        "payment-service",
+        "order-service",
+        "notification-service",
+        "analytics-pipeline",
+        "cdn-proxy",
     }
     missing = required - service_names
     assert not missing, f"Missing expected services: {missing}"
@@ -147,17 +147,13 @@ def test_dependency_graph_edges_reference_known_services() -> None:
 def test_dependency_graph_protocols_are_valid() -> None:
     data = load_json("dependency_graph.json")
     for edge in data["edges"]:
-        assert edge["protocol"] in VALID_PROTOCOLS, (
-            f"Invalid protocol: {edge['protocol']}"
-        )
+        assert edge["protocol"] in VALID_PROTOCOLS, f"Invalid protocol: {edge['protocol']}"
 
 
 def test_dependency_graph_no_self_loops() -> None:
     data = load_json("dependency_graph.json")
     for edge in data["edges"]:
-        assert edge["from"] != edge["to"], (
-            f"Self-loop detected: {edge['from']} -> {edge['to']}"
-        )
+        assert edge["from"] != edge["to"], f"Self-loop detected: {edge['from']} -> {edge['to']}"
 
 
 def test_dependency_graph_no_duplicate_edges() -> None:
@@ -169,18 +165,14 @@ def test_dependency_graph_no_duplicate_edges() -> None:
 def test_auth_service_in_api_gateway_deps() -> None:
     data = load_json("dependency_graph.json")
     gw_to_auth = any(
-        e["from"] == "api-gateway" and e["to"] == "auth-service"
-        for e in data["edges"]
+        e["from"] == "api-gateway" and e["to"] == "auth-service" for e in data["edges"]
     )
     assert gw_to_auth, "api-gateway must depend on auth-service (critical path)"
 
 
 def test_order_service_depends_on_payment() -> None:
     data = load_json("dependency_graph.json")
-    assert any(
-        e["from"] == "order-service" and e["to"] == "payment-service"
-        for e in data["edges"]
-    )
+    assert any(e["from"] == "order-service" and e["to"] == "payment-service" for e in data["edges"])
 
 
 # ── runbooks.json ─────────────────────────────────────────────────────────────
@@ -267,11 +259,19 @@ def test_service_map_deps_consistent_with_graph() -> None:
             )
 
 
-@pytest.mark.parametrize("service_name", [
-    "api-gateway", "user-service", "auth-service",
-    "payment-service", "order-service", "notification-service",
-    "analytics-pipeline", "cdn-proxy",
-])
+@pytest.mark.parametrize(
+    "service_name",
+    [
+        "api-gateway",
+        "user-service",
+        "auth-service",
+        "payment-service",
+        "order-service",
+        "notification-service",
+        "analytics-pipeline",
+        "cdn-proxy",
+    ],
+)
 def test_each_service_has_at_least_one_runbook(service_name: str) -> None:
     rb_data = load_json("runbooks.json")
     service_runbooks = [rb for rb in rb_data["runbooks"] if rb["service_name"] == service_name]

@@ -115,11 +115,15 @@ def _build_orchestrator_for_scenario(
     caps = get_capabilities(settings.sentinel_analysis_model)
     back = handoff(orchestrator)
     back.strict_json_schema = caps.strict_schemas
+    back_handoff: Any = [back]
     for specialist in [
-        triage_agent, log_analyst_agent, deploy_correlator_agent,
-        remediation_agent, comms_agent,
+        triage_agent,
+        log_analyst_agent,
+        deploy_correlator_agent,
+        remediation_agent,
+        comms_agent,
     ]:
-        specialist.handoffs = [back]
+        specialist.handoffs = back_handoff
 
     return orchestrator
 
@@ -171,10 +175,7 @@ def make_pipeline_fn(
 
         token = set_current_incident(incident_id)
         try:
-            input_text = (
-                f"New incident ID: {incident_id}\n"
-                f"Alert payload: {alert.model_dump_json()}"
-            )
+            input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
             with agent_trace(
                 "incident_pipeline",
                 metadata={"incident_id": incident_id},
@@ -182,13 +183,12 @@ def make_pipeline_fn(
                 await Runner.run(orchestrator, input_text, max_turns=max_turns)
             logger.info("pipeline_complete", incident_id=incident_id)
             try:
-                short_term_memory.update_context(
-                    incident_id, status=IncidentStatus.RESOLVED
-                )
+                short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
             except KeyError:
                 pass
             if event_bus is not None:
                 from sentinel.infra.event_bus import EventType, PipelineEvent  # noqa: PLC0415
+
                 await event_bus.publish(
                     incident_id,
                     PipelineEvent(
@@ -201,9 +201,7 @@ def make_pipeline_fn(
         except Exception as exc:
             logger.error("pipeline_error", incident_id=incident_id, error=str(exc))
             try:
-                short_term_memory.update_context(
-                    incident_id, status=IncidentStatus.ESCALATED
-                )
+                short_term_memory.update_context(incident_id, status=IncidentStatus.ESCALATED)
             except KeyError:
                 pass
             if event_bus is not None:

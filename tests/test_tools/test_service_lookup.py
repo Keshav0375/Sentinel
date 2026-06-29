@@ -135,8 +135,14 @@ async def test_response_runbooks_include_step_preview(mem: SemanticMemory) -> No
 @pytest.mark.asyncio
 async def test_all_8_services_return_valid_response(mem: SemanticMemory) -> None:
     services = [
-        "api-gateway", "user-service", "auth-service", "payment-service",
-        "order-service", "notification-service", "analytics-pipeline", "cdn-proxy",
+        "api-gateway",
+        "user-service",
+        "auth-service",
+        "payment-service",
+        "order-service",
+        "notification-service",
+        "analytics-pipeline",
+        "cdn-proxy",
     ]
     for svc in services:
         result = await _build_service_response(mem, svc)

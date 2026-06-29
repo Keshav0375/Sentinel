@@ -61,9 +61,7 @@ def test_generate_logs_sorted_by_timestamp(scenario_id: str) -> None:
     for noise in (False, True):
         logs = generate_logs(scenario, noise=noise)
         timestamps = [e.timestamp for e in logs]
-        assert timestamps == sorted(timestamps), (
-            f"{scenario_id} logs not sorted (noise={noise})"
-        )
+        assert timestamps == sorted(timestamps), f"{scenario_id} logs not sorted (noise={noise})"
 
 
 @pytest.mark.parametrize("scenario_id", ALL_SCENARIO_IDS)
@@ -133,9 +131,7 @@ def test_noise_entries_not_from_affected_service() -> None:
     noise_entries = [e for e in with_noise if e.message not in without]
     excluded = {scenario.alert.service, scenario.ground_truth.affected_service}
     for entry in noise_entries:
-        assert entry.service not in excluded, (
-            f"Noise service '{entry.service}' should be excluded"
-        )
+        assert entry.service not in excluded, f"Noise service '{entry.service}' should be excluded"
 
 
 def test_noise_timestamps_within_scenario_window() -> None:

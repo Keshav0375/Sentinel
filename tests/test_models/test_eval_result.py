@@ -77,24 +77,16 @@ def test_dimension_score_above_five_raises() -> None:
 
 def _sample_scores() -> list[DimensionScore]:
     return [
-        DimensionScore(
-            dimension=EvalDimension.TRIAGE_ACCURACY, score=4.0, reasoning="good"
-        ),
+        DimensionScore(dimension=EvalDimension.TRIAGE_ACCURACY, score=4.0, reasoning="good"),
         DimensionScore(
             dimension=EvalDimension.ROOT_CAUSE_CORRECTNESS, score=5.0, reasoning="perfect"
         ),
-        DimensionScore(
-            dimension=EvalDimension.TOOL_EFFICIENCY, score=3.5, reasoning="ok"
-        ),
-        DimensionScore(
-            dimension=EvalDimension.MTTR, score=4.0, reasoning="fast"
-        ),
+        DimensionScore(dimension=EvalDimension.TOOL_EFFICIENCY, score=3.5, reasoning="ok"),
+        DimensionScore(dimension=EvalDimension.MTTR, score=4.0, reasoning="fast"),
         DimensionScore(
             dimension=EvalDimension.REMEDIATION_SAFETY, score=5.0, reasoning="always gated"
         ),
-        DimensionScore(
-            dimension=EvalDimension.COMMS_QUALITY, score=3.0, reasoning="decent"
-        ),
+        DimensionScore(dimension=EvalDimension.COMMS_QUALITY, score=3.0, reasoning="decent"),
     ]
 
 

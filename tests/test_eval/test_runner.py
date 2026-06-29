@@ -28,8 +28,7 @@ def _make_trajectory_score(total: float = 4.0) -> TrajectoryScore:
         incident_id="inc-001",
         scenario_id="bad_deploy_01",
         dimension_scores=[
-            DimensionScore(dimension=d, score=total, reasoning="ok")
-            for d in EvalDimension
+            DimensionScore(dimension=d, score=total, reasoning="ok") for d in EvalDimension
         ],
         total_score=total,
         judge_model="test-model",

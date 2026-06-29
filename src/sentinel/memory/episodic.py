@@ -43,9 +43,7 @@ class EpisodicMemory:
         embedding = await self._embeddings.embed(symptoms)
         embedding_blob = np.array(embedding, dtype=np.float32).tobytes()
 
-        severity = (
-            incident.severity.value if incident.severity else incident.alert.severity.value
-        )
+        severity = incident.severity.value if incident.severity else incident.alert.severity.value
         service = incident.affected_service or incident.alert.service
         root_cause = _extract_root_cause(incident)
         resolution = _extract_resolution(incident)
@@ -83,9 +81,7 @@ class EpisodicMemory:
             )
             await conn.commit()
 
-    async def search_similar(
-        self, symptoms: str, *, top_k: int = 5
-    ) -> list[EpisodicRecord]:
+    async def search_similar(self, symptoms: str, *, top_k: int = 5) -> list[EpisodicRecord]:
         """Return the top-k most similar past incidents by symptom embedding.
 
         Embeds the query string, then computes cosine similarity against every
@@ -116,9 +112,7 @@ class EpisodicMemory:
     async def store(self, record: Any) -> None:
         """Persist a record. Expects an Incident instance."""
         if not isinstance(record, Incident):
-            raise TypeError(
-                f"EpisodicMemory.store() expects Incident, got {type(record).__name__}"
-            )
+            raise TypeError(f"EpisodicMemory.store() expects Incident, got {type(record).__name__}")
         await self.store_incident(record)
 
     async def query(self, query_input: Any, *, top_k: int = 5) -> MemoryQueryResult:
@@ -145,9 +139,7 @@ class EpisodicMemory:
     async def delete(self, record_id: str) -> None:
         """Remove a record by ID. No-op if the record does not exist."""
         async with get_db(self._db_path) as conn:
-            await conn.execute(
-                "DELETE FROM episodic_incidents WHERE id = ?", (record_id,)
-            )
+            await conn.execute("DELETE FROM episodic_incidents WHERE id = ?", (record_id,))
             await conn.commit()
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -156,9 +148,7 @@ class EpisodicMemory:
         self, symptoms: str, *, top_k: int
     ) -> list[tuple[float, EpisodicRecord]]:
         """Embed query, load all stored embeddings, rank by cosine similarity."""
-        query_vec = np.array(
-            await self._embeddings.embed(symptoms), dtype=np.float32
-        )
+        query_vec = np.array(await self._embeddings.embed(symptoms), dtype=np.float32)
         query_norm = float(np.linalg.norm(query_vec))
         if query_norm == 0.0:
             return []
@@ -178,9 +168,7 @@ class EpisodicMemory:
             stored_norm = float(np.linalg.norm(stored_vec))
             if stored_norm == 0.0:
                 continue
-            similarity = float(
-                np.dot(query_vec, stored_vec) / (query_norm * stored_norm)
-            )
+            similarity = float(np.dot(query_vec, stored_vec) / (query_norm * stored_norm))
             scored.append((similarity, _row_to_record(row)))
 
         scored.sort(key=lambda pair: pair[0], reverse=True)

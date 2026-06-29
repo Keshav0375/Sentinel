@@ -108,41 +108,31 @@ async def test_empty_proposed_by_returns_error() -> None:
 
 @pytest.mark.asyncio
 async def test_approve_returns_string() -> None:
-    result = await _request_human_approval(
-        ACTION, RISK, EVIDENCE, PROPOSER, _auto_approve
-    )
+    result = await _request_human_approval(ACTION, RISK, EVIDENCE, PROPOSER, _auto_approve)
     assert isinstance(result, str)
 
 
 @pytest.mark.asyncio
 async def test_approve_contains_approved_status() -> None:
-    result = await _request_human_approval(
-        ACTION, RISK, EVIDENCE, PROPOSER, _auto_approve
-    )
+    result = await _request_human_approval(ACTION, RISK, EVIDENCE, PROPOSER, _auto_approve)
     assert "APPROVED" in result
 
 
 @pytest.mark.asyncio
 async def test_approve_contains_action() -> None:
-    result = await _request_human_approval(
-        ACTION, RISK, EVIDENCE, PROPOSER, _auto_approve
-    )
+    result = await _request_human_approval(ACTION, RISK, EVIDENCE, PROPOSER, _auto_approve)
     assert ACTION in result
 
 
 @pytest.mark.asyncio
 async def test_approve_contains_risk_level() -> None:
-    result = await _request_human_approval(
-        ACTION, RISK, EVIDENCE, PROPOSER, _auto_approve
-    )
+    result = await _request_human_approval(ACTION, RISK, EVIDENCE, PROPOSER, _auto_approve)
     assert RISK in result
 
 
 @pytest.mark.asyncio
 async def test_approve_contains_proposed_by() -> None:
-    result = await _request_human_approval(
-        ACTION, RISK, EVIDENCE, PROPOSER, _auto_approve
-    )
+    result = await _request_human_approval(ACTION, RISK, EVIDENCE, PROPOSER, _auto_approve)
     assert PROPOSER in result
 
 
@@ -151,17 +141,13 @@ async def test_approve_contains_proposed_by() -> None:
 
 @pytest.mark.asyncio
 async def test_reject_contains_rejected_status() -> None:
-    result = await _request_human_approval(
-        ACTION, RISK, EVIDENCE, PROPOSER, _auto_reject
-    )
+    result = await _request_human_approval(ACTION, RISK, EVIDENCE, PROPOSER, _auto_reject)
     assert "REJECTED" in result
 
 
 @pytest.mark.asyncio
 async def test_reject_contains_comment() -> None:
-    result = await _request_human_approval(
-        ACTION, RISK, EVIDENCE, PROPOSER, _auto_reject
-    )
+    result = await _request_human_approval(ACTION, RISK, EVIDENCE, PROPOSER, _auto_reject)
     assert "Need more evidence" in result
 
 
@@ -178,9 +164,7 @@ async def test_unknown_decision_treated_as_reject() -> None:
     async def _unknown(display: str) -> tuple[str, str | None]:
         return "maybe", None
 
-    result = await _request_human_approval(
-        ACTION, RISK, EVIDENCE, PROPOSER, _unknown
-    )
+    result = await _request_human_approval(ACTION, RISK, EVIDENCE, PROPOSER, _unknown)
     assert "REJECTED" in result
 
 

@@ -155,10 +155,7 @@ async def run_scenario_eval(
     short_term_memory.create(incident_id, alert)
 
     # ── Run pipeline ───────────────────────────────────────────────────────────
-    input_text = (
-        f"New incident ID: {incident_id}\n"
-        f"Alert payload: {alert.model_dump_json()}"
-    )
+    input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
     pipeline_error: str | None = None
 
     try:
@@ -349,10 +346,7 @@ async def run_eval(
         "eval_run_complete",
         scenarios_run=len(results),
         scenarios_requested=len(resolved_ids),
-        avg_score=(
-            sum(r.score.total_score for r in results) / len(results)
-            if results else 0.0
-        ),
+        avg_score=(sum(r.score.total_score for r in results) / len(results) if results else 0.0),
     )
     return results
 

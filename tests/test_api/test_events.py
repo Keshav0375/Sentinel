@@ -176,6 +176,7 @@ class TestApiApprovalFn:
 
         token = set_current_incident("inc-001")
         try:
+
             async def _resolve_after_delay() -> None:
                 await asyncio.sleep(0)  # yield to let approval_fn start
                 await registry.resolve("inc-001", "approve", "all good")
@@ -196,6 +197,7 @@ class TestApiApprovalFn:
 
         token = set_current_incident("inc-001")
         try:
+
             async def _resolve_reject() -> None:
                 await asyncio.sleep(0)
                 await registry.resolve("inc-001", "reject", "too dangerous")
@@ -217,6 +219,7 @@ class TestApiApprovalFn:
 
         token = set_current_incident("inc-001")
         try:
+
             async def _resolve() -> None:
                 await asyncio.sleep(0)
                 await registry.resolve("inc-001", "approve")
@@ -244,6 +247,7 @@ class TestApiApprovalFn:
 
         token = set_current_incident("inc-001")
         try:
+
             async def _resolve() -> None:
                 await asyncio.sleep(0)
                 await registry.resolve("inc-001", "approve")
@@ -280,6 +284,7 @@ class TestApiApprovalFn:
 
         token = set_current_incident("inc-001")
         try:
+
             async def _resolve() -> None:
                 await asyncio.sleep(0)
                 await registry.resolve("inc-001", "approve")
@@ -370,9 +375,7 @@ class TestSseEndpoint:
 
         async def _stream_and_check() -> None:
             nonlocal content_type
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as client:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 async with client.stream("GET", "/events/inc-sse-ct") as resp:
                     content_type = resp.headers.get("content-type", "")
                     async for _ in resp.aiter_text():
@@ -400,9 +403,7 @@ class TestSseEndpoint:
 
         async def _check_status() -> None:
             nonlocal status_code
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as client:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 async with client.stream("GET", "/events/inc-sse-re") as resp:
                     status_code = resp.status_code
                     async for _ in resp.aiter_text():
@@ -435,9 +436,7 @@ class TestSseEndpoint:
 
         async def _stream_events() -> None:
             nonlocal received_text
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as client:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 async with client.stream("GET", "/events/inc-sse-stream") as resp:
                     async for chunk in resp.aiter_text():
                         received_text += chunk

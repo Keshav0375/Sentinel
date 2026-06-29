@@ -21,6 +21,7 @@ from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
 
 # ── Mock helpers ──────────────────────────────────────────────────────────────
 
+
 def _mock_trace(incident_id: str | None = "inc-test0001", name: str = "test") -> Any:
     """Create a minimal Trace mock with metadata."""
     t = MagicMock()
@@ -51,12 +52,14 @@ def _mock_span(
 def _function_span_data(name: str = "fetch_logs", output: str = "10 log entries") -> Any:
     """Create a FunctionSpanData mock."""
     from agents import FunctionSpanData
+
     return FunctionSpanData(name=name, input="query", output=output)
 
 
 def _handoff_span_data(from_agent: str = "orchestrator", to_agent: str = "triage_agent") -> Any:
     """Create a HandoffSpanData mock."""
     from agents import HandoffSpanData
+
     return HandoffSpanData(from_agent=from_agent, to_agent=to_agent)
 
 
@@ -75,6 +78,7 @@ def _make_stm(incident_id: str = "inc-test0001") -> ShortTermMemory:
 
 
 # ── _extract_incident_id ──────────────────────────────────────────────────────
+
 
 def test_extract_incident_id_found() -> None:
     trace = _mock_trace("inc-abc12345")
@@ -108,6 +112,7 @@ def test_extract_incident_id_converts_to_str() -> None:
 
 # ── _incident_id_from_span ────────────────────────────────────────────────────
 
+
 def test_incident_id_from_span_found() -> None:
     span = _mock_span(incident_id="inc-span0001")
     assert _incident_id_from_span(span) == "inc-span0001"
@@ -125,6 +130,7 @@ def test_incident_id_from_span_empty_metadata() -> None:
 
 
 # ── _span_to_timeline_entry ───────────────────────────────────────────────────
+
 
 def test_span_to_entry_function_span() -> None:
     data = _function_span_data("fetch_logs", "15 entries found")
@@ -165,6 +171,7 @@ def test_span_to_entry_handoff_span() -> None:
 
 def test_span_to_entry_handoff_none_from_agent() -> None:
     from agents import HandoffSpanData
+
     data = HandoffSpanData(from_agent=None, to_agent="comms_agent")
     span = _mock_span(span_data=data)
     entry = _span_to_timeline_entry(span)
@@ -174,12 +181,14 @@ def test_span_to_entry_handoff_none_from_agent() -> None:
 
 def test_span_to_entry_other_span_type_returns_none() -> None:
     from agents import AgentSpanData, GenerationSpanData
+
     for data in [AgentSpanData("triage_agent"), GenerationSpanData()]:
         span = _mock_span(span_data=data)
         assert _span_to_timeline_entry(span) is None
 
 
 # ── _parse_ended_at ───────────────────────────────────────────────────────────
+
 
 def test_parse_ended_at_valid_iso() -> None:
     span = _mock_span(ended_at="2026-05-12T15:30:00Z")
@@ -205,6 +214,7 @@ def test_parse_ended_at_invalid_string_defaults_to_now() -> None:
 
 
 # ── _save_trajectory ──────────────────────────────────────────────────────────
+
 
 def test_save_trajectory_creates_file(tmp_path: Path) -> None:
     _save_trajectory(
@@ -243,6 +253,7 @@ def test_save_trajectory_creates_parent_dirs(tmp_path: Path) -> None:
 
 
 # ── SentinelTracer ────────────────────────────────────────────────────────────
+
 
 def test_tracer_on_span_end_tool_call_adds_timeline_entry() -> None:
     stm = _make_stm()
@@ -357,8 +368,12 @@ def test_tracer_multiple_incidents_isolated(tmp_path: Path) -> None:
     """Events from two concurrent traces must not cross-contaminate."""
     stm = ShortTermMemory()
     alert = AlertPayload(
-        source=AlertSource.DATADOG, service="svc", metric="m",
-        threshold=0.1, current_value=0.9, severity=AlertSeverity.CRITICAL,
+        source=AlertSource.DATADOG,
+        service="svc",
+        metric="m",
+        threshold=0.1,
+        current_value=0.9,
+        severity=AlertSeverity.CRITICAL,
     )
     stm.create("inc-alpha001", alert)
     stm.create("inc-beta0001", alert)

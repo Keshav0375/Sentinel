@@ -87,9 +87,7 @@ async def _request_human_approval(
     if not proposed_by.strip():
         return "ERROR: 'proposed_by' must be a non-empty string."
 
-    display = _format_request_display(
-        action, risk_level, evidence_summary, proposed_by
-    )
+    display = _format_request_display(action, risk_level, evidence_summary, proposed_by)
 
     decision, comment = await approval_fn(display)
     status = "APPROVED" if decision.strip().lower() == "approve" else "REJECTED"
@@ -157,16 +155,12 @@ async def _terminal_approval(display: str) -> tuple[str, str | None]:
     sys.stdout.buffer.write(display.encode("utf-8", errors="replace"))
     sys.stdout.buffer.write(b"\n")
     sys.stdout.buffer.flush()
-    response = await asyncio.to_thread(
-        input, "\n>>> Enter 'approve' or 'reject': "
-    )
+    response = await asyncio.to_thread(input, "\n>>> Enter 'approve' or 'reject': ")
     decision = response.strip().lower()
 
     comment: str | None = None
     if decision == "reject":
-        raw = await asyncio.to_thread(
-            input, ">>> Reason for rejection (optional): "
-        )
+        raw = await asyncio.to_thread(input, ">>> Reason for rejection (optional): ")
         comment = raw.strip() or None
 
     return decision, comment

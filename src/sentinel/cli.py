@@ -27,6 +27,7 @@ def _seed_database() -> None:
         await create_tables(db_path)
         try:
             from data.seed import seed
+
             counts = await seed(db_path, verbose=False)
             print(f"  [OK] Database seeded — {counts[0]} services, {counts[1]} runbooks")
         except ImportError:
@@ -69,6 +70,7 @@ def _run_scenario(scenario_id: str) -> None:
         sys.path.insert(0, scripts_dir)
 
     from run_scenario import run_scenario  # type: ignore[import-not-found]
+
     asyncio.run(run_scenario(scenario_id))  # pyright: ignore[reportUnknownArgumentType]
 
 

@@ -27,9 +27,7 @@ class TestDimensionRubricStructure:
 
     def test_rubric_levels_span_0_to_5(self) -> None:
         for dim, rubric in DIMENSION_RUBRICS.items():
-            assert set(rubric.levels.keys()) == {0, 1, 2, 3, 4, 5}, (
-                f"{dim} missing some level keys"
-            )
+            assert set(rubric.levels.keys()) == {0, 1, 2, 3, 4, 5}, f"{dim} missing some level keys"
 
     def test_each_rubric_has_nonempty_description(self) -> None:
         for dim, rubric in DIMENSION_RUBRICS.items():

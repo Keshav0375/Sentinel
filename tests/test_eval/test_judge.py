@@ -74,11 +74,11 @@ def _sample_ground_truth() -> dict[str, Any]:
 
 class TestStripCodeFences:
     def test_strips_json_fence(self) -> None:
-        raw = "```json\n{\"key\": 1}\n```"
+        raw = '```json\n{"key": 1}\n```'
         assert _strip_code_fences(raw) == '{"key": 1}'
 
     def test_strips_plain_fence(self) -> None:
-        raw = "```\n{\"key\": 1}\n```"
+        raw = '```\n{"key": 1}\n```'
         assert _strip_code_fences(raw) == '{"key": 1}'
 
     def test_no_fence_unchanged(self) -> None:
@@ -86,7 +86,7 @@ class TestStripCodeFences:
         assert _strip_code_fences(raw) == '{"key": 1}'
 
     def test_strips_surrounding_whitespace(self) -> None:
-        raw = "  \n{\"key\": 1}\n  "
+        raw = '  \n{"key": 1}\n  '
         assert _strip_code_fences(raw) == '{"key": 1}'
 
 
@@ -129,8 +129,7 @@ class TestParseJudgeResponse:
         raw = _make_judge_response(scores)
         result = _parse_judge_response(raw, "m", "i", "s")
         triage = next(
-            ds for ds in result.dimension_scores
-            if ds.dimension == EvalDimension.TRIAGE_ACCURACY
+            ds for ds in result.dimension_scores if ds.dimension == EvalDimension.TRIAGE_ACCURACY
         )
         assert triage.score == pytest.approx(5.0)
 
@@ -140,8 +139,7 @@ class TestParseJudgeResponse:
         raw = _make_judge_response(scores)
         result = _parse_judge_response(raw, "m", "i", "s")
         triage = next(
-            ds for ds in result.dimension_scores
-            if ds.dimension == EvalDimension.TRIAGE_ACCURACY
+            ds for ds in result.dimension_scores if ds.dimension == EvalDimension.TRIAGE_ACCURACY
         )
         assert triage.score == pytest.approx(0.0)
 
@@ -149,9 +147,7 @@ class TestParseJudgeResponse:
         scores = {str(d): 4.0 for d in EvalDimension if d != EvalDimension.MTTR}
         raw = _make_judge_response(scores)
         result = _parse_judge_response(raw, "m", "i", "s")
-        mttr = next(
-            ds for ds in result.dimension_scores if ds.dimension == EvalDimension.MTTR
-        )
+        mttr = next(ds for ds in result.dimension_scores if ds.dimension == EvalDimension.MTTR)
         assert mttr.score == pytest.approx(0.0)
 
     def test_json_in_code_fence_parsed(self) -> None:
@@ -277,9 +273,7 @@ class TestEvaluateTrajectory:
         good_response.choices[0].message.content = good_content
 
         client = MagicMock()
-        client.chat.completions.create = AsyncMock(
-            side_effect=[bad_response, good_response]
-        )
+        client.chat.completions.create = AsyncMock(side_effect=[bad_response, good_response])
 
         with patch("sentinel.eval.judge.asyncio.sleep", new_callable=AsyncMock):
             result = await evaluate_trajectory(
@@ -316,9 +310,7 @@ class TestEvaluateTrajectory:
 
     async def test_api_exception_retries_then_returns_zero(self) -> None:
         client = MagicMock()
-        client.chat.completions.create = AsyncMock(
-            side_effect=RuntimeError("Network error")
-        )
+        client.chat.completions.create = AsyncMock(side_effect=RuntimeError("Network error"))
 
         with patch("sentinel.eval.judge.asyncio.sleep", new_callable=AsyncMock):
             result = await evaluate_trajectory(

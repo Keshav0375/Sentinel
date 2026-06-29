@@ -25,7 +25,11 @@ REQUIRED_ALERT_FIELDS = {"source", "service", "metric", "threshold", "current_va
 REQUIRED_ROOT_CAUSE_FIELDS = {"type", "deploy_id", "commit", "description"}
 
 REQUIRED_GROUND_TRUTH_FIELDS = {
-    "severity", "affected_service", "root_cause_summary", "recommended_action", "deploy_id"
+    "severity",
+    "affected_service",
+    "root_cause_summary",
+    "recommended_action",
+    "deploy_id",
 }
 
 REQUIRED_LOG_FIELDS = {"ts", "level", "service", "message"}
@@ -52,7 +56,11 @@ SCENARIO_IDS = [
 ]
 
 VALID_FAILURE_CLASSES = {
-    "bad_deploy", "db_pool", "downstream_outage", "memory_leak", "config_regression"
+    "bad_deploy",
+    "db_pool",
+    "downstream_outage",
+    "memory_leak",
+    "config_regression",
 }
 
 
