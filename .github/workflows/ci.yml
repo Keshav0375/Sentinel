@@ -13,7 +13,7 @@ env:
   PIP_EXTRA_INDEX_URL: "https://download.pytorch.org/whl/cpu"
 
 jobs:
-  # ── Setup: shared Python install + dependency cache ──────────────────────
+  # ── 1. Setup: Python + deps + cache ─────────────────────────────────────
   setup:
     name: Setup
     runs-on: ubuntu-latest
@@ -37,95 +37,52 @@ jobs:
       - name: Install dev tools
         run: pip install pytest pytest-asyncio pyright ruff
 
-  # ── Parallel checks (all depend on setup for cached deps) ────────────────
-  lint:
-    name: Lint
+  # ── 2. Branch Convention ─────────────────────────────────────────────────
+  branch-convention:
+    name: Branch Convention
     needs: [setup]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Validate branch name
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          PATTERN="^(feat|fix|refactor|ci|docs|test|chore|planning|ai|hotfix)/[a-z0-9._-]+$"
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          if [[ ! "$BRANCH" =~ $PATTERN ]]; then
+            echo "❌ Branch name '$BRANCH' does not match convention"
+            echo ""
+            echo "Format: <type>/<description>"
+            echo "Types: feat, fix, refactor, ci, docs, test, chore, planning, ai, hotfix"
+            echo "Examples: feat/postgres-migration, fix/agent-retry-loop, ci/add-deploy-workflow"
+            exit 1
+          fi
+          echo "✅ Branch name '$BRANCH' follows convention"
 
-      - name: Restore pip cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
-          restore-keys: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
-
-      - name: Install ruff
-        run: pip install ruff
-
-      - name: Ruff check
-        run: ruff check src/ tests/
-
-      - name: Ruff format check
-        run: ruff format --check src/ tests/
-
-  typecheck:
-    name: Type Check
-    needs: [setup]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Restore pip cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
-          restore-keys: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
-
-      - name: Install dependencies (CPU-only torch)
-        run: pip install -e . && pip install pyright
-
-      - name: Run pyright
-        run: pyright src/
-
-  test:
-    name: Tests
-    needs: [setup]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Restore pip cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
-          restore-keys: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
-
-      - name: Install dependencies (CPU-only torch)
-        run: pip install -e . && pip install pytest pytest-asyncio
-
-      - name: Run tests
-        run: python -m pytest tests/ -x --tb=short -q
-        env:
-          GROQ_API_KEY: "fake-key-for-ci"
-          SENTINEL_DB_PATH: ":memory:"
-
-  secrets:
-    name: Secret Leak Check
-    needs: [setup]
+  # ── 3. Unit Tests: all checks as steps in one job ────────────────────────
+  unit-tests:
+    name: Unit Tests
+    needs: [branch-convention]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Scan for hardcoded secrets
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Restore pip cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+
+      - name: Install dependencies (CPU-only torch)
+        run: pip install -e . && pip install pytest pytest-asyncio pyright ruff
+
+      - name: Secret leak check
         run: |
           echo "Scanning for leaked secrets in tracked files..."
           FOUND=0
@@ -177,30 +134,25 @@ jobs:
 
           echo "✅ No secrets detected"
 
-  branch-name:
-    name: Branch Name
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate branch name
-        run: |
-          BRANCH="${{ github.head_ref }}"
-          PATTERN="^(feat|fix|refactor|ci|docs|test|chore|planning|ai|hotfix)/[a-z0-9._-]+$"
+      - name: Ruff lint
+        run: ruff check src/ tests/
 
-          if [[ ! "$BRANCH" =~ $PATTERN ]]; then
-            echo "❌ Branch name '$BRANCH' does not match convention"
-            echo ""
-            echo "Format: <type>/<description>"
-            echo "Types: feat, fix, refactor, ci, docs, test, chore, planning, ai, hotfix"
-            echo "Examples: feat/postgres-migration, fix/agent-retry-loop, ci/add-deploy-workflow"
-            exit 1
-          fi
-          echo "✅ Branch name '$BRANCH' follows convention"
+      - name: Ruff format
+        run: ruff format --check src/ tests/
 
-  # ── Summary: collects all results, posts table, blocks merge on failure ──
+      - name: Pyright type check
+        run: pyright src/
+
+      - name: Pytest
+        run: python -m pytest tests/ -x --tb=short -q
+        env:
+          GROQ_API_KEY: "fake-key-for-ci"
+          SENTINEL_DB_PATH: ":memory:"
+
+  # ── 4. Summary: collect results and post table ───────────────────────────
   summary:
-    name: CI Summary
-    needs: [setup, lint, typecheck, test, secrets, branch-name]
+    name: Summary
+    needs: [setup, branch-convention, unit-tests]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -208,26 +160,17 @@ jobs:
         id: eval
         run: |
           SETUP="${{ needs.setup.result }}"
-          LINT="${{ needs.lint.result }}"
-          TYPE="${{ needs.typecheck.result }}"
-          TEST="${{ needs.test.result }}"
-          SECRETS="${{ needs.secrets.result }}"
-          BRANCH="${{ needs.branch-name.result }}"
+          BRANCH="${{ needs.branch-convention.result }}"
+          TESTS="${{ needs.unit-tests.result }}"
           PASS=true
 
           echo "setup=$SETUP" >> "$GITHUB_OUTPUT"
-          echo "lint=$LINT" >> "$GITHUB_OUTPUT"
-          echo "typecheck=$TYPE" >> "$GITHUB_OUTPUT"
-          echo "test=$TEST" >> "$GITHUB_OUTPUT"
-          echo "secrets=$SECRETS" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "tests=$TESTS" >> "$GITHUB_OUTPUT"
 
           if [[ "$SETUP" != "success" ]]; then PASS=false; fi
-          if [[ "$LINT" != "success" ]]; then PASS=false; fi
-          if [[ "$TYPE" != "success" ]]; then PASS=false; fi
-          if [[ "$TEST" != "success" ]]; then PASS=false; fi
-          if [[ "$SECRETS" != "success" ]]; then PASS=false; fi
-          if [[ "$BRANCH" != "success" && "$BRANCH" != "skipped" ]]; then PASS=false; fi
+          if [[ "$BRANCH" != "success" ]]; then PASS=false; fi
+          if [[ "$TESTS" != "success" ]]; then PASS=false; fi
 
           echo "pass=$PASS" >> "$GITHUB_OUTPUT"
 
@@ -236,12 +179,9 @@ jobs:
         with:
           script: |
             const s = {
-              setup:     '${{ steps.eval.outputs.setup }}',
-              secrets:   '${{ steps.eval.outputs.secrets }}',
-              lint:      '${{ steps.eval.outputs.lint }}',
-              typecheck: '${{ steps.eval.outputs.typecheck }}',
-              test:      '${{ steps.eval.outputs.test }}',
-              branch:    '${{ steps.eval.outputs.branch }}',
+              setup:  '${{ steps.eval.outputs.setup }}',
+              branch: '${{ steps.eval.outputs.branch }}',
+              tests:  '${{ steps.eval.outputs.tests }}',
             };
             const pass = '${{ steps.eval.outputs.pass }}' === 'true';
             const icon = (r) => r === 'success' ? '✅' : r === 'skipped' ? '⏭️' : '❌';
@@ -252,11 +192,8 @@ jobs:
             md += `**Ref:** \`${ref}\` | **Commit:** \`${sha}\` | **Run:** [#${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})\n\n`;
             md += `| Job | Status |\n|-----|--------|\n`;
             md += `| Setup | ${icon(s.setup)} ${s.setup} |\n`;
-            md += `| Secret Leak Check | ${icon(s.secrets)} ${s.secrets} |\n`;
-            md += `| Lint | ${icon(s.lint)} ${s.lint} |\n`;
-            md += `| Type Check | ${icon(s.typecheck)} ${s.typecheck} |\n`;
-            md += `| Tests | ${icon(s.test)} ${s.test} |\n`;
-            md += `| Branch Name | ${icon(s.branch)} ${s.branch} |\n\n`;
+            md += `| Branch Convention | ${icon(s.branch)} ${s.branch} |\n`;
+            md += `| Unit Tests | ${icon(s.tests)} ${s.tests} |\n\n`;
             md += pass ? '**All checks passed — ready to merge.**\n' : '**One or more checks failed — merge blocked.**\n';
 
             await core.summary.addRaw(md).write();

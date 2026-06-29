@@ -53,6 +53,38 @@ _ALL_DDL: list[str] = [
     _CREATE_RUNBOOKS,
 ]
 
+_SHARED_MEMORY_URI = "file::memory:?cache=shared"
+
+# Keeps the shared in-memory DB alive across connections. Without this,
+# closing the last connection destroys all tables.
+_keepalive: aiosqlite.Connection | None = None
+
+
+def _is_memory(db_path: Path) -> bool:
+    return str(db_path) == ":memory:"
+
+
+def _connect(db_path: Path) -> aiosqlite.Connection:
+    if _is_memory(db_path):
+        return aiosqlite.connect(_SHARED_MEMORY_URI, uri=True)
+    return aiosqlite.connect(db_path)
+
+
+async def _ensure_keepalive() -> None:
+    global _keepalive  # noqa: PLW0603
+    if _keepalive is None:
+        conn = aiosqlite.connect(_SHARED_MEMORY_URI, uri=True)
+        _keepalive = await conn.__aenter__()
+
+
+async def close_keepalive() -> None:
+    """Close the keep-alive connection (call on shutdown)."""
+    global _keepalive  # noqa: PLW0603
+    if _keepalive is not None:
+        await _keepalive.close()
+        _keepalive = None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
@@ -61,8 +93,11 @@ async def create_tables(db_path: Path) -> None:
 
     Creates parent directories if they don't exist.
     """
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(db_path) as conn:
+    if _is_memory(db_path):
+        await _ensure_keepalive()
+    else:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    async with _connect(db_path) as conn:
         for ddl in _ALL_DDL:
             await conn.execute(ddl)
         await conn.commit()
@@ -80,8 +115,9 @@ async def get_db(db_path: Path) -> AsyncGenerator[aiosqlite.Connection, None]:
         async with get_db(settings.sentinel_db_path) as conn:
             await conn.execute("SELECT ...")
     """
-    async with aiosqlite.connect(db_path) as conn:
+    async with _connect(db_path) as conn:
         conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA journal_mode=WAL")
+        if not _is_memory(db_path):
+            await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA foreign_keys=ON")
         yield conn
