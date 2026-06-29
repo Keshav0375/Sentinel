@@ -40,6 +40,66 @@ jobs:
           fi
           echo "✅ Branch name '$BRANCH' follows convention"
 
+  secrets:
+    name: Secret Leak Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for hardcoded secrets
+        run: |
+          echo "Scanning for leaked secrets in tracked files..."
+          FOUND=0
+
+          PATTERNS=(
+            'sk-[a-zA-Z0-9]{20,}'                           # OpenAI keys
+            'sk-ant-[a-zA-Z0-9_-]{20,}'                     # Anthropic keys
+            'gsk_[a-zA-Z0-9]{20,}'                          # Groq keys
+            'ghp_[a-zA-Z0-9]{36}'                           # GitHub PAT
+            'github_pat_[a-zA-Z0-9_]{60,}'                  # GitHub fine-grained PAT
+            'xoxb-[0-9]{10,}-[0-9]{10,}-[a-zA-Z0-9]{24}'   # Slack bot token
+            'AKIA[0-9A-Z]{16}'                              # AWS access key
+            'eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}'    # JWT tokens
+            'postgres://[^:]+:[^@]+@'                       # Postgres connection with password
+            'redis://:[^@]+@'                               # Redis connection with password
+          )
+
+          for pattern in "${PATTERNS[@]}"; do
+            MATCHES=$(git grep -lP "$pattern" -- ':!.env.example' ':!.github/' ':!tests/' ':!*.md' ':!*.lock' 2>/dev/null || true)
+            if [[ -n "$MATCHES" ]]; then
+              echo "❌ Potential secret matching: $pattern"
+              echo "$MATCHES" | while read -r f; do echo "   → $f"; done
+              FOUND=1
+            fi
+          done
+
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "❌ .env file is tracked — must be in .gitignore"
+            FOUND=1
+          fi
+
+          if git ls-files --error-unmatch .env.local 2>/dev/null; then
+            echo "❌ .env.local is tracked — must be in .gitignore"
+            FOUND=1
+          fi
+
+          KEY_FILES=$(git ls-files '*.pem' '*.key' '*.p12' '*.pfx' 'id_rsa*' 'id_ed25519*' 2>/dev/null || true)
+          if [[ -n "$KEY_FILES" ]]; then
+            echo "❌ Private key files tracked:"
+            echo "$KEY_FILES" | while read -r f; do echo "   → $f"; done
+            FOUND=1
+          fi
+
+          if [[ "$FOUND" -eq 1 ]]; then
+            echo ""
+            echo "Remove secrets, rotate compromised keys, use GitHub Secrets instead."
+            exit 1
+          fi
+
+          echo "✅ No secrets detected"
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -98,7 +158,7 @@ jobs:
 
   gate:
     name: CI Gate
-    needs: [lint, typecheck, test, branch-name]
+    needs: [secrets, lint, typecheck, test, branch-name]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -109,9 +169,16 @@ jobs:
           TEST="${{ needs.test.result }}"
           BRANCH="${{ needs.branch-name.result }}"
 
+          SECRETS="${{ needs.secrets.result }}"
+
           # branch-name only runs on PRs, skip check on push
           if [[ "$BRANCH" != "success" && "$BRANCH" != "skipped" ]]; then
             echo "❌ Branch name check failed"
+            exit 1
+          fi
+
+          if [[ "$SECRETS" != "success" ]]; then
+            echo "❌ Secret leak check failed — remove secrets before merging"
             exit 1
           fi
 
