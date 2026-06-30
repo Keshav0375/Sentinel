@@ -148,6 +148,14 @@ The app must boot cleanly before reporting the task as done. A passing test suit
 
 Any tool that could modify external state (open PR, send message, rollback, restart) MUST go through `request_human_approval`. There is no "execute" tool — only "draft" tools + the approval gate. If you find yourself writing a tool that directly acts on the world without approval, stop and restructure.
 
+## Planning Agent
+
+- **sentinel-planner** (`.claude/skills/sentinel-planner/SKILL.md`) - Sentinel Phase 2 planning agent. Manages architecture, TODOs, READMEs, state, references. Trigger: `/sentinel-planner`
+When the user types `/sentinel-planner`, invoke the Skill tool with `skill: "sentinel-planner"` before doing anything else.
+
+- State file: `Planning/Phase-2/STATE.md` — single source of truth for planning progress
+- After any planning discussion, the agent auto-updates all affected docs (README, ARCHITECTURE, STATE, links)
+
 ## When Stuck
 
 1. Check `ARCHITECTURE.md` for the design decision
