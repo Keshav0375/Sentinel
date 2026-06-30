@@ -35,8 +35,7 @@ def _make_score(
         incident_id=f"inc-{scenario_id}",
         scenario_id=scenario_id,
         dimension_scores=[
-            DimensionScore(dimension=d, score=s, reasoning="ok")
-            for d in EvalDimension
+            DimensionScore(dimension=d, score=s, reasoning="ok") for d in EvalDimension
         ],
         total_score=total,
         judge_model=judge_model,

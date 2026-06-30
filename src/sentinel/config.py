@@ -129,9 +129,7 @@ class Settings(BaseSettings):
                     )
             elif provider == "azure":
                 if not self.azure_api_key.strip():
-                    raise ValueError(
-                        f"{env_var}={model_string!r} requires AZURE_API_KEY to be set"
-                    )
+                    raise ValueError(f"{env_var}={model_string!r} requires AZURE_API_KEY to be set")
                 if not self.azure_api_base.strip():
                     raise ValueError(
                         f"{env_var}={model_string!r} requires AZURE_API_BASE to be set"

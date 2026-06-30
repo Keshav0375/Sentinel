@@ -108,9 +108,7 @@ class DashboardEventEmitter(TracingProcessor):
         elif isinstance(data, AgentSpanData):
             agent = self._active.get(span.trace_id, data.name or "agent")
             output = self._last_output.pop(agent, None)
-            event_data: dict[str, object] = (
-                {"output": output} if output else {}
-            )
+            event_data: dict[str, object] = {"output": output} if output else {}
             self._emit(
                 incident_id,
                 PipelineEvent(

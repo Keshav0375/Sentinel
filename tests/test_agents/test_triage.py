@@ -154,8 +154,12 @@ def test_triage_agent_tool_names(triage_agent: Agent[TriageResult]) -> None:
 def test_triage_agent_no_extra_tools(triage_agent: Agent[TriageResult]) -> None:
     """Triage agent must not have deploy/log/remediation tools — scope is intentionally narrow."""
     names = {t.name for t in triage_agent.tools}
-    unexpected = {"fetch_logs", "list_recent_deploys", "draft_rollback_pr",
-                  "request_human_approval"}
+    unexpected = {
+        "fetch_logs",
+        "list_recent_deploys",
+        "draft_rollback_pr",
+        "request_human_approval",
+    }
     assert not names & unexpected, f"Unexpected tools in triage agent: {names & unexpected}"
 
 

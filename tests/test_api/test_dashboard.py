@@ -71,10 +71,12 @@ class TestScenariosEndpoint:
         with TestClient(_scenarios_app()) as client:
             data = client.get("/api/scenarios").json()
         for item in data:
-            assert item["id"].replace("_", " ").lower() in item["label"].lower() or \
-                   "bad deploy" in item["label"].lower() or \
-                   item["id"] in item["label"].lower() or \
-                   True  # label just needs to be non-empty
+            assert (
+                item["id"].replace("_", " ").lower() in item["label"].lower()
+                or "bad deploy" in item["label"].lower()
+                or item["id"] in item["label"].lower()
+                or True
+            )  # label just needs to be non-empty
             assert len(item["label"]) > 0
 
     def test_alert_source_is_valid(self) -> None:

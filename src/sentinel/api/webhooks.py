@@ -85,9 +85,7 @@ class AlertDeduplicator:
         """
         now = time.monotonic()
         expired = [
-            aid
-            for aid, entry in self._cache.items()
-            if now - entry.recorded_at >= self.TTL_SECONDS
+            aid for aid, entry in self._cache.items() if now - entry.recorded_at >= self.TTL_SECONDS
         ]
         for aid in expired:
             del self._cache[aid]

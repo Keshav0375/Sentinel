@@ -208,10 +208,7 @@ def to_markdown(report: EvalReport) -> str:
     lines.append("|--------|-------|")
     lines.append(f"| Scenarios evaluated | {report.scenarios_run} |")
     lines.append(f"| Average total score | {report.avg_total_score:.2f} / 5.00 |")
-    lines.append(
-        f"| Pass rate (≥{report.pass_threshold}) "
-        f"| {report.pass_rate * 100:.0f}% |"
-    )
+    lines.append(f"| Pass rate (≥{report.pass_threshold}) | {report.pass_rate * 100:.0f}% |")
     pf = "PASS" if report.avg_total_score >= report.pass_threshold else "FAIL"
     lines.append(f"| Overall | **{pf}** |\n")
 
@@ -221,10 +218,7 @@ def to_markdown(report: EvalReport) -> str:
     lines.append("|-----------|-----|-----|-----|")
     for ds in report.dimension_stats:
         lines.append(
-            f"| {ds.dimension} "
-            f"| {ds.avg_score:.2f} "
-            f"| {ds.min_score:.2f} "
-            f"| {ds.max_score:.2f} |"
+            f"| {ds.dimension} | {ds.avg_score:.2f} | {ds.min_score:.2f} | {ds.max_score:.2f} |"
         )
 
     # ── Per-scenario breakdown ─────────────────────────────────────────────────

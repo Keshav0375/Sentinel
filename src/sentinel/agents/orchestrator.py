@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from agents import Agent, Handoff, handoff
 
@@ -22,9 +22,7 @@ SPECIALIST_ORDER = (
 )
 
 
-def _make_handoffs(
-    agents: list[Agent[Any]], *, strict: bool
-) -> list[Handoff[Any, Any]]:
+def _make_handoffs(agents: list[Agent[Any]], *, strict: bool) -> list[Handoff[Any, Any]]:
     """Wrap agents in Handoff objects with provider-appropriate strict mode."""
     handoffs: list[Handoff[Any, Any]] = []
     for agent in agents:
@@ -81,10 +79,11 @@ def build_orchestrator_agent(
         comms_agent,
     ]
 
+    agent_handoffs = _make_handoffs(specialists, strict=caps.strict_schemas)
     return Agent(
         name=ORCHESTRATOR_AGENT_NAME,
         instructions=load_prompt("orchestrator.txt"),
-        handoffs=_make_handoffs(specialists, strict=caps.strict_schemas),
+        handoffs=cast(list[Agent[Any] | Handoff[Any, Any]], agent_handoffs),
         model=llm,
         **kwargs,
     )

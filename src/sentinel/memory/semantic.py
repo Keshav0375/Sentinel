@@ -43,9 +43,7 @@ class SemanticMemory:
         """
         if name not in self._service_cache:
             async with get_db(self._db_path) as conn:
-                async with conn.execute(
-                    "SELECT * FROM services WHERE name = ?", (name,)
-                ) as cur:
+                async with conn.execute("SELECT * FROM services WHERE name = ?", (name,)) as cur:
                     row = await cur.fetchone()
             if row is None:
                 raise KeyError(f"Service not found in semantic memory: {name!r}")

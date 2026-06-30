@@ -61,9 +61,7 @@ class EventBus:
     """
 
     def __init__(self) -> None:
-        self._subscribers: dict[str, list[asyncio.Queue[PipelineEvent | None]]] = (
-            defaultdict(list)
-        )
+        self._subscribers: dict[str, list[asyncio.Queue[PipelineEvent | None]]] = defaultdict(list)
 
     async def publish(self, incident_id: str, event: PipelineEvent) -> int:
         """Fan out *event* to every subscriber for *incident_id*.

@@ -123,12 +123,20 @@ def test_memory_query_result_empty() -> None:
 
 def test_memory_query_result_with_data() -> None:
     rec1 = EpisodicRecord(
-        id="ep-a", service_name="svc", severity="P1",
-        symptoms="error spike", root_cause="bad deploy", resolution="rollback",
+        id="ep-a",
+        service_name="svc",
+        severity="P1",
+        symptoms="error spike",
+        root_cause="bad deploy",
+        resolution="rollback",
     )
     rec2 = EpisodicRecord(
-        id="ep-b", service_name="svc", severity="P2",
-        symptoms="slow queries", root_cause="pool exhaustion", resolution="restart",
+        id="ep-b",
+        service_name="svc",
+        severity="P2",
+        symptoms="slow queries",
+        root_cause="pool exhaustion",
+        resolution="restart",
     )
     result = MemoryQueryResult(
         records=[rec1, rec2],

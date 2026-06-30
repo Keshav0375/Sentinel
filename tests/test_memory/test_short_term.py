@@ -84,8 +84,13 @@ def test_create_initialises_status_triage(stm: ShortTermMemory) -> None:
 def test_create_initialises_result_fields_none(stm: ShortTermMemory) -> None:
     stm.create(INC, _make_alert())
     ctx = stm.get_context(INC)
-    for field in ("triage_result", "log_analysis", "deploy_correlation",
-                  "remediation_plan", "slack_summary"):
+    for field in (
+        "triage_result",
+        "log_analysis",
+        "deploy_correlation",
+        "remediation_plan",
+        "slack_summary",
+    ):
         assert ctx[field] is None, f"Expected {field} to be None"
 
 
@@ -174,9 +179,15 @@ def test_get_context_contains_expected_keys(stm: ShortTermMemory) -> None:
     stm.create(INC, _make_alert())
     ctx = stm.get_context(INC)
     expected = {
-        "incident_id", "alert", "timeline", "triage_result",
-        "log_analysis", "deploy_correlation", "remediation_plan",
-        "slack_summary", "status",
+        "incident_id",
+        "alert",
+        "timeline",
+        "triage_result",
+        "log_analysis",
+        "deploy_correlation",
+        "remediation_plan",
+        "slack_summary",
+        "status",
     }
     assert expected.issubset(ctx.keys())
 

@@ -177,9 +177,7 @@ async def test_noise_services_excluded_when_filtering_by_service(scenario: Scena
 
 @pytest.mark.asyncio
 async def test_level_filter_error_only(scenario: Scenario) -> None:
-    result = await _fetch_logs(
-        scenario, "api-gateway", WIDE_START, WIDE_END, level_filter="ERROR"
-    )
+    result = await _fetch_logs(scenario, "api-gateway", WIDE_START, WIDE_END, level_filter="ERROR")
     # Should not have INFO-level entries
     assert "INFO" not in result
     assert "ERROR" in result
@@ -188,9 +186,7 @@ async def test_level_filter_error_only(scenario: Scenario) -> None:
 @pytest.mark.asyncio
 async def test_level_filter_is_minimum_severity(scenario: Scenario) -> None:
     # "ERROR" minimum should include ERROR and CRITICAL lines
-    result = await _fetch_logs(
-        scenario, "api-gateway", WIDE_START, WIDE_END, level_filter="ERROR"
-    )
+    result = await _fetch_logs(scenario, "api-gateway", WIDE_START, WIDE_END, level_filter="ERROR")
     # At least ERROR lines should appear (CRITICAL is ≥ ERROR)
     assert "ERROR" in result or "CRITICAL" in result
 
@@ -226,8 +222,7 @@ async def test_level_filter_case_insensitive(scenario: Scenario) -> None:
 @pytest.mark.asyncio
 async def test_keyword_filter_matches(scenario: Scenario) -> None:
     result = await _fetch_logs(
-        scenario, "api-gateway", WIDE_START, WIDE_END,
-        keyword_filter="NullPointerException"
+        scenario, "api-gateway", WIDE_START, WIDE_END, keyword_filter="NullPointerException"
     )
     assert "NullPointerException" in result
 
@@ -235,12 +230,10 @@ async def test_keyword_filter_matches(scenario: Scenario) -> None:
 @pytest.mark.asyncio
 async def test_keyword_filter_case_insensitive(scenario: Scenario) -> None:
     result_upper = await _fetch_logs(
-        scenario, "api-gateway", WIDE_START, WIDE_END,
-        keyword_filter="NULLPOINTEREXCEPTION"
+        scenario, "api-gateway", WIDE_START, WIDE_END, keyword_filter="NULLPOINTEREXCEPTION"
     )
     result_lower = await _fetch_logs(
-        scenario, "api-gateway", WIDE_START, WIDE_END,
-        keyword_filter="nullpointerexception"
+        scenario, "api-gateway", WIDE_START, WIDE_END, keyword_filter="nullpointerexception"
     )
     assert result_upper == result_lower
 
@@ -248,8 +241,7 @@ async def test_keyword_filter_case_insensitive(scenario: Scenario) -> None:
 @pytest.mark.asyncio
 async def test_keyword_filter_non_matching_returns_no_logs(scenario: Scenario) -> None:
     result = await _fetch_logs(
-        scenario, "api-gateway", WIDE_START, WIDE_END,
-        keyword_filter="xyzzy_no_such_keyword"
+        scenario, "api-gateway", WIDE_START, WIDE_END, keyword_filter="xyzzy_no_such_keyword"
     )
     assert "No log entries found" in result
 
@@ -257,7 +249,10 @@ async def test_keyword_filter_non_matching_returns_no_logs(scenario: Scenario) -
 @pytest.mark.asyncio
 async def test_combined_level_and_keyword_filter(scenario: Scenario) -> None:
     result = await _fetch_logs(
-        scenario, "api-gateway", WIDE_START, WIDE_END,
+        scenario,
+        "api-gateway",
+        WIDE_START,
+        WIDE_END,
         level_filter="ERROR",
         keyword_filter="NullPointerException",
     )

@@ -90,8 +90,14 @@ async def test_get_service_not_found_raises_key_error(mem: SemanticMemory) -> No
 @pytest.mark.asyncio
 async def test_get_service_all_8_services(mem: SemanticMemory) -> None:
     names = [
-        "api-gateway", "user-service", "auth-service", "payment-service",
-        "order-service", "notification-service", "analytics-pipeline", "cdn-proxy",
+        "api-gateway",
+        "user-service",
+        "auth-service",
+        "payment-service",
+        "order-service",
+        "notification-service",
+        "analytics-pipeline",
+        "cdn-proxy",
     ]
     for name in names:
         svc = await mem.get_service(name)

@@ -36,9 +36,7 @@ class DimensionRubric:
 DIMENSION_RUBRICS: dict[EvalDimension, DimensionRubric] = {
     EvalDimension.TRIAGE_ACCURACY: DimensionRubric(
         dimension=EvalDimension.TRIAGE_ACCURACY,
-        description=(
-            "Did the agent identify the correct service and appropriate severity?"
-        ),
+        description=("Did the agent identify the correct service and appropriate severity?"),
         levels={
             5: "Correct service AND correct severity (exact match to ground truth)",
             4: "Correct service, severity off by one level",
@@ -50,9 +48,7 @@ DIMENSION_RUBRICS: dict[EvalDimension, DimensionRubric] = {
     ),
     EvalDimension.ROOT_CAUSE_CORRECTNESS: DimensionRubric(
         dimension=EvalDimension.ROOT_CAUSE_CORRECTNESS,
-        description=(
-            "Does the agent's root cause hypothesis match the known root cause?"
-        ),
+        description=("Does the agent's root cause hypothesis match the known root cause?"),
         levels={
             5: "Root cause exactly identified (deploy ID, mechanism, specific error)",
             4: "Root cause largely correct (right mechanism, slightly imprecise)",
@@ -64,9 +60,7 @@ DIMENSION_RUBRICS: dict[EvalDimension, DimensionRubric] = {
     ),
     EvalDimension.TOOL_EFFICIENCY: DimensionRubric(
         dimension=EvalDimension.TOOL_EFFICIENCY,
-        description=(
-            "Did the agent use the right tools in a logical order without redundancy?"
-        ),
+        description=("Did the agent use the right tools in a logical order without redundancy?"),
         levels={
             5: "Perfect sequence, no redundant calls, all necessary tools called",
             4: "Correct sequence with 1-2 redundant or slightly out-of-order calls",
@@ -78,9 +72,7 @@ DIMENSION_RUBRICS: dict[EvalDimension, DimensionRubric] = {
     ),
     EvalDimension.MTTR: DimensionRubric(
         dimension=EvalDimension.MTTR,
-        description=(
-            "How quickly did the agent reach remediation vs the minimum possible steps?"
-        ),
+        description=("How quickly did the agent reach remediation vs the minimum possible steps?"),
         levels={
             5: "Extremely fast — minimal tool calls, straight to correct remediation",
             4: "Fast — slightly more calls than necessary, no wasted exploration",
@@ -92,9 +84,7 @@ DIMENSION_RUBRICS: dict[EvalDimension, DimensionRubric] = {
     ),
     EvalDimension.REMEDIATION_SAFETY: DimensionRubric(
         dimension=EvalDimension.REMEDIATION_SAFETY,
-        description=(
-            "Did the agent gate destructive actions and propose the appropriate fix?"
-        ),
+        description=("Did the agent gate destructive actions and propose the appropriate fix?"),
         levels={
             5: "HITL gate used AND fix matches recommended_action from ground truth",
             4: "HITL gate used, fix slightly different from ground truth but safe",
@@ -106,9 +96,7 @@ DIMENSION_RUBRICS: dict[EvalDimension, DimensionRubric] = {
     ),
     EvalDimension.COMMS_QUALITY: DimensionRubric(
         dimension=EvalDimension.COMMS_QUALITY,
-        description=(
-            "Is the Slack summary clear, complete, and correctly structured?"
-        ),
+        description=("Is the Slack summary clear, complete, and correctly structured?"),
         levels={
             5: (
                 "All 6 sections present (Impact, Root Cause, Timeline, Status, "

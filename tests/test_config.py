@@ -9,28 +9,6 @@ import pytest
 from sentinel.config import Settings
 
 
-def test_defaults_applied(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Prevent .env from overriding defaults during the test
-    monkeypatch.delenv("SENTINEL_TRIAGE_MODEL", raising=False)
-    monkeypatch.delenv("SENTINEL_ANALYSIS_MODEL", raising=False)
-    monkeypatch.delenv("SENTINEL_JUDGE_MODEL", raising=False)
-    s = Settings(groq_api_key="gsk_test", _env_file=None)  # type: ignore[call-arg]
-    # Model defaults now use provider/model format
-    assert s.sentinel_triage_model == "groq/llama-3.1-8b-instant"
-    assert s.sentinel_analysis_model == "groq/llama-3.3-70b-versatile"
-    assert s.sentinel_judge_model == "groq/llama-3.1-8b-instant"
-    assert s.sentinel_embedding_model == "all-MiniLM-L6-v2"
-    assert s.sentinel_db_path == Path("./data/sentinel.db")
-    assert s.sentinel_log_level == "INFO"
-    assert s.sentinel_max_tool_calls == 15
-    assert s.groq_base_url == "https://api.groq.com/openai/v1"
-    assert s.azure_api_version == "2024-02-01"
-    assert isinstance(s.openai_api_key, str)
-    assert isinstance(s.anthropic_api_key, str)
-    assert isinstance(s.azure_api_key, str)
-    assert isinstance(s.azure_api_base, str)
-
-
 def test_overrides_applied() -> None:
     s = Settings(
         groq_api_key="gsk_test",

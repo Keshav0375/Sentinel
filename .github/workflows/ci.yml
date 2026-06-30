@@ -1,0 +1,203 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  PIP_EXTRA_INDEX_URL: "https://download.pytorch.org/whl/cpu"
+
+jobs:
+  # ── 1. Setup: Python + deps + cache ─────────────────────────────────────
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+
+      - name: Install project dependencies (CPU-only torch)
+        run: pip install -e .
+
+      - name: Install dev tools
+        run: pip install pytest pytest-asyncio pyright ruff
+
+  # ── 2. Branch Convention ─────────────────────────────────────────────────
+  branch-convention:
+    name: Branch Convention
+    needs: [setup]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate branch name
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          PATTERN="^(feat|fix|refactor|ci|docs|test|chore|planning|ai|hotfix)/[a-z0-9._-]+$"
+
+          if [[ ! "$BRANCH" =~ $PATTERN ]]; then
+            echo "❌ Branch name '$BRANCH' does not match convention"
+            echo ""
+            echo "Format: <type>/<description>"
+            echo "Types: feat, fix, refactor, ci, docs, test, chore, planning, ai, hotfix"
+            echo "Examples: feat/postgres-migration, fix/agent-retry-loop, ci/add-deploy-workflow"
+            exit 1
+          fi
+          echo "✅ Branch name '$BRANCH' follows convention"
+
+  # ── 3. Unit Tests: all checks as steps in one job ────────────────────────
+  unit-tests:
+    name: Unit Tests
+    needs: [branch-convention]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Restore pip cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+
+      - name: Install dependencies (CPU-only torch)
+        run: pip install -e . && pip install pytest pytest-asyncio pyright ruff
+
+      - name: Secret leak check
+        run: |
+          echo "Scanning for leaked secrets in tracked files..."
+          FOUND=0
+
+          PATTERNS=(
+            'sk-[a-zA-Z0-9]{20,}'
+            'sk-ant-[a-zA-Z0-9_-]{20,}'
+            'gsk_[a-zA-Z0-9]{20,}'
+            'ghp_[a-zA-Z0-9]{36}'
+            'github_pat_[a-zA-Z0-9_]{60,}'
+            'xoxb-[0-9]{10,}-[0-9]{10,}-[a-zA-Z0-9]{24}'
+            'AKIA[0-9A-Z]{16}'
+            'eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}'
+            'postgres://[^:]+:[^@]+@'
+            'redis://:[^@]+@'
+          )
+
+          for pattern in "${PATTERNS[@]}"; do
+            MATCHES=$(git grep -lP "$pattern" -- ':!.env.example' ':!.github/' ':!tests/' ':!*.md' ':!*.lock' 2>/dev/null || true)
+            if [[ -n "$MATCHES" ]]; then
+              echo "❌ Potential secret matching: $pattern"
+              echo "$MATCHES" | while read -r f; do echo "   → $f"; done
+              FOUND=1
+            fi
+          done
+
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "❌ .env file is tracked — must be in .gitignore"
+            FOUND=1
+          fi
+
+          if git ls-files --error-unmatch .env.local 2>/dev/null; then
+            echo "❌ .env.local is tracked — must be in .gitignore"
+            FOUND=1
+          fi
+
+          KEY_FILES=$(git ls-files '*.pem' '*.key' '*.p12' '*.pfx' 'id_rsa*' 'id_ed25519*' 2>/dev/null || true)
+          if [[ -n "$KEY_FILES" ]]; then
+            echo "❌ Private key files tracked:"
+            echo "$KEY_FILES" | while read -r f; do echo "   → $f"; done
+            FOUND=1
+          fi
+
+          if [[ "$FOUND" -eq 1 ]]; then
+            echo ""
+            echo "Remove secrets, rotate compromised keys, use GitHub Secrets instead."
+            exit 1
+          fi
+
+          echo "✅ No secrets detected"
+
+      - name: Ruff lint
+        run: ruff check src/ tests/
+
+      - name: Ruff format
+        run: ruff format --check src/ tests/
+
+      - name: Pyright type check
+        run: pyright src/
+
+      - name: Pytest
+        run: python -m pytest tests/ -x --tb=short -q
+        env:
+          GROQ_API_KEY: "fake-key-for-ci"
+          SENTINEL_DB_PATH: ":memory:"
+
+  # ── 4. Summary: collect results and post table ───────────────────────────
+  summary:
+    name: Summary
+    needs: [setup, branch-convention, unit-tests]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Evaluate results
+        id: eval
+        run: |
+          SETUP="${{ needs.setup.result }}"
+          BRANCH="${{ needs.branch-convention.result }}"
+          TESTS="${{ needs.unit-tests.result }}"
+          PASS=true
+
+          echo "setup=$SETUP" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "tests=$TESTS" >> "$GITHUB_OUTPUT"
+
+          if [[ "$SETUP" != "success" ]]; then PASS=false; fi
+          if [[ "$BRANCH" != "success" ]]; then PASS=false; fi
+          if [[ "$TESTS" != "success" ]]; then PASS=false; fi
+
+          echo "pass=$PASS" >> "$GITHUB_OUTPUT"
+
+      - name: Post summary table
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const s = {
+              setup:  '${{ steps.eval.outputs.setup }}',
+              branch: '${{ steps.eval.outputs.branch }}',
+              tests:  '${{ steps.eval.outputs.tests }}',
+            };
+            const pass = '${{ steps.eval.outputs.pass }}' === 'true';
+            const icon = (r) => r === 'success' ? '✅' : r === 'skipped' ? '⏭️' : '❌';
+            const sha = context.sha.substring(0, 7);
+            const ref = context.ref.replace('refs/heads/', '').replace('refs/pull/', 'PR #').replace('/merge', '');
+
+            let md = `## ${pass ? '✅' : '❌'} CI Summary\n\n`;
+            md += `**Ref:** \`${ref}\` | **Commit:** \`${sha}\` | **Run:** [#${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})\n\n`;
+            md += `| Job | Status |\n|-----|--------|\n`;
+            md += `| Setup | ${icon(s.setup)} ${s.setup} |\n`;
+            md += `| Branch Convention | ${icon(s.branch)} ${s.branch} |\n`;
+            md += `| Unit Tests | ${icon(s.tests)} ${s.tests} |\n\n`;
+            md += pass ? '**All checks passed — ready to merge.**\n' : '**One or more checks failed — merge blocked.**\n';
+
+            await core.summary.addRaw(md).write();
+
+      - name: Block merge on failure
+        if: steps.eval.outputs.pass != 'true'
+        run: exit 1

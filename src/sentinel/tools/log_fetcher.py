@@ -101,10 +101,7 @@ async def _fetch_logs(
         start_dt = _parse_iso(start_time)
         end_dt = _parse_iso(end_time)
     except ValueError as exc:
-        return (
-            f"ERROR: Invalid time format — {exc}. "
-            "Use ISO-8601, e.g. '2026-05-10T02:30:00Z'."
-        )
+        return f"ERROR: Invalid time format — {exc}. Use ISO-8601, e.g. '2026-05-10T02:30:00Z'."
 
     if start_dt > end_dt:
         return "ERROR: start_time must be before end_time."
@@ -155,15 +152,9 @@ def _format_logs(
 ) -> str:
     """Render filtered log entries as a compact, LLM-readable string."""
     if not entries:
-        return (
-            f"No log entries found for '{service}' "
-            f"between {start_time} and {end_time}."
-        )
+        return f"No log entries found for '{service}' between {start_time} and {end_time}."
 
-    header = (
-        f"Found {len(entries)} log entries for '{service}' "
-        f"({start_time} → {end_time}):\n"
-    )
+    header = f"Found {len(entries)} log entries for '{service}' ({start_time} → {end_time}):\n"
     lines: list[str] = []
     for entry in entries:
         ts = entry.timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")

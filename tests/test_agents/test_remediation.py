@@ -83,23 +83,17 @@ def test_remediation_plan_all_action_types() -> None:
 
 def test_remediation_plan_requires_risk_assessment() -> None:
     with pytest.raises(Exception):
-        RemediationPlan.model_validate(
-            {"action_type": "rollback", "justification": "x"}
-        )
+        RemediationPlan.model_validate({"action_type": "rollback", "justification": "x"})
 
 
 def test_remediation_plan_requires_justification() -> None:
     with pytest.raises(Exception):
-        RemediationPlan.model_validate(
-            {"action_type": "rollback", "risk_assessment": "low risk"}
-        )
+        RemediationPlan.model_validate({"action_type": "rollback", "risk_assessment": "low risk"})
 
 
 def test_remediation_plan_requires_action_type() -> None:
     with pytest.raises(Exception):
-        RemediationPlan.model_validate(
-            {"risk_assessment": "low", "justification": "something"}
-        )
+        RemediationPlan.model_validate({"risk_assessment": "low", "justification": "something"})
 
 
 def test_remediation_plan_json_roundtrip() -> None:
@@ -275,6 +269,7 @@ def test_remediation_agent_no_handoffs(remediation_agent: Agent[RemediationPlan]
 
 def test_remediation_agent_custom_approval_fn(fake_settings: Settings) -> None:
     """Agent must accept an injectable approval_fn for test/Phase 2 use."""
+
     async def mock_approval(display: str) -> tuple[str, str | None]:
         return "approve", "auto-approved in test"
 

@@ -191,8 +191,14 @@ def test_parse_json_extracts_service() -> None:
 def test_parse_json_extracts_all_keys() -> None:
     data = _parse_incident_data(SAMPLE_JSON)
     expected_keys = {
-        "service", "severity", "impact", "root_cause",
-        "timeline", "status", "action_items", "eta",
+        "service",
+        "severity",
+        "impact",
+        "root_cause",
+        "timeline",
+        "status",
+        "action_items",
+        "eta",
     }
     assert set(data.keys()) == expected_keys
 
@@ -218,10 +224,14 @@ def test_parse_missing_key_returns_na() -> None:
 
 def test_format_contains_emoji() -> None:
     data = {
-        "service": "api-gateway", "severity": "P1",
-        "impact": "errors", "root_cause": "bad deploy",
-        "timeline": "events", "status": "investigating",
-        "action_items": "rollback", "eta": "10 min",
+        "service": "api-gateway",
+        "severity": "P1",
+        "impact": "errors",
+        "root_cause": "bad deploy",
+        "timeline": "events",
+        "status": "investigating",
+        "action_items": "rollback",
+        "eta": "10 min",
     }
     result = _format_slack_message(data)
     assert ":rotating_light:" in result
@@ -229,10 +239,14 @@ def test_format_contains_emoji() -> None:
 
 def test_format_header_has_service_and_severity() -> None:
     data = {
-        "service": "payment-service", "severity": "P2",
-        "impact": "x", "root_cause": "x",
-        "timeline": "x", "status": "x",
-        "action_items": "x", "eta": "x",
+        "service": "payment-service",
+        "severity": "P2",
+        "impact": "x",
+        "root_cause": "x",
+        "timeline": "x",
+        "status": "x",
+        "action_items": "x",
+        "eta": "x",
     }
     result = _format_slack_message(data)
     assert "payment-service" in result
@@ -241,10 +255,14 @@ def test_format_header_has_service_and_severity() -> None:
 
 def test_format_all_sections_present() -> None:
     data = {
-        "service": "s", "severity": "P3",
-        "impact": "some impact", "root_cause": "some cause",
-        "timeline": "some timeline", "status": "some status",
-        "action_items": "some items", "eta": "some eta",
+        "service": "s",
+        "severity": "P3",
+        "impact": "some impact",
+        "root_cause": "some cause",
+        "timeline": "some timeline",
+        "status": "some status",
+        "action_items": "some items",
+        "eta": "some eta",
     }
     result = _format_slack_message(data)
     assert "some impact" in result
