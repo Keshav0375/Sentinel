@@ -1,10 +1,10 @@
 # sentinel-deployment — Architecture Document
 
-> **Purpose:** A near-trivial FastAPI app deployed to DigitalOcean App Platform via
-> GitHub Actions. The app itself is a dummy target — the real value is the **deployment
-> pipeline**, which ships structured logs and events to Datadog on every PR merge.
-> Successful deploys, failed builds, broken health checks, version mismatches — all
-> land as real Datadog signal that Sentinel's agents can later analyze.
+> **Purpose:** A near-trivial FastAPI app deployed to Azure App Service (F1 free tier)
+> via GitHub Actions. The app itself is a dummy target — the real value is the
+> **deployment pipeline**, which ships structured logs and events to Datadog on every
+> PR merge. Successful deploys, failed builds, broken health checks — all land as
+> real Datadog signal that Sentinel's agents can later analyze.
 
 ---
 
@@ -14,42 +14,47 @@
 PR merged to main
        │
        ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     deploy.yml (GHA workflow)                       │
-│                                                                     │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐      │
-│  │  BUILD   │───►│  PUSH    │───►│  DEPLOY  │───►│  VERIFY  │      │
-│  │ docker   │    │ to DOCR  │    │ DO App   │    │ /health  │      │
-│  │ build    │    │          │    │ Platform │    │ /version │      │
-│  └────┬─────┘    └────┬─────┘    └────┬─────┘    └────┬─────┘      │
-│       │               │               │               │            │
-│       ▼               ▼               ▼               ▼            │
-│  ┌─────────────────────────────────────────────────────────────┐    │
-│  │              Datadog Events API + Log Intake API            │    │
-│  │  Every stage reports: stage, status, version, error detail  │    │
-│  └─────────────────────────────────────────────────────────────┘    │
-│       │                                                            │
-│       ▼                                                            │
-│  ┌──────────────────┐                                              │
-│  │  FINAL SUMMARY   │  (if: always())                              │
-│  │  Datadog Event   │  title: "Deploy {succeeded|failed} PR #N"    │
-│  │  + pipeline log  │  tags: version, stage, status                │
-│  └──────────────────┘                                              │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                     deploy.yml (GHA workflow)                        │
+│                                                                      │
+│  ┌───────────┐    ┌───────────┐    ┌───────────┐                    │
+│  │   BUILD   │───►│  DEPLOY   │───►│  VERIFY   │                    │
+│  │ pip + zip │    │ az webapp │    │ /health   │                    │
+│  │ package   │    │ deploy    │    │ /version  │                    │
+│  └─────┬─────┘    └─────┬─────┘    └─────┬─────┘                    │
+│        │                │                │                           │
+│        ▼                ▼                ▼                           │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │             Datadog Events API + Log Intake API              │    │
+│  │  Every stage reports: stage, status, version, error detail   │    │
+│  └──────────────────────────────────────────────────────────────┘    │
+│        │                                                             │
+│        ▼                                                             │
+│  ┌──────────────────┐                                                │
+│  │  FINAL SUMMARY   │  (if: always())                                │
+│  │  Datadog Event   │  title: "Deploy {succeeded|failed} PR #N"      │
+│  │  + pipeline log  │  tags: version, stage, status                  │
+│  └──────────────────┘                                                │
+└──────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
                     ┌──────────────────┐
-                    │  DO App Platform  │
-                    │  (dummy-api)      │
-                    │  GET /health      │
-                    │  GET /version     │
-                    │  GET /            │
+                    │  Azure App       │
+                    │  Service (F1)    │
+                    │  dummy-api       │
+                    │  GET /health     │
+                    │  GET /version    │
+                    │  GET /           │
                     └──────────────────┘
 ```
 
 **Key insight:** The deployment pipeline (GHA) is the thing being observed, not the
 app. Every PR merge = one deploy attempt. Some succeed, some fail. Datadog accumulates
 a real history of deployment events that Sentinel can later query for incident analysis.
+
+**No Docker.** Azure App Service F1 (free tier) does not support container deploys.
+The app is deployed as a zip package using `az webapp deploy`. Azure's Oryx build
+system handles `pip install` from `requirements.txt` on the server side.
 
 ---
 
@@ -81,7 +86,6 @@ On boot, emit ONE structured log line to stdout:
 }
 ```
 
-That's it. No background workers, no queues, no log shipping from the app itself.
 The app doesn't talk to Datadog — the GHA pipeline does.
 
 ### 2.3 Tech Stack (app only)
@@ -92,7 +96,7 @@ uvicorn>=0.29.0
 pydantic-settings>=2.0.0
 ```
 
-Three dependencies. Image size: ~80MB.
+Three dependencies.
 
 ### 2.4 App Config
 
@@ -105,6 +109,18 @@ class AppConfig(BaseSettings):
     dd_env: str = "dev"
     port: int = 8000
 ```
+
+### 2.5 Azure App Service Startup
+
+App Service F1 runs Python apps via Oryx. The startup command is configured in the
+App Service settings:
+
+```
+gunicorn --bind=0.0.0.0 --timeout 600 -k uvicorn.workers.UvicornWorker app.main:app
+```
+
+Note: F1 uses shared compute. `gunicorn` with one uvicorn worker is the standard
+Azure pattern for Python + async frameworks.
 
 ---
 
@@ -124,92 +140,73 @@ a failed build is just as visible in Datadog as a successful deploy.
 - Extract from merge commit / GHA context:
     PR_NUMBER   (from commit message or github.event)
     SHORT_SHA   (github.sha[:7])
-    PR_TITLE    (from github.event.head_commit.message or API)
-    PR_BODY     (from github.event API call)
+    PR_TITLE    (from github.event.head_commit.message)
     APP_VERSION = "pr-${PR_NUMBER}-${SHORT_SHA}"
 ```
 
-#### Stage 2: Build
+#### Stage 2: Build (zip package)
 
+```bash
+# Create deployment package
+mkdir -p deploy_package
+cp -r app/ deploy_package/app/
+cp requirements.txt deploy_package/
+cd deploy_package && zip -r ../deploy.zip . && cd ..
 ```
-docker build -t registry.digitalocean.com/{REGISTRY}/dummy-api:${APP_VERSION} .
-docker tag ... :latest
-```
 
-**On success:** Continue to push.
+No Docker build — just package the app files + requirements.txt into a zip.
+Azure's Oryx build system runs `pip install -r requirements.txt` on the server.
 
-**On failure** (bad Dockerfile, broken dependency, syntax error):
+**On failure** (missing files, zip error):
 
 ```
 POST https://api.datadoghq.com/api/v1/events
 {
   "title": "Build FAILED for PR #${PR_NUMBER}: ${PR_TITLE}",
   "text": "${BUILD_ERROR_OUTPUT}",
-  "tags": [
-    "version:${APP_VERSION}",
-    "service:dummy-api",
-    "env:dev",
-    "stage:build",
-    "deploy_status:failed"
-  ],
+  "tags": ["version:${APP_VERSION}", "service:dummy-api", "env:dev",
+           "stage:build", "deploy_status:failed"],
   "alert_type": "error"
 }
 ```
 
-Workflow exits after reporting. No push, no deploy.
+#### Stage 3: Deploy
 
-#### Stage 3: Push
+```bash
+# Login to Azure
+az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+
+# Set app version env var
+az webapp config appsettings set \
+  --resource-group $AZURE_RG \
+  --name dummy-api \
+  --settings APP_VERSION="${APP_VERSION}"
+
+# Deploy zip package
+az webapp deploy \
+  --resource-group $AZURE_RG \
+  --name dummy-api \
+  --src-path deploy.zip \
+  --type zip
+```
+
+**On failure** (auth error, deploy rejected, app crash):
 
 ```
-doctl registry login
-docker push registry.digitalocean.com/{REGISTRY}/dummy-api:${APP_VERSION}
-docker push registry.digitalocean.com/{REGISTRY}/dummy-api:latest
+Datadog Event: stage:deploy, deploy_status:failed
 ```
 
-**On failure** (auth issue, registry full, network error):
+#### Stage 4: Verify
 
-```
-Datadog Event: stage:push, deploy_status:failed
-```
+```bash
+# Wait for app to restart after deploy (F1 cold starts can take 30-60s)
+sleep 30
 
-#### Stage 4: Deploy
-
-```
-# Update the APP_VERSION env var on the DO app
-doctl apps update ${DO_APP_ID} --spec <updated-app-spec-with-new-version>
-
-# Trigger deployment
-DEPLOYMENT_ID=$(doctl apps create-deployment ${DO_APP_ID} --format ID --no-header)
-
-# Poll until ACTIVE or ERROR (timeout 5 minutes, poll every 15s)
-while true; do
-  STATUS=$(doctl apps get-deployment ${DO_APP_ID} ${DEPLOYMENT_ID} --format Phase --no-header)
-  if [[ "$STATUS" == "ACTIVE" ]]; then break; fi
-  if [[ "$STATUS" == "ERROR" || "$STATUS" == "FAILED" ]]; then
-    # Report failure and exit
-    break
-  fi
-  sleep 15
+# Health check (retry up to 3 times with 10s gap)
+for i in 1 2 3; do
+  HEALTH=$(curl -sf ${DEPLOYED_APP_URL}/health) && break
+  sleep 10
 done
-```
-
-**On failure** (deploy error, timeout, crash loop):
-
-```
-Datadog Event: stage:deploy, deploy_status:failed, error detail from DO API
-```
-
-#### Stage 5: Verify
-
-```
-# Wait 10s for app to stabilize after ACTIVE status
-sleep 10
-
-# Health check
-HEALTH=$(curl -sf ${DEPLOYED_APP_URL}/health)
-if [[ $? -ne 0 ]]; then
-  # Report: health check failed
-fi
 
 # Version check
 LIVE_VERSION=$(curl -sf ${DEPLOYED_APP_URL}/version | jq -r '.version')
@@ -218,42 +215,29 @@ if [[ "$LIVE_VERSION" != "${APP_VERSION}" ]]; then
 fi
 ```
 
+**Important:** F1 tier apps sleep after idle and have cold-start latency.
+The verify step retries with a 30s initial wait + 3 attempts.
+
 **On failure** (health check fails, version mismatch):
 
 ```
 Datadog Event: stage:verify, deploy_status:failed
 ```
 
-#### Stage 6: Final Summary (if: always())
+#### Stage 5: Final Summary (if: always())
 
 Runs regardless of which stage succeeded or failed.
 
-```
-POST https://api.datadoghq.com/api/v1/events
+```json
 {
   "title": "Deployment ${STATUS} for PR #${PR_NUMBER}: ${PR_TITLE}",
-  "text": "## Deploy Summary\n\n
-    **PR:** #${PR_NUMBER}\n
-    **Version:** ${APP_VERSION}\n
-    **Failed Stage:** ${FAILED_STAGE:-none}\n
-    **Error:** ${ERROR_DETAIL:-none}\n
-    **GHA Run:** ${RUN_URL}\n\n
-    ### PR Description\n
-    ${PR_BODY}",
-  "tags": [
-    "version:${APP_VERSION}",
-    "service:dummy-api",
-    "env:dev",
-    "deploy_status:${STATUS}",
-    "failed_stage:${FAILED_STAGE:-none}"
-  ],
-  "alert_type": "${STATUS == 'succeeded' ? 'info' : 'error'}"
+  "tags": ["version:${APP_VERSION}", "service:dummy-api", "env:dev",
+           "deploy_status:${STATUS}", "failed_stage:${FAILED_STAGE:-none}"],
+  "alert_type": "info or error"
 }
 ```
 
-Additionally, ship a structured **log line** via the Datadog Log Intake API
-(POST to `https://http-intake.logs.{DD_SITE}/api/v2/logs`) with the same
-metadata — this creates a searchable log entry alongside the event:
+Also ships a structured log line via the Datadog Log Intake API:
 
 ```json
 {
@@ -262,17 +246,15 @@ metadata — this creates a searchable log entry alongside the event:
   "ddtags": "version:pr-47-a3f9c2,service:dummy-api,env:dev",
   "hostname": "gha-runner",
   "service": "dummy-api",
-  "status": "info",
   "deploy": {
     "pr_number": 47,
     "version": "pr-47-a3f9c2",
     "pr_title": "feat: add retry config",
     "status": "succeeded",
     "failed_stage": "none",
-    "duration_seconds": 142,
+    "duration_seconds": 95,
     "stages": {
       "build": "succeeded",
-      "push": "succeeded",
       "deploy": "succeeded",
       "verify": "succeeded"
     }
@@ -282,30 +264,17 @@ metadata — this creates a searchable log entry alongside the event:
 
 ### 3.2 Datadog Reporting Helper
 
-Extract the curl-to-Datadog logic into a reusable shell function used by every stage:
-
 ```bash
 send_dd_event() {
-  local title="$1"
-  local text="$2"
-  local alert_type="$3"   # info | error | warning
-  local tags="$4"          # comma-separated
-
+  local title="$1" text="$2" alert_type="$3" tags="$4"
   curl -sf -X POST "https://api.datadoghq.com/api/v1/events" \
     -H "DD-API-KEY: ${DD_API_KEY}" \
     -H "Content-Type: application/json" \
-    -d "{
-      \"title\": \"${title}\",
-      \"text\": \"${text}\",
-      \"tags\": [${tags}],
-      \"alert_type\": \"${alert_type}\",
-      \"source_type_name\": \"github\"
-    }"
+    -d "{\"title\":\"${title}\",\"text\":\"${text}\",\"tags\":[${tags}],\"alert_type\":\"${alert_type}\",\"source_type_name\":\"github\"}"
 }
 
 send_dd_log() {
   local payload="$1"
-
   curl -sf -X POST "https://http-intake.logs.${DD_SITE}/api/v2/logs" \
     -H "DD-API-KEY: ${DD_API_KEY}" \
     -H "Content-Type: application/json" \
@@ -313,7 +282,7 @@ send_dd_log() {
 }
 ```
 
-### 3.3 GHA Workflow Structure (YAML outline)
+### 3.3 GHA Workflow Structure
 
 ```yaml
 name: Deploy
@@ -329,18 +298,16 @@ env:
 
 jobs:
   deploy:
-    name: Build → Push → Deploy → Verify
+    name: Build → Deploy → Verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
       - name: Extract PR metadata
-      - name: Build Docker image
+      - name: Build zip package
       - name: Report build failure
         if: failure()
-      - name: Push to DO Container Registry
-      - name: Report push failure
-        if: failure()
-      - name: Deploy to App Platform
+      - name: Login to Azure
+      - name: Deploy to App Service
       - name: Report deploy failure
         if: failure()
       - name: Verify deployment
@@ -350,45 +317,49 @@ jobs:
         if: always()
 ```
 
-**Important:** Use `continue-on-error: false` on each stage step (the default).
-The `if: failure()` reporting steps fire when any previous step failed.
-The final summary step uses `if: always()` to capture the full picture.
+**Three stages, not four.** No push step needed — zip deploy goes directly to
+App Service. The pipeline is simpler than the original Docker-based design.
 
 ### 3.4 Required GitHub Secrets
 
 | Secret | Description |
 |--------|-------------|
-| `DIGITALOCEAN_ACCESS_TOKEN` | DO API token for doctl |
-| `DO_REGISTRY_NAME` | Container registry name (e.g. `sentinel-registry`) |
-| `DO_APP_ID` | App Platform app UUID (set after first manual deploy) |
+| `AZURE_CLIENT_ID` | Service principal app ID |
+| `AZURE_CLIENT_SECRET` | Service principal secret |
+| `AZURE_TENANT_ID` | Azure AD tenant ID |
+| `AZURE_RG` | Resource group name (e.g. `sentinel-rg`) |
 | `DD_API_KEY` | Datadog API key |
-| `DEPLOYED_APP_URL` | Public URL of the deployed app (e.g. `https://dummy-api-xxxxx.ondigitalocean.app`) |
+| `DEPLOYED_APP_URL` | Public URL (e.g. `https://dummy-api.azurewebsites.net`) |
+
+Create the service principal:
+```bash
+az ad sp create-for-rbac --name "sentinel-deploy-sp" \
+  --role contributor \
+  --scopes /subscriptions/<sub-id>/resourceGroups/<rg-name>
+```
 
 ---
 
 ## 4. Demo PR Sequence
 
 Each PR creates a real deploy attempt. Some succeed, some intentionally fail.
-This builds up a real deployment history in Datadog over time.
 
 | # | PR Title | What It Does | Expected Datadog Signal |
 |---|----------|-------------|------------------------|
-| 1 | `feat: initial dummy-api` | Working app + deploy pipeline | `deploy_status:succeeded` event + log |
-| 2 | `feat: add /info endpoint` | Trivial app change, clean deploy | Another `deploy_status:succeeded` |
-| 3 | `fix: break the Dockerfile` | Introduce a typo in Dockerfile (`RUN pip install fasttapi`) | `deploy_status:failed`, `failed_stage:build` |
-| 4 | `fix: repair Dockerfile` | Fix the typo | `deploy_status:succeeded` — recovery visible |
+| 1 | `feat: initial dummy-api` | Working app + deploy pipeline | `deploy_status:succeeded` |
+| 2 | `feat: add /info endpoint` | Trivial app change, clean deploy | `deploy_status:succeeded` |
+| 3 | `fix: break requirements` | Add `nonexistent-package==1.0.0` to requirements.txt | `deploy_status:failed`, `failed_stage:deploy` (pip install fails on server) |
+| 4 | `fix: repair requirements` | Remove the bad package | `deploy_status:succeeded` |
 | 5 | `feat: break health check` | Change `/health` to return 503 | `deploy_status:failed`, `failed_stage:verify` |
 | 6 | `fix: restore health check` | Revert to 200 | `deploy_status:succeeded` |
-| 7 | `feat: add slow startup` | Add 30s `asyncio.sleep` in lifespan (simulates timeout) | `deploy_status:failed`, `failed_stage:deploy` (DO health check timeout) |
+| 7 | `feat: add slow startup` | Add 60s `asyncio.sleep` in lifespan | `deploy_status:failed`, `failed_stage:verify` (health check timeout) |
 | 8 | `fix: remove slow startup` | Remove the sleep | `deploy_status:succeeded` |
 | 9 | `feat: wrong version env` | Hardcode `/version` to return `"wrong"` | `deploy_status:failed`, `failed_stage:verify` (version mismatch) |
 | 10 | `fix: use env var for version` | Restore `APP_VERSION` from env | `deploy_status:succeeded` |
 
-After 10 PRs, Datadog has:
-- ~5 successful deploys with full stage timing
-- ~5 failed deploys across different failure modes (build, deploy, verify)
-- Each event tagged with `version:pr-N-sha`, `failed_stage:X`
-- Searchable, filterable, correlatable — real data for Sentinel agents
+**Note:** Demo PR #3 changed from "break Dockerfile" (no Docker anymore) to
+"break requirements.txt" — this triggers a pip install failure on Azure's
+Oryx build, which is the equivalent failure mode for zip deploy.
 
 ---
 
@@ -404,79 +375,20 @@ sentinel-deployment/
 │   └── test_app.py          # Endpoint tests (health, version, root)
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml       # Build → Push → Deploy → Verify → Report
-├── Dockerfile
-├── app.yaml                 # DO App Platform spec
+│       └── deploy.yml       # Build → Deploy → Verify → Report
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
 └── README.md
 ```
 
-No traffic generator — not needed. The deploy pipeline itself generates all the
-Datadog signal we care about.
+No Dockerfile, no app.yaml, no container registry. Zip deploy keeps it simple.
 
 ---
 
-## 6. Dockerfile
+## 6. Datadog Schema
 
-```dockerfile
-FROM python:3.12-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY app/ ./app/
-
-EXPOSE 8000
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
----
-
-## 7. DO App Spec (`app.yaml`)
-
-```yaml
-name: dummy-api
-services:
-  - name: api
-    dockerfile_path: Dockerfile
-    source_dir: /
-    http_port: 8000
-    instance_count: 1
-    instance_size_slug: basic-xxs    # ~$5/month
-    health_check:
-      http_path: /health
-    envs:
-      - key: APP_VERSION
-        value: "local-dev"
-      - key: DD_SERVICE
-        value: "dummy-api"
-      - key: DD_ENV
-        value: "dev"
-```
-
----
-
-## 8. Dependencies (`requirements.txt`)
-
-```
-fastapi>=0.110.0
-uvicorn>=0.29.0
-pydantic-settings>=2.0.0
-```
-
-Three deps. No structlog, no httpx, no logging handler — the app doesn't ship logs
-to Datadog. The GHA pipeline does that via `curl`.
-
----
-
-## 9. Datadog Schema
-
-### 9.1 Events (timeline markers)
+### 6.1 Events (timeline markers)
 
 Every deploy produces at least one Datadog Event. Failed deploys produce two
 (stage failure + final summary).
@@ -491,33 +403,11 @@ Every deploy produces at least one Datadog Event. Failed deploys produce two
 | `deploy_status` | `succeeded` or `failed` | `deploy_status:failed` |
 | `failed_stage` | Which stage failed | `failed_stage:build` / `failed_stage:none` |
 
-### 9.2 Logs (searchable records)
+### 6.2 Logs (searchable records)
 
-Each deploy also ships one structured log line via the HTTP Log Intake API.
+Each deploy ships one structured log line via the HTTP Log Intake API.
 
-**Log fields:**
-
-```json
-{
-  "message": "deploy.completed",
-  "ddsource": "github-actions",
-  "service": "dummy-api",
-  "hostname": "gha-runner",
-  "ddtags": "version:pr-47-a3f9c2,service:dummy-api,env:dev,deploy_status:succeeded,failed_stage:none",
-  "deploy.pr_number": 47,
-  "deploy.version": "pr-47-a3f9c2",
-  "deploy.pr_title": "feat: add /info endpoint",
-  "deploy.status": "succeeded",
-  "deploy.failed_stage": "none",
-  "deploy.duration_seconds": 142,
-  "deploy.stages.build": "succeeded",
-  "deploy.stages.push": "succeeded",
-  "deploy.stages.deploy": "succeeded",
-  "deploy.stages.verify": "succeeded"
-}
-```
-
-This lets you query in Datadog Log Explorer:
+Queryable in Datadog Log Explorer:
 - `deploy_status:failed` — all failed deploys
 - `failed_stage:build` — all build failures
 - `@deploy.pr_number:47` — everything about PR #47's deploy
@@ -525,62 +415,60 @@ This lets you query in Datadog Log Explorer:
 
 ---
 
-## 10. What This Enables for Sentinel
+## 7. What This Enables for Sentinel
 
 After 10+ PRs, Datadog contains:
 
-1. **Deploy events on a timeline** — visible in Datadog Events Explorer, each tagged with PR number + version
-2. **Deploy logs** — searchable by status, stage, PR number, version
-3. **Failure patterns** — build failures, health check failures, version mismatches, deploy timeouts
-4. **Before/after correlation** — events mark exactly when each deploy happened, so Sentinel agents can correlate "failure started after PR #5 deployed"
+1. **Deploy events on a timeline** — visible in Events Explorer, tagged with PR + version
+2. **Deploy logs** — searchable by status, stage, PR number
+3. **Failure patterns** — build failures (bad deps), health check failures, version mismatches
+4. **Before/after correlation** — events mark exactly when each deploy happened
 
 When the full Sentinel pipeline is connected:
 - Datadog monitor triggers on `deploy_status:failed` → webhook → Event Grid → Sentinel GHA
 - Sentinel agents fetch recent deploy logs via Datadog API
 - Agents correlate the failed deploy with the PR that caused it
-- Sentinel opens a revert PR on sentinel-deployment
+- Sentinel drafts a revert PR on sentinel-deployment
 
 ---
 
-## 11. Prerequisites & Setup Checklist
+## 8. Prerequisites & Setup Checklist
 
 ### Datadog
 - [ ] Activate Student Pack Datadog offer (Pro, 10 servers, 2 years)
 - [ ] Note Datadog site (US1: `datadoghq.com` or US5: `us5.datadoghq.com`)
 - [ ] Generate DD_API_KEY from Organization Settings → API Keys
-- [ ] Test Events API: `curl -X POST "https://api.datadoghq.com/api/v1/events" -H "DD-API-KEY: <key>" -H "Content-Type: application/json" -d '{"title":"test","text":"hello"}'`
+- [ ] Test Events API: `curl -X POST "https://api.datadoghq.com/api/v1/events" -H "DD-API-KEY: <key>" -d '{"title":"test","text":"hello"}'`
 
-### DigitalOcean
-- [ ] Activate $200 student credit
-- [ ] Install doctl CLI: `winget install DigitalOcean.Doctl`
-- [ ] `doctl auth init` with API token
-- [ ] Create Container Registry: `doctl registry create sentinel-registry --subscription-tier starter`
-- [ ] First deploy is manual (to get DO_APP_ID): `doctl apps create --spec app.yaml`
-- [ ] Note the app URL and app ID for GHA secrets
+### Azure
+- [ ] Create resource group: `az group create --name sentinel-rg --location eastus`
+- [ ] Create App Service plan (F1): `az appservice plan create --name sentinel-plan --resource-group sentinel-rg --sku F1 --is-linux`
+- [ ] Create web app: `az webapp create --resource-group sentinel-rg --plan sentinel-plan --name dummy-api --runtime "PYTHON:3.12"`
+- [ ] Configure startup command: `az webapp config set --resource-group sentinel-rg --name dummy-api --startup-file "gunicorn --bind=0.0.0.0 --timeout 600 -k uvicorn.workers.UvicornWorker app.main:app"`
+- [ ] Create service principal: `az ad sp create-for-rbac --name sentinel-deploy-sp --role contributor --scopes /subscriptions/<sub-id>/resourceGroups/sentinel-rg`
+- [ ] Note the app URL: `https://dummy-api.azurewebsites.net`
 
 ### GitHub (sentinel-deployment repo)
 - [ ] Create repo manually
-- [ ] Add secrets: `DIGITALOCEAN_ACCESS_TOKEN`, `DO_REGISTRY_NAME`, `DO_APP_ID`, `DD_API_KEY`, `DEPLOYED_APP_URL`
+- [ ] Add secrets: `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_RG`, `DD_API_KEY`, `DEPLOYED_APP_URL`
 - [ ] Branch protection on main: require PR, require `Deploy` workflow to pass
 
 ### Local Development
-- [ ] Docker Desktop installed (for local `docker build` testing)
 - [ ] Python 3.12 available
-- [ ] `uvicorn app.main:app --reload` works locally
+- [ ] `pip install -r requirements.txt && uvicorn app.main:app --reload` works locally
 
 ---
 
-## 12. Cost Breakdown
+## 9. Cost Breakdown
 
 | Resource | Monthly Cost | Covered By |
 |----------|-------------|------------|
-| DO App Platform (Basic XXS) | ~$5 | $200 DO credit (40 months) |
-| DO Container Registry (Starter) | Free | — |
+| Azure App Service (F1) | Free | Always-free tier |
 | Datadog Pro (events + logs) | Free | Student Pack (2 years) |
 | GHA minutes (deploy runs) | Free | GitHub Pro (3,000 min/month) |
-| **Total** | **~$5/month** | **Fully covered by credits** |
+| **Total** | **$0/month** | **No credits consumed** |
 
 GHA usage estimate:
-- `deploy.yml`: ~3 min per run (build + push + deploy polling + verify)
-- ~20 merges/month = 60 min
+- `deploy.yml`: ~2 min per run (zip build + deploy + verify)
+- ~20 merges/month = 40 min
 - Well within 3,000 min/month quota

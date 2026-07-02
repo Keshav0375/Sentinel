@@ -17,7 +17,7 @@ The app itself is a dummy target. The real product is the **deployment pipeline*
 | Deploy target | Azure App Service F1 | Always-free, no payment method needed |
 | App design | Near-trivial (3 endpoints) | Pipeline is the product, not the app |
 | Datadog integration | Dual: native Azure + GHA curl | Auto metrics + custom deploy events |
-| Container vs zip | TBD | Open decision — Docker vs native Python deploy |
+| Deploy method | Zip deploy | F1 tier doesn't support containers; Oryx handles pip install |
 
 ## Monitoring
 
@@ -33,4 +33,4 @@ The app itself is a dummy target. The real product is the **deployment pipeline*
 
 ## Status
 
-Architecture doc written (needs update: DigitalOcean → Azure App Service). Waiting on Datadog + Azure setup before building.
+Architecture doc finalized (Azure App Service F1 + zip deploy). Waiting on Datadog + Azure setup before building.

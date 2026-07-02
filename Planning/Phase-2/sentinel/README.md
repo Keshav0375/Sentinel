@@ -1,43 +1,83 @@
 # sentinel (this repo)
 
-Full knowledge base for the Sentinel system — the autonomous DevOps incident response agent.
-
-This is the **main repo** (the one you're reading this from). Phase 2 transforms it from an MVP portfolio demo into a production-grade system with real infrastructure, real deployments, and real incident data flowing through it.
+The sentinel repo IS the backend. It contains the multi-agent incident response pipeline, GHA orchestration workflows, CI/CD pipelines, and all planning docs.
 
 ## What Lives Here
 
-- GHA workflows that **are** the orchestration layer (event-driven via `repository_dispatch`)
-- The intelligent backend (agent orchestration, memory, eval) — deployed separately but defined here
-- All planning docs, architecture decisions, and reference material
+- `src/sentinel/` — Backend code: agents, tools, memory, API, eval
+- `.github/workflows/` — CI (quality gate), CD (build+push image), incident response pipeline
+- `tests/` — Unit + integration tests
+- `alembic/` — Database migrations (replaces Phase 1 `data/` directory)
+- `Planning/` — Architecture docs, planning state
 
 ## Key Decisions
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| CI pipeline | 4 linear jobs (Setup → Branch → Tests → Summary) | Clean GHA UI, blocks merge on failure |
-| CI trigger | PR to main only | No wasted runs on feature branch pushes |
-| LLM providers | Groq primary, Gemini backup | Free tier, OpenAI-compatible |
-| Notification channel | Microsoft Teams | Incoming webhook, no Slack |
+| Hosting | **Ephemeral** — Docker container inside GHA runner | No always-on cost. Start → validate → use → teardown per incident. |
+| Database | Azure PostgreSQL B1MS + pgvector | Free 12 months, always-on. Vector similarity for memory. |
+| LLM providers | **Anthropic (default) + OpenAI (fallback)** | Top models only. Sonnet for reasoning, Haiku for classification. Switch via env flag. |
+| Agent patterns | Reflexion + Plan-Execute + Reverification | Self-correcting pipeline, not blind linear chain |
+| HITL gate | Revert PR on sentinel-deployment | GitHub PR review IS the approval — no custom approval API |
+| Decision branching | confidence ≥ 0.7 → rollback PR, else → escalate to human | Pipeline only acts when confident; otherwise dumps context to Teams |
+| Backend ↔ GHA split | Backend reasons, GHA executes | Backend returns decision. GHA creates PRs, sends notifications, reports to Datadog. |
+| Correlation | incident_id ↔ deploy_id ↔ PR ↔ Datadog ↔ LangFuse | Full end-to-end traceability |
+| CI pipeline | ci_backend.yml + ci_incident.yml | Separate quality and pipeline concerns |
+| CD pipeline | cd_backend.yml (Docker build → push to ACR) | Image pulled on-demand by incident workflow |
+| Incident pipeline | incident_response.yml (repository_dispatch) | secrets → start backend → parallel fetch → agent pipeline → branch → notify → teardown → summary |
+| Notification | Microsoft Teams (from GHA jobs) | Incoming webhook, not backend |
+| PR content agent | `POST /generate/pr-content` | LLM-generates realistic PR titles + descriptions for demo PRs |
+| Tracing | LangFuse cloud (tracing + prompts + scoring) | Free 50K observations/month |
 | Event routing | Event Grid → Azure Functions → repository_dispatch | All Azure always-free tier |
+| Terraform | 6 modules in sentinel-infra (no AKS) | Reproducible, reviewable, provider-agnostic |
 
-## Phase 2 Scope
+## Database Tables
 
-- [ ] Event-driven GHA orchestration (Azure Event Grid → Azure Function → `repository_dispatch`)
-- [ ] Multi-agent pipeline: Triage → Analysis → Resolution → Judge
-- [ ] Episodic + semantic memory backed by PostgreSQL
-- [ ] HITL safety gates for destructive actions
-- [ ] LangFuse integration for LLM tracing
-- [ ] Trajectory-level eval suite
-- [ ] Microsoft Teams notifications
+| Table | Purpose |
+|-------|---------|
+| `incidents` | Episodic memory — past incidents with embeddings |
+| `services` | Semantic memory — service ownership, deps, runbooks |
+| `revert_prs` | HITL audit trail — revert PR lifecycle (created → merged/closed) |
+| `deployments` | Deploy ↔ incident ↔ PR ↔ Datadog correlation |
+
+## Pipeline Decision Flow
+
+```
+Analysis confidence ≥ 0.7 AND root cause = specific deploy?
+├── YES → Resolution agent prepares rollback spec
+│         → GHA: generate PR content → create revert PR → notify Teams
+│         → PR = HITL gate (reviewer merges or closes)
+└── NO  → Escalate: Teams notification with full context, no PR created
+Both paths → Judge scores trajectory → store to memory → teardown backend
+```
+
+## Incident Workflow Lifecycle
+
+```
+fetch-secrets → start-backend (docker run + /health + /ready)
+→ parallel fetch (service info, PR details, Datadog logs)
+→ run-agent-pipeline → branch (rollback PR / escalate)
+→ notify Teams → teardown-backend (docker stop) → summary
+```
+
+## Workflows
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| `ci.yml` | PR to main | Existing Phase 1 CI (lint, format, typecheck, pytest) |
+| `ci_backend.yml` | PR to main (src/, tests/) | Unit tests + integration tests (with pgvector) + Docker build verify |
+| `cd_backend.yml` | Push to main (src/) | Build → Push to ACR (no deploy — pulled on demand) |
+| `ci_incident.yml` | PR to main (agents/, tools/) | Fire scenario → assert pipeline correctness |
+| `incident_response.yml` | repository_dispatch | Real pipeline with full lifecycle |
 
 ## Key Docs
 
 | Doc | Purpose |
 |-----|---------|
-| `ARCHITECTURE.md` (root) | Phase 1 architecture (current) |
-| `Planning/Phase-2/sentinel/` | Phase 2 planning (this folder) |
-| `Planning/Phase-2/reference-documentation/links.md` | External service docs and findings |
+| `Planning/Phase-2/sentinel/ARCHITECTURE.md` | Phase 2 architecture (ephemeral backend, PostgreSQL, agent pipeline, agentic loops, CI/CD, LangFuse) |
+| `ARCHITECTURE.md` (root) | Phase 1 architecture (current codebase) |
+| `TODO.md` (root) | Phase 1 task tracker |
 
 ## Status
 
-Planning in progress. Architecture docs being written.
+Architecture finalized. All design questions resolved. Waiting on sentinel-infra to provision Azure resources before building.
