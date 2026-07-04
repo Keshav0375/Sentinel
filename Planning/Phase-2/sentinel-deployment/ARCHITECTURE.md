@@ -15,7 +15,7 @@ PR merged to main
        │
        ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│                     deploy.yml (GHA workflow)                        │
+│                     ci_app_deployment.yml (GHA workflow)                        │
 │                                                                      │
 │  ┌───────────┐    ┌───────────┐    ┌───────────┐                    │
 │  │   BUILD   │───►│  DEPLOY   │───►│  VERIFY   │                    │
@@ -126,7 +126,7 @@ Azure pattern for Python + async frameworks.
 
 ## 3. Deployment Pipeline — The Core of the Project
 
-### 3.1 `deploy.yml` — Triggered on PR merge to main
+### 3.1 `ci_app_deployment.yml` — Triggered on PR merge to main
 
 **Trigger:** `push` to `main` (fires after squash-merge from any PR)
 
@@ -285,7 +285,7 @@ send_dd_log() {
 ### 3.3 GHA Workflow Structure
 
 ```yaml
-name: Deploy
+name: "[deployment] deploy — build and ship"
 
 on:
   push:
@@ -297,8 +297,8 @@ env:
   DD_ENV: dev
 
 jobs:
-  deploy:
-    name: Build → Deploy → Verify
+  build-deploy-verify:
+    name: Build Deploy and Verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -322,21 +322,17 @@ App Service. The pipeline is simpler than the original Docker-based design.
 
 ### 3.4 Required GitHub Secrets
 
-| Secret | Description |
-|--------|-------------|
-| `AZURE_CLIENT_ID` | Service principal app ID |
-| `AZURE_CLIENT_SECRET` | Service principal secret |
-| `AZURE_TENANT_ID` | Azure AD tenant ID |
-| `AZURE_RG` | Resource group name (e.g. `sentinel-rg`) |
-| `DD_API_KEY` | Datadog API key |
-| `DEPLOYED_APP_URL` | Public URL (e.g. `https://dummy-api.azurewebsites.net`) |
+| Secret | Description | How Set |
+|--------|-------------|---------|
+| `AZURE_CLIENT_ID` | OIDC app client ID | Auto-pushed by sentinel-infra Terraform |
+| `AZURE_TENANT_ID` | Azure AD tenant ID | Auto-pushed by sentinel-infra Terraform |
+| `AZURE_SUBSCRIPTION_ID` | Azure subscription ID | Auto-pushed by sentinel-infra Terraform |
+| `DD_API_KEY` | Datadog API key | Manual |
+| `DEPLOYED_APP_URL` | Public URL (e.g. `https://dummy-api.azurewebsites.net`) | Manual |
 
-Create the service principal:
-```bash
-az ad sp create-for-rbac --name "sentinel-deploy-sp" \
-  --role contributor \
-  --scopes /subscriptions/<sub-id>/resourceGroups/<rg-name>
-```
+**No `AZURE_CLIENT_SECRET`** — uses OIDC workload identity federation.
+OIDC federated credentials are provisioned by sentinel-infra Terraform (see sentinel-infra ARCHITECTURE.md §4).
+GitHub secrets for AZURE_CLIENT_ID/TENANT_ID/SUBSCRIPTION_ID are auto-pushed by Terraform's `github_actions_secret` resource.
 
 ---
 
@@ -375,7 +371,7 @@ sentinel-deployment/
 │   └── test_app.py          # Endpoint tests (health, version, root)
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml       # Build → Deploy → Verify → Report
+│       └── ci_app_deployment.yml  # Build → Deploy → Verify → Report
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
@@ -469,6 +465,6 @@ When the full Sentinel pipeline is connected:
 | **Total** | **$0/month** | **No credits consumed** |
 
 GHA usage estimate:
-- `deploy.yml`: ~2 min per run (zip build + deploy + verify)
+- `ci_app_deployment.yml`: ~2 min per run (zip build + deploy + verify)
 - ~20 merges/month = 40 min
 - Well within 3,000 min/month quota

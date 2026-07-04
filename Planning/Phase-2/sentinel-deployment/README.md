@@ -7,7 +7,7 @@ The app itself is a dummy target. The real product is the **deployment pipeline*
 ## What This Repo Will Contain
 
 - Minimal FastAPI app: `GET /`, `GET /health`, `GET /version`
-- `deploy.yml` — GHA workflow: Build → Deploy → Verify → Report to Datadog
+- `ci_app_deployment.yml` — GHA workflow: Build → Deploy → Verify → Report to Datadog
 - Demo PRs that create intentional failures across different stages
 
 ## Key Decisions

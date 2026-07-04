@@ -1,10 +1,10 @@
 # Sentinel Phase 2 — Planning State
 
-> Last updated: 2026-07-02
+> Last updated: 2026-07-04
 
 ## Current Phase
 
-Architecture planning complete for all three repos. All 9 deep architecture questions resolved. Ready for implementation once Azure resources are bootstrapped.
+Architecture planning complete for all three repos. All design questions resolved. sentinel-infra architecture expanded with OIDC, cross-repo secrets, Key Vault policies, PostgreSQL firewall, and standardized workflow naming. Ready for implementation once Azure resources are bootstrapped.
 
 ## Repo Status
 
@@ -29,6 +29,41 @@ None — all architectural decisions resolved. Implementation can begin once blo
 - [ ] OpenAI API key — who: Keshav — impact: blocks fallback LLM calls
 
 ## Decision Log
+
+### 2026-07-04: Added ci_validation.yml — fast PR gate, split from ci_backend_validation
+**Context:** `ci_backend_validation.yml` runs the full pipeline including ACR push, ACR cleanup, and smoke tests. This is heavy for every PR open/sync (~8-12 min). Developers need fast feedback on PRs.
+**Decision:** New `ci_validation.yml` runs on PR open/sync: lint (ruff) → typecheck (pyright) → Docker build (local, no push) → run backend from local image → validate /health + /ready → unit tests → integration tests → teardown. No ACR interaction, no smoke test. `ci_backend_validation.yml` moves to `push` trigger (runs on merge to main only) and remains the authoritative validation that pushes to ACR and runs the smoke test.
+**Impact:** 7 total workflows across repos (was 6). PR feedback: ~3-5 min. Post-merge full validation: ~8-12 min. Two-stage pipeline: fast gate on PR, full validation on merge.
+
+### 2026-07-04: Merged ci_backend + cd_backend → ci_backend_validation
+**Context:** Had two separate workflows: `ci_backend.yml` (quality gate on PR) and `cd_backend.yml` (build+push on merge). But tests should run against the real Docker image, not a local install. And pushing should happen as part of validation, not as a separate post-merge step.
+**Decision:** Single `ci_backend_validation.yml` on every PR: lint → typecheck → build + push image to ACR → run backend from the real image → validate /health + /ready → run unit tests → run integration tests → smoke test → teardown. ACR cleanup keeps only the 3 most recent image tags. No separate CD workflow needed.
+**Impact:** `cd_backend.yml` removed. Tests now validate the exact artifact that `ci_incident_response.yml` pulls during incidents.
+
+### 2026-07-04: Workflow naming convention — standardized across all repos
+**Context:** Workflow file names and display names were inconsistent across sentinel, sentinel-infra, and sentinel-deployment (e.g., `deploy.yml`, `plan.yml`, `incident_response.yml`).
+**Decision:** Standard `ci_` prefix convention. Workflow `name:` follows `[repo] scope — description`. Job IDs: `kebab-case` verb-noun. Applied across all three repos.
+**Impact:** All workflows: `ci_validation.yml` (fast PR gate), `ci_backend_validation.yml` (full post-merge validation), `ci_incident_response.yml` (real pipeline), `ci_app_deployment.yml` (sentinel-deployment), `ci_infra_dry.yml` (TF validate+plan), `ci_infra.yml` (TF apply), `ci_runners.yml` (runner images).
+
+### 2026-07-04: OIDC workload identity federation — no stored Azure secrets
+**Context:** Original plan stored `AZURE_CLIENT_SECRET` as GitHub repo secret. Secrets expire, must be rotated.
+**Decision:** OIDC federation — GitHub proves identity via JWT, Azure trusts it. One Azure AD app with federated credentials for all three repos (sentinel-infra main+PR, sentinel main+PR, sentinel-deployment main). Terraform provisions the federated credentials. Only 3 non-secret values needed per repo: CLIENT_ID, TENANT_ID, SUBSCRIPTION_ID.
+**Impact:** Added OIDC section (§4) to sentinel-infra ARCHITECTURE.md with full HCL and bootstrap sequence. Removed AZURE_CLIENT_SECRET from all repos.
+
+### 2026-07-04: Cross-repo secret distribution — Terraform pushes GitHub secrets
+**Context:** After `terraform apply`, sentinel and sentinel-deployment repos need ACR creds and OIDC IDs as GitHub secrets. Previously manual copy-paste.
+**Decision:** Terraform uses `github_actions_secret` resource (GitHub provider) to automatically push ACR_LOGIN_SERVER, ACR_USERNAME, ACR_PASSWORD, AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID to sentinel repo, and OIDC IDs to sentinel-deployment repo. Requires GITHUB_PAT with `repo` scope as sentinel-infra secret.
+**Impact:** Added §5 to sentinel-infra ARCHITECTURE.md. GITHUB_PAT added to sentinel-infra repo secrets table.
+
+### 2026-07-04: Key Vault dual access — Terraform writes, GHA reads
+**Context:** Key Vault had one access policy (Terraform SP). But incident_response.yml needs to read secrets at runtime.
+**Decision:** Two roles: Terraform SP gets `Key Vault Secrets Officer` (create/update secrets). GHA OIDC SP gets `Key Vault Secrets User` (read-only). Switched from access policies to RBAC authorization (`enable_rbac_authorization = true`).
+**Impact:** Updated keyvault module (§3.3) with dual role assignments. Added full secret flow diagram showing Key Vault → GHA → Docker env vars.
+
+### 2026-07-04: PostgreSQL firewall — allow all for dev
+**Context:** PostgreSQL firewall only allowed Azure services (`0.0.0.0/0.0.0.0`). But ephemeral backend runs on GitHub-hosted runners (not Azure services). GitHub runner IPs rotate across a wide, unpredictable CIDR range.
+**Decision:** Allow all (`0.0.0.0` to `255.255.255.255`) for dev. DB still protected by username + password. Production would use Private Endpoint + VNet.
+**Impact:** Updated postgresql module (§3.2) with explicit rationale and comparison table of alternatives.
 
 ### 2026-07-02: Ephemeral backend — run inside GHA, not AKS
 **Context:** Backend was planned for 24/7 AKS hosting. But the pipeline runs a few times per day during demos. Paying for always-on compute for a 5-minute job is waste.

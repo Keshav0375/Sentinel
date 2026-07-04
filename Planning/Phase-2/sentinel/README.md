@@ -22,9 +22,9 @@ The sentinel repo IS the backend. It contains the multi-agent incident response 
 | Decision branching | confidence ≥ 0.7 → rollback PR, else → escalate to human | Pipeline only acts when confident; otherwise dumps context to Teams |
 | Backend ↔ GHA split | Backend reasons, GHA executes | Backend returns decision. GHA creates PRs, sends notifications, reports to Datadog. |
 | Correlation | incident_id ↔ deploy_id ↔ PR ↔ Datadog ↔ LangFuse | Full end-to-end traceability |
-| CI pipeline | ci_backend.yml + ci_incident.yml | Separate quality and pipeline concerns |
-| CD pipeline | cd_backend.yml (Docker build → push to ACR) | Image pulled on-demand by incident workflow |
-| Incident pipeline | incident_response.yml (repository_dispatch) | secrets → start backend → parallel fetch → agent pipeline → branch → notify → teardown → summary |
+| CI pipeline (PR) | ci_validation.yml | Fast gate — lint, typecheck, Docker build, run backend, health check, unit + integration tests |
+| CI pipeline (merge) | ci_backend_validation.yml | Full validation — build+push to ACR, run from real image, all tests, smoke test, ACR cleanup |
+| Incident pipeline | ci_incident_response.yml (repository_dispatch) | secrets → start backend → parallel fetch → agent pipeline → branch → notify → teardown → summary |
 | Notification | Microsoft Teams (from GHA jobs) | Incoming webhook, not backend |
 | PR content agent | `POST /generate/pr-content` | LLM-generates realistic PR titles + descriptions for demo PRs |
 | Tracing | LangFuse cloud (tracing + prompts + scoring) | Free 50K observations/month |
@@ -62,13 +62,12 @@ fetch-secrets → start-backend (docker run + /health + /ready)
 
 ## Workflows
 
-| Workflow | Trigger | Purpose |
-|----------|---------|---------|
-| `ci.yml` | PR to main | Existing Phase 1 CI (lint, format, typecheck, pytest) |
-| `ci_backend.yml` | PR to main (src/, tests/) | Unit tests + integration tests (with pgvector) + Docker build verify |
-| `cd_backend.yml` | Push to main (src/) | Build → Push to ACR (no deploy — pulled on demand) |
-| `ci_incident.yml` | PR to main (agents/, tools/) | Fire scenario → assert pipeline correctness |
-| `incident_response.yml` | repository_dispatch | Real pipeline with full lifecycle |
+| File | Name | Trigger | Purpose |
+|------|------|---------|---------|
+| `ci.yml` | Phase 1 CI | PR to main | Existing lint, format, typecheck, pytest |
+| `ci_validation.yml` | `[sentinel] PR — validation` | PR to main (src/, tests/) | Fast gate — lint, typecheck, Docker build (local), run backend, health check, unit + integration tests |
+| `ci_backend_validation.yml` | `[sentinel] backend — validation` | Push to main (src/, tests/) | Full post-merge — lint, typecheck, build+push image to ACR, run backend from real image, all tests, smoke test, ACR cleanup |
+| `ci_incident_response.yml` | `[sentinel] incident response — full pipeline` | repository_dispatch | Real pipeline with full lifecycle |
 
 ## Key Docs
 

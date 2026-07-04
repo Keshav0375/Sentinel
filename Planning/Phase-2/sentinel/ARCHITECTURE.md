@@ -127,7 +127,7 @@ Every boundary carries a correlation ID so the full arc is traceable from Datado
    │       ├── GHA job: generate-pr-content → calls POST /generate/pr-content on backend
    │       ├── GHA job: create-rollback-pr → gh pr create on sentinel-deployment
    │       ├── GHA job: notify-rollback → Teams: "Revert PR #N created — review and merge"
-   │       ├── PR = HITL gate. Reviewer merges → deploy.yml fires revert. Closes → no action.
+   │       ├── PR = HITL gate. Reviewer merges → ci_app_deployment.yml fires revert. Closes → no action.
    │       └── Judge scores the trajectory
    │
    └── IF confidence < 0.7 OR root cause is ambiguous/infra/third-party:
@@ -224,7 +224,7 @@ There is no `/approvals` endpoint. The revert PR on sentinel-deployment IS the H
 1. Resolution agent calls `draft_rollback_pr` → creates a real PR on sentinel-deployment via GitHub API
 2. The PR description includes: incident ID, root cause, evidence summary, confidence score
 3. Reviewer sees the PR, reviews the diff, approves/merges or closes
-4. sentinel-deployment's `deploy.yml` fires on merge → deploys the revert
+4. sentinel-deployment's `ci_app_deployment.yml` fires on merge → deploys the revert
 5. Sentinel backend watches for the PR merge event (via webhook or polling) → marks incident as `resolved`
 
 If the reviewer closes the PR without merging → incident status moves to `escalated`, Teams notification sent.
@@ -796,7 +796,7 @@ No Kubernetes. No AKS. The backend runs as a Docker container inside the GHA run
 ### 8.1 Start → Validate → Use → Teardown
 
 ```yaml
-# Inside incident_response.yml — the start-backend job:
+# Inside ci_incident_response.yml — the start-backend job:
 
 - name: Login to ACR
   run: az acr login --name ${{ secrets.ACR_NAME }}
@@ -862,56 +862,173 @@ No Kubernetes. No AKS. The backend runs as a Docker container inside the GHA run
 
 All workflows live in `.github/workflows/` in this repo.
 
-### 9.1 `ci_backend.yml` — Quality Gate on PR
+### Workflow Naming Convention (All Repos)
 
-**Trigger:** `pull_request` to `main` (paths: `src/**`, `tests/**`, `pyproject.toml`)
+All workflow files use the `ci_` prefix for consistency. Naming pattern: `ci_<descriptive_scope>.yml`.
+
+| File | Repo | Purpose |
+|------|------|---------|
+| `ci_validation.yml` | sentinel | Fast PR gate — lint, typecheck, Docker build (no push), run backend, health check, unit + integration tests |
+| `ci_backend_validation.yml` | sentinel | Full validation on merge — lint, typecheck, build + push image to ACR, run backend from real image, health check, all tests, smoke test, ACR cleanup |
+| `ci_incident_response.yml` | sentinel | Real incident pipeline (repository_dispatch) |
+| `ci_app_deployment.yml` | sentinel-deployment | Build → Deploy → Verify → Report to Datadog |
+| `ci_infra_dry.yml` | sentinel-infra | Terraform validate + plan (dry run, never applies) |
+| `ci_infra.yml` | sentinel-infra | Terraform apply (merge to main only) |
+| `ci_runners.yml` | sentinel-infra | Build + push CI runner images to ACR |
+
+**Workflow `name:` field:** `[repo] scope — description`
+- Examples: `[sentinel] backend — quality gate`, `[infra] terraform — apply`, `[deployment] deploy — build and ship`
+
+**Job IDs:** `kebab-case` verb-noun (e.g., `run-lint`, `build-image`, `fetch-secrets`)
+
+**Job `name:` field:** Title case, brief (e.g., `Run Lint`, `Build Image`, `Fetch Secrets`)
+
+This convention applies across all three repos: sentinel, sentinel-infra, sentinel-deployment.
+
+### 9.1 `ci_validation.yml` — Fast PR Gate
+
+**Name:** `[sentinel] PR — validation`
+
+**Trigger:** `pull_request` to `main` (paths: `src/**`, `tests/**`, `pyproject.toml`, `Dockerfile`)
+
+Lightweight check on every PR open/sync. Catches code quality issues and verifies the Docker image builds and the backend starts. Does NOT push to ACR — that happens only on merge via `ci_backend_validation.yml`. Fast feedback loop for developers.
 
 ```
 Jobs:
-  quality:
-    Steps: checkout → python 3.12 → install → ruff lint → ruff format → pyright → pytest (unit)
+  run-lint:
+    name: Run Lint
+    Steps: checkout → python 3.12 → install → ruff check src/ tests/ → ruff format --check src/ tests/
 
-  integration:
-    Needs: quality
-    Services: pgvector/pgvector:pg16
-    Steps: checkout → install → pytest (integration: test_agents/, test_api/)
+  run-typecheck:
+    name: Run Typecheck
+    Steps: checkout → install → pyright src/
 
-  docker-build:
-    Needs: quality
-    Steps: checkout → docker build (verify, don't push)
-```
-
-### 9.2 `cd_backend.yml` — Build and Push Image on Merge
-
-**Trigger:** `push` to `main` (paths: `src/**`, `Dockerfile`, `requirements*.txt`)
-
-No deployment step — the image is pulled on-demand by `incident_response.yml`.
-
-```
-Jobs:
-  build-push:
+  build-image:
+    name: Build Docker Image
+    Needs: [run-lint, run-typecheck]
     Steps:
       - Checkout
-      - Login to ACR
-      - Docker build + push (tagged sha-{SHORT_SHA} + latest)
-      - Report build result to Datadog (if: always())
+      - Docker build --tag sentinel-backend:test (local only, no push)
+
+  run-backend:
+    name: Run Backend
+    Needs: build-image
+    Steps:
+      - docker run -d --name sentinel-backend -p 8000:8000 sentinel-backend:test with test env vars
+      - Validate /health (poll with retry, max 30s)
+      - Validate /ready
+
+  run-unit-tests:
+    name: Run Unit Tests
+    Needs: run-backend
+    Steps:
+      - Checkout → install
+      - pytest tests/test_tools/ tests/test_models/ -x
+
+  run-integration-tests:
+    name: Run Integration Tests
+    Needs: run-backend
+    Services: pgvector/pgvector:pg16
+    Steps:
+      - Checkout → install
+      - pytest tests/test_agents/ tests/test_api/ -x
+
+  teardown:
+    name: Teardown
+    Needs: [run-unit-tests, run-integration-tests]
+    if: always()
+    Steps:
+      - docker stop sentinel-backend && docker rm sentinel-backend
 ```
 
-### 9.3 `ci_incident.yml` — Agent Pipeline Smoke Test
+**Key design:** No ACR interaction. The image is built locally with `docker build`, tagged `sentinel-backend:test`, and run in-place on the runner. This avoids OIDC login, ACR push overhead, and ACR cleanup — keeping the PR workflow fast (~3-5 min vs ~8-12 min for full validation). No smoke test either — that runs only on merge when the real ACR image is validated.
 
-**Trigger:** `pull_request` to `main` (paths: `src/sentinel/agents/**`, `src/sentinel/tools/**`)
+### 9.2 `ci_backend_validation.yml` — Full Backend Validation (Post-Merge)
+
+**Name:** `[sentinel] backend — validation`
+
+**Trigger:** `push` to `main` (paths: `src/**`, `tests/**`, `pyproject.toml`, `Dockerfile`)
+
+Runs after a PR merges to main. Builds and pushes the Docker image to ACR, then validates the real ACR image end-to-end including smoke tests. This is the authoritative validation — the exact image that `ci_incident_response.yml` will pull during a real incident.
 
 ```
 Jobs:
-  smoke:
+  run-lint:
+    name: Run Lint
+    Steps: checkout → python 3.12 → install → ruff lint → ruff format check
+
+  run-typecheck:
+    name: Run Typecheck
+    Steps: checkout → install → pyright
+
+  build-and-push:
+    name: Build and Push Image
+    Needs: [run-lint, run-typecheck]
+    Steps:
+      - Checkout
+      - Azure login (OIDC)
+      - Login to ACR
+      - Docker build (tagged sha-{SHORT_SHA} + latest)
+      - Docker push to ACR
+      - Cleanup: keep only latest 3 images, delete older tags via az acr repository delete
+
+  run-backend:
+    name: Run Backend
+    Needs: build-and-push
+    Steps:
+      - Azure login (OIDC)
+      - Login to ACR
+      - docker run -d sentinel-backend:sha-{SHORT_SHA} with test env vars
+      - Validate /health (poll with retry, max 30s)
+      - Validate /ready (DB connected, models reachable)
+
+  run-unit-tests:
+    name: Run Unit Tests
+    Needs: run-backend
+    Steps:
+      - Checkout → install
+      - pytest (unit) against running backend
+
+  run-integration-tests:
+    name: Run Integration Tests
+    Needs: run-backend
     Services: pgvector/pgvector:pg16
     Steps:
-      - Checkout → install → seed test DB
+      - Checkout → install
+      - pytest (integration: test_agents/, test_api/) against running backend
+
+  run-smoke-test:
+    name: Run Smoke Test
+    Needs: run-integration-tests
+    Steps:
+      - Seed test DB
       - Run scenario: bad_deploy_01
       - Assert: incident created, root cause found, resolution proposed, judge score >= 0.6
+    Paths filter: only runs when src/sentinel/agents/** or src/sentinel/tools/** changed
+
+  teardown:
+    name: Teardown
+    Needs: [run-unit-tests, run-integration-tests, run-smoke-test]
+    if: always()
+    Steps:
+      - docker stop sentinel-backend && docker rm sentinel-backend
 ```
 
-### 9.4 `incident_response.yml` — The Real Pipeline (NEW)
+**Key design:** The image is pushed to ACR *before* tests run. Tests run against the real Docker image, not a local dev install. This means every PR validates the exact artifact that `ci_incident_response.yml` will pull during a real incident. The ACR cleanup step keeps only the 3 most recent image tags to stay within free tier storage.
+
+**ACR image cleanup:**
+
+```bash
+# Keep latest 3 tags, delete the rest
+TAGS=$(az acr repository show-tags --name sentinelacr --repository sentinel-backend \
+  --orderby time_desc --output tsv)
+KEEP=3
+echo "$TAGS" | tail -n +$((KEEP+1)) | while read TAG; do
+  az acr repository delete --name sentinelacr --image sentinel-backend:$TAG --yes
+done
+```
+
+### 9.3 `ci_incident_response.yml` — The Real Pipeline
 
 **Trigger:** `repository_dispatch` (event_type: `incident-alert`)
 
@@ -966,7 +1083,7 @@ Job Flow:
 ```
 
 ```yaml
-name: Incident Response Pipeline
+name: "[sentinel] incident response — full pipeline"
 
 on:
   repository_dispatch:
@@ -1200,12 +1317,11 @@ jobs:
 
 ### 9.5 Workflow Summary
 
-| Workflow | Trigger | Purpose | Jobs |
-|----------|---------|---------|------|
-| `ci_backend.yml` | PR to main | Quality gate | quality → integration → docker-build |
-| `cd_backend.yml` | Push to main | Build + push image | build → push ACR (no deploy — pulled on demand) |
-| `ci_incident.yml` | PR to main (agents/) | Smoke test | seed → run scenario → assert |
-| `incident_response.yml` | repository_dispatch | **Real pipeline** | secrets → start backend → parallel fetch → agent pipeline → branch (rollback PR / escalate) → notify → teardown → summary |
+| File | Name | Trigger | Purpose | Jobs |
+|------|------|---------|---------|------|
+| `ci_validation.yml` | `[sentinel] PR — validation` | PR to main | Fast gate — lint, typecheck, Docker build (local), run backend, health check, unit + integration tests | run-lint → run-typecheck → build-image → run-backend → run-unit-tests → run-integration-tests → teardown |
+| `ci_backend_validation.yml` | `[sentinel] backend — validation` | Push to main | Full post-merge — lint, typecheck, build+push image to ACR, run backend from real image, health check, all tests, smoke test, ACR cleanup | run-lint → run-typecheck → build-and-push → run-backend → run-unit-tests → run-integration-tests → run-smoke-test → teardown |
+| `ci_incident_response.yml` | `[sentinel] incident — response pipeline` | repository_dispatch | **Real incident pipeline** | fetch-secrets → start-backend → parallel fetch → run-agent-pipeline → branch (rollback / escalate) → teardown-backend → post-summary |
 
 ---
 
@@ -1325,7 +1441,9 @@ Phase 1 has synthetic data generators, local SQLite, and scripts that won't exis
 | `alembic/` | Migration directory with `alembic.ini`, `env.py`, versions/ |
 | `alembic/versions/001_initial_schema.py` | Creates 4 tables + pgvector extension |
 | `alembic/versions/002_seed_services.py` | Inserts initial service data (replaces `data/seed.py`) |
-| `.github/workflows/incident_response.yml` | Real incident pipeline workflow |
+| `.github/workflows/ci_validation.yml` | Fast PR gate — lint, typecheck, Docker build, run backend, tests |
+| `.github/workflows/ci_backend_validation.yml` | Full post-merge validation — build+push to ACR, smoke test, cleanup |
+| `.github/workflows/ci_incident_response.yml` | Real incident pipeline workflow |
 
 ### 13.4 Dependencies to Remove
 
@@ -1347,7 +1465,7 @@ Do the cleanup in this order to avoid broken imports:
 7. **Add LangFuse** — tracing decorators, prompt loading, scoring
 8. **Delete Phase 1 artifacts** — `data/`, `generator/`, `db.py`, old scripts, `aiosqlite` dep
 9. **Update Dockerfile** — remove `COPY data/`
-10. **Update CI** — add `incident_response.yml`, update `ci_incident.yml` to use real pipeline
+10. **Update CI** — add `ci_validation.yml` (PR gate), `ci_backend_validation.yml` (post-merge), `ci_incident_response.yml` (incident pipeline)
 
 Step 8 comes late intentionally — keep Phase 1 working until Phase 2 tools are proven.
 
