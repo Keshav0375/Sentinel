@@ -4,8 +4,10 @@
 > Single `terraform apply` brings up the entire stack. Also manages CI runner
 > images in ACR and cross-repo secret distribution.
 >
-> **Note:** No AKS — the backend runs as an ephemeral Docker container inside the
-> GHA runner per incident. Only always-on resources are provisioned here.
+> **Note:** Includes AKS — the sentinel backend runs as a single-replica Deployment
+> on a 1-node AKS cluster (free control plane + 1× B2ats_v2 node, free 12 months).
+> Terraform provisions the cluster; the sentinel repo's `ci_backend_deployment.yml`
+> deploys the app onto it.
 
 ---
 
@@ -32,9 +34,9 @@ sentinel-infra repo
 │  ┌─────────────────────────┐    │  ├── langfuse-secret-key      │ │
 │  │  PostgreSQL B1MS        │    │  ├── langfuse-public-key      │ │
 │  │  (free 12 months)       │    │  ├── acr-password              │ │
-│  │                         │    │  └── github-pat                │ │
-│  │  DB: sentinel           │    └──────────────────────────────┘ │
-│  │  Extension: pgvector    │                                      │
+│  │                         │    │  ├── github-pat                │ │
+│  │  DB: sentinel           │    │  └── sentinel-api-token        │ │
+│  │  Extension: pgvector    │    └──────────────────────────────┘ │
 │  │  32 GB storage          │    ┌──────────────────────────────┐ │
 │  │  Firewall: allow all    │    │  OIDC Federation              │ │
 │  │  (dev — see §3.2)       │    │  (Azure AD App Registration) │ │
@@ -61,11 +63,19 @@ sentinel-infra repo
 │  │  (always free)          │                                      │
 │  │  dummy-api              │    ← sentinel-deployment target      │
 │  └─────────────────────────┘                                      │
+│                                                                   │
+│  ┌─────────────────────────┐                                      │
+│  │  AKS (sentinel-aks)     │                                      │
+│  │  control plane: free    │    ← sentinel-backend runs here      │
+│  │  1× B2ats_v2 node       │      (single replica, public LB IP,  │
+│  │  (free 12 months)       │       deployed by sentinel repo CI)  │
+│  └─────────────────────────┘                                      │
 └──────────────────────────────────────────────────────────────────┘
 
-Backend hosting: NOT here. sentinel-backend runs as an ephemeral
-Docker container inside the GHA runner during ci_incident_response.yml.
-Image pulled from ACR on demand. Zero always-on compute cost.
+Backend hosting: AKS (modules/aks/). The sentinel repo's
+ci_backend_deployment.yml deploys the sentinel-backend image from ACR
+to the cluster on every merge to main. Terraform provisions the cluster
+only — app manifests live in the sentinel repo (k8s/).
 ```
 
 ---
@@ -73,7 +83,7 @@ Image pulled from ACR on demand. Zero always-on compute cost.
 ## 2. Terraform Module Structure
 
 One module per Azure resource group concern. Flat structure — no nested modules.
-6 modules total (AKS removed — backend is ephemeral).
+7 modules total.
 
 ```
 sentinel-infra/
@@ -113,7 +123,12 @@ sentinel-infra/
 │   │           ├── __init__.py
 │   │           └── function.json
 │   │
-│   └── app-service/           # App Service F1 for sentinel-deployment
+│   ├── app-service/           # App Service F1 for sentinel-deployment
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   │
+│   └── aks/                   # AKS cluster — hosts sentinel-backend (1 node)
 │       ├── main.tf
 │       ├── variables.tf
 │       └── outputs.tf
@@ -160,8 +175,8 @@ resource "azurerm_container_registry" "sentinel" {
 
 | Image | Purpose | Built By |
 |-------|---------|----------|
-| `sentinel-backend:sha-X` | Backend API container (pulled by GHA runner) | ci_backend_validation.yml (sentinel repo) |
-| `sentinel-backend:latest` | Latest built version | ci_backend_validation.yml |
+| `sentinel-backend:sha-X` | Backend API container (deployed to AKS — immutable tag pinned by the Deployment) | ci_backend_deployment.yml (sentinel repo) |
+| `sentinel-backend:stable` | Bookmark tag for the last fully validated image (humans/debugging only — nothing pulls it at runtime) | ci_backend_deployment.yml |
 | `ci-runner:latest` | CI runner with Python 3.12 + dev tools | build-runners.yml (this repo) |
 
 ### 3.2 PostgreSQL Module
@@ -198,9 +213,10 @@ resource "azurerm_postgresql_flexible_server_configuration" "pgvector" {
 }
 
 # Firewall: allow all (dev)
-# GitHub-hosted runners have dynamic IPs outside Azure's service range.
-# The ephemeral backend container runs ON the GHA runner, so it also
-# connects from a GitHub IP, not an Azure IP. During dev we allow all.
+# Two client classes connect: (1) the backend on AKS (stable-ish egress IP),
+# (2) GHA workflows on GitHub-hosted runners — ci_app_deployment.yml inserts
+# deploy rows, ci_incident_response.yml fetches context + records PR refs.
+# GitHub runner IPs rotate across a wide range. During dev we allow all.
 # Production would use Private Endpoint + VNet integration.
 resource "azurerm_postgresql_flexible_server_firewall_rule" "allow_all_dev" {
   name             = "allow-all-dev"
@@ -210,10 +226,11 @@ resource "azurerm_postgresql_flexible_server_firewall_rule" "allow_all_dev" {
 }
 ```
 
-**Why allow-all?** The ephemeral backend runs inside a GitHub-hosted runner. GitHub
-rotates runner IPs across a wide CIDR range that changes weekly. There's no stable
-IP to whitelist. The `0.0.0.0/0.0.0.0` rule (Azure services only) doesn't cover
-GitHub runners — they're not Azure services. Options:
+**Why allow-all?** GHA workflows talk to PostgreSQL directly (deploy recording,
+context fetches, PR-reference updates) from GitHub-hosted runners, whose IPs rotate
+across a wide CIDR range that changes weekly. There's no stable IP to whitelist.
+The `0.0.0.0/0.0.0.0` rule (Azure services only) doesn't cover GitHub runners —
+they're not Azure services. The AKS backend's egress IP alone isn't enough. Options:
 
 | Approach | Dev? | Production? |
 |----------|------|-------------|
@@ -279,38 +296,42 @@ write secrets.
 | `langfuse-public-key` | LangFuse tracing (public) | Backend (env var `LANGFUSE_PUBLIC_KEY`) |
 | `acr-password` | ACR admin password | GHA jobs (docker pull/push) |
 | `github-pat` | GitHub PAT with `repo` scope | Azure Function bridge (repository_dispatch) |
+| `sentinel-api-token` | Shared token for backend API auth (`X-Sentinel-Token`) | Backend (env var) + sentinel repo GHA jobs (`ci_incident_response.yml`) |
 
-**Secret flow: Key Vault → GHA → ephemeral backend:**
+**Secret flow 1: Key Vault → K8s Secret → backend pod (deploy time):**
 
 ```
-ci_incident_response.yml
+ci_backend_deployment.yml (sentinel repo, merge to main) — deploy-to-aks job:
 │
-├── fetch-secrets job:
-│   az keyvault secret show --vault-name sentinel-kv --name anthropic-api-key
-│   az keyvault secret show --vault-name sentinel-kv --name openai-api-key
-│   az keyvault secret show --vault-name sentinel-kv --name db-password
-│   az keyvault secret show --vault-name sentinel-kv --name langfuse-secret-key
-│   az keyvault secret show --vault-name sentinel-kv --name langfuse-public-key
-│   → sets as job outputs (masked)
+├── az keyvault secret show ... for: anthropic-api-key, openai-api-key,
+│   db-password, langfuse-secret-key, langfuse-public-key, dd-api-key,
+│   sentinel-api-token
 │
-├── start-backend job:
-│   docker run -d \
-│     -e ANTHROPIC_API_KEY=${{ needs.fetch-secrets.outputs.anthropic-api-key }} \
-│     -e OPENAI_API_KEY=${{ needs.fetch-secrets.outputs.openai-api-key }} \
-│     -e DATABASE_URL=postgresql://sentinel_admin:${{ needs.fetch-secrets.outputs.db-password }}@sentinel-pg.postgres.database.azure.com/sentinel \
-│     -e LANGFUSE_SECRET_KEY=${{ needs.fetch-secrets.outputs.langfuse-secret-key }} \
-│     -e LANGFUSE_PUBLIC_KEY=${{ needs.fetch-secrets.outputs.langfuse-public-key }} \
-│     -e SENTINEL_PRIMARY_PROVIDER=anthropic \
-│     -p 8000:8000 \
-│     sentinelacr.azurecr.io/sentinel-backend:latest
+├── kubectl create secret generic sentinel-secrets --from-literal=... \
+│     --dry-run=client -o yaml | kubectl apply -f -
 │
-│   → validate: curl http://localhost:8000/health
-│   → validate: curl http://localhost:8000/ready  (checks DB + LangFuse)
+├── kubectl set image deployment/sentinel-backend sentinel-backend=<ACR>:sha-X
+├── kubectl rollout status deployment/sentinel-backend
 │
-├── ... pipeline jobs use http://localhost:8000 ...
+└── validate: curl $BACKEND_URL/health + /ready  (checks DB + LangFuse)
+
+Backend pod consumes the secrets via envFrom — always-on thereafter.
+```
+
+**Secret flow 2: Key Vault → GHA jobs (incident runtime):**
+
+```
+ci_incident_response.yml — each job fetches ONLY what it needs, in-job.
+(GHA drops masked secrets from job outputs — never pass secrets between jobs.)
 │
-└── teardown-backend job:
-    docker stop sentinel-backend && docker rm sentinel-backend
+├── fetch-service-info:   az keyvault secret show --name db-password       (psql read)
+├── fetch-datadog-logs:   az keyvault secret show --name dd-api-key
+├── run-agent-pipeline:   az keyvault secret show --name sentinel-api-token
+├── create-rollback-pr:   az keyvault secret show --name db-password       (psql UPDATE)
+└── notify-* / summary:   az keyvault secret show --name teams-webhook-url
+
+ci_app_deployment.yml (sentinel-deployment repo):
+└── record-deployment:    az keyvault secret show --name db-password       (psql INSERT)
 ```
 
 ### 3.4 Event Grid Module
@@ -421,6 +442,56 @@ resource "azurerm_linux_web_app" "dummy_api" {
   }
 }
 ```
+
+### 3.7 AKS Module (Backend Hosting)
+
+```hcl
+resource "azurerm_kubernetes_cluster" "sentinel" {
+  name                = "sentinel-aks"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  dns_prefix          = "sentinel"
+  sku_tier            = "Free"          # control plane — always free
+
+  default_node_pool {
+    name       = "default"
+    node_count = 1
+    vm_size    = "Standard_B2ats_v2"    # free 750 hrs/mo for 12 months
+  }
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  # Scale-to-zero: sentinel repo workflows scale the node pool 0↔1 at runtime
+  # (backend-up/backend-down actions + nightly auto-down). Don't let
+  # terraform apply fight them over node_count.
+  lifecycle {
+    ignore_changes = [default_node_pool[0].node_count]
+  }
+}
+
+# Kubelet pulls images from ACR without imagePullSecrets
+resource "azurerm_role_assignment" "aks_acr_pull" {
+  scope                = azurerm_container_registry.sentinel.id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_kubernetes_cluster.sentinel.kubelet_identity[0].object_id
+}
+
+# GHA OIDC SP can deploy (az aks get-credentials + kubectl)
+resource "azurerm_role_assignment" "gha_aks_user" {
+  scope                = azurerm_kubernetes_cluster.sentinel.id
+  role_definition_name = "Azure Kubernetes Service Cluster User Role"
+  principal_id         = azuread_service_principal.sentinel_gha.object_id
+}
+```
+
+**Lifecycle split:** Terraform provisions the cluster only. The `sentinel-backend`
+Deployment/Service manifests live in the sentinel repo (`azure/k8s/`) and are applied by
+`ci_backend_deployment.yml` — app deployment is CI's job, not Terraform's. Infra
+changes rarely; the app deploys on every merge.
+
+**Outputs:** `aks_cluster_name`, `aks_resource_group`
 
 ---
 
@@ -740,7 +811,7 @@ jobs:
 ### 6.4 Usage in sentinel repo workflows
 
 ```yaml
-# In sentinel repo's ci_validation.yml / ci_backend_validation.yml:
+# In sentinel repo's ci_validation.yml / ci_backend_deployment.yml:
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -967,13 +1038,16 @@ Azure Storage provides native state locking via blob leases. No DynamoDB needed.
    az keyvault secret set --vault-name sentinel-kv --name teams-webhook-url --value "https://..."
    az keyvault secret set --vault-name sentinel-kv --name langfuse-secret-key --value "sk-lf-..."
    az keyvault secret set --vault-name sentinel-kv --name langfuse-public-key --value "pk-lf-..."
+   az keyvault secret set --vault-name sentinel-kv --name sentinel-api-token --value "$(openssl rand -hex 32)"
    ```
 
 7. [ ] Build and push first CI runner image manually (§6.2)
 
 8. [ ] Verify PostgreSQL: `psql` connection test from local machine
 
-9. [ ] Run `alembic upgrade head` against PostgreSQL to create tables
+9. [ ] Verify AKS: `az aks get-credentials --resource-group sentinel-rg --name sentinel-aks && kubectl get nodes`
+
+10. [ ] Run `alembic upgrade head` against PostgreSQL to create tables
 
 ### After bootstrap — ongoing
 
@@ -988,6 +1062,9 @@ Azure Storage provides native state locking via blob leases. No DynamoDB needed.
 
 | Resource | Monthly Cost | Covered By |
 |----------|-------------|------------|
+| AKS control plane | Free | Always free (Free tier) |
+| AKS node (1× B2ats_v2) | Free | Scale-to-zero — ~20-80 hrs/mo consumed of the free 750 (12-month, expires 05/2027) |
+| LoadBalancer public IP | ~$0 | Released at teardown (Service deleted per run, URL resolved fresh by backend-up); bills only while scaled up |
 | PostgreSQL B1MS | Free | 12-month free |
 | ACR Standard | Free | 12-month free (100 GB) |
 | Key Vault | Free | Always free |
@@ -995,6 +1072,8 @@ Azure Storage provides native state locking via blob leases. No DynamoDB needed.
 | Azure Functions | Free | Always free (1M reqs) |
 | App Service F1 | Free | Always free |
 | Storage (TF state) | ~$0.01 | Negligible |
-| **Total** | **~$0/month** | **12 months** |
+| **Total** | **~$0/month at idle** | **12 months** |
 
-No compute costs — backend runs ephemerally inside GHA runner (free minutes).
+Backend compute = the free AKS node, scaled to zero between runs (sentinel repo
+workflows manage node_count — Terraform ignores drift on it). After 05/2027 the node
+bills only for scaled-up hours — `terraform destroy` when the project wraps.

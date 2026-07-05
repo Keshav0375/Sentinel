@@ -4,8 +4,10 @@ The sentinel repo IS the backend. It contains the multi-agent incident response 
 
 ## What Lives Here
 
-- `src/sentinel/` — Backend code: agents, tools, memory, API, eval
-- `.github/workflows/` — CI (quality gate), CD (build+push image), incident response pipeline
+- `src/sentinel/` — Backend code: agents, tools, memory, API, eval, providers — all reasoning
+- `azure/k8s/` — Deployment + Service manifests (Service created/deleted per run — dynamic URL)
+- `.github/workflows/` — CI (PR gate), deploy-to-AKS, incident response, scale toggle
+- `.github/actions/` — Reusable composite actions: `backend-up`/`backend-down`, `get-kv-secrets`, `notify-teams`, `psql-exec`
 - `tests/` — Unit + integration tests
 - `alembic/` — Database migrations (replaces Phase 1 `data/` directory)
 - `Planning/` — Architecture docs, planning state
@@ -14,31 +16,30 @@ The sentinel repo IS the backend. It contains the multi-agent incident response 
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Hosting | **Ephemeral** — Docker container inside GHA runner | No always-on cost. Start → validate → use → teardown per incident. |
+| Hosting | **AKS scale-to-zero** — single-replica Deployment, node pool 0↔1 per run | Backend URL resolved from the cluster each run (`backend-up` output — no static variable). Service + LB IP deleted at teardown → **$0 infra at idle**. ~20-80 of 750 free node-hrs/mo; `SENTINEL_KEEP_WARM=true` for demo sessions. |
 | Database | Azure PostgreSQL B1MS + pgvector | Free 12 months, always-on. Vector similarity for memory. |
 | LLM providers | **Anthropic (default) + OpenAI (fallback)** | Top models only. Sonnet for reasoning, Haiku for classification. Switch via env flag. |
 | Agent patterns | Reflexion + Plan-Execute + Reverification | Self-correcting pipeline, not blind linear chain |
-| HITL gate | Revert PR on sentinel-deployment | GitHub PR review IS the approval — no custom approval API |
+| HITL gate | Revert PR on sentinel-deployment — **fire-and-forget** | GitHub PR review IS the approval. Sentinel records PR creation (`pr_number`/`pr_url` on the incident) but never tracks merge/close outcome. |
 | Decision branching | confidence ≥ 0.7 → rollback PR, else → escalate to human | Pipeline only acts when confident; otherwise dumps context to Teams |
 | Backend ↔ GHA split | Backend reasons, GHA executes | Backend returns decision. GHA creates PRs, sends notifications, reports to Datadog. |
 | Correlation | incident_id ↔ deploy_id ↔ PR ↔ Datadog ↔ LangFuse | Full end-to-end traceability |
 | CI pipeline (PR) | ci_validation.yml | Fast gate — lint, typecheck, Docker build, run backend, health check, unit + integration tests |
-| CI pipeline (merge) | ci_backend_validation.yml | Full validation — build+push to ACR, run from real image, all tests, smoke test, ACR cleanup |
-| Incident pipeline | ci_incident_response.yml (repository_dispatch) | secrets → start backend → parallel fetch → agent pipeline → branch → notify → teardown → summary |
+| CI pipeline (merge) | ci_backend_deployment.yml | Build+push to ACR (sha tag), scale up AKS, deploy, validate rollout, tests against live deployment, promote or `rollout undo`, scale to zero |
+| Incident pipeline | ci_incident_response.yml (repository_dispatch) | ensure-backend-up → parallel fetch → agent pipeline → branch → teardown-backend → summary; serialized via `sentinel-backend` concurrency group |
 | Notification | Microsoft Teams (from GHA jobs) | Incoming webhook, not backend |
-| PR content agent | `POST /generate/pr-content` | LLM-generates realistic PR titles + descriptions for demo PRs |
+| PR content agent | `POST /generate/pr-content` | Rollback PR title + description only — sole consumer is ci_incident_response. Demo PRs are static templates (no backend). |
 | Tracing | LangFuse cloud (tracing + prompts + scoring) | Free 50K observations/month |
 | Event routing | Event Grid → Azure Functions → repository_dispatch | All Azure always-free tier |
-| Terraform | 6 modules in sentinel-infra (no AKS) | Reproducible, reviewable, provider-agnostic |
+| Terraform | 7 modules in sentinel-infra (incl. AKS) | Reproducible, reviewable, provider-agnostic |
 
 ## Database Tables
 
 | Table | Purpose |
 |-------|---------|
-| `incidents` | Episodic memory — past incidents with embeddings |
+| `incidents` | Episodic memory — past incidents with embeddings; carries `pr_number`/`pr_url` when a revert PR was created |
 | `services` | Semantic memory — service ownership, deps, runbooks |
-| `revert_prs` | HITL audit trail — revert PR lifecycle (created → merged/closed) |
-| `deployments` | Deploy ↔ incident ↔ PR ↔ Datadog correlation |
+| `deployments` | Deploy ↔ incident ↔ PR ↔ Datadog correlation — written by `ci_app_deployment.yml` on every deploy |
 
 ## Pipeline Decision Flow
 
@@ -48,16 +49,20 @@ Analysis confidence ≥ 0.7 AND root cause = specific deploy?
 │         → GHA: generate PR content → create revert PR → notify Teams
 │         → PR = HITL gate (reviewer merges or closes)
 └── NO  → Escalate: Teams notification with full context, no PR created
-Both paths → Judge scores trajectory → store to memory → teardown backend
+Both paths → Judge scores trajectory → store to memory (terminal state at pipeline end)
 ```
 
 ## Incident Workflow Lifecycle
 
 ```
-fetch-secrets → start-backend (docker run + /health + /ready)
-→ parallel fetch (service info, PR details, Datadog logs)
-→ run-agent-pipeline → branch (rollback PR / escalate)
-→ notify Teams → teardown-backend (docker stop) → summary
+ensure-backend-up (scale-to-zero: node pool 0→1, replicas 0→1, wait /ready,
+                   resolve backend-url from cluster — ~3-7 min cold;
+                   can't come up → Teams alert + loud failure)
+→ parallel fetch (service info, PR details, Datadog logs — per-job Key Vault reads)
+→ run-agent-pipeline (POST to AKS backend + poll, 10-min cap)
+→ branch (rollback PR + record pr_number/pr_url / escalate)
+→ teardown-backend (scale to zero — skipped when SENTINEL_KEEP_WARM=true)
+→ notify Teams → summary
 ```
 
 ## Workflows
@@ -65,18 +70,19 @@ fetch-secrets → start-backend (docker run + /health + /ready)
 | File | Name | Trigger | Purpose |
 |------|------|---------|---------|
 | `ci.yml` | Phase 1 CI | PR to main | Existing lint, format, typecheck, pytest |
-| `ci_validation.yml` | `[sentinel] PR — validation` | PR to main (src/, tests/) | Fast gate — lint, typecheck, Docker build (local), run backend, health check, unit + integration tests |
-| `ci_backend_validation.yml` | `[sentinel] backend — validation` | Push to main (src/, tests/) | Full post-merge — lint, typecheck, build+push image to ACR, run backend from real image, all tests, smoke test, ACR cleanup |
-| `ci_incident_response.yml` | `[sentinel] incident response — full pipeline` | repository_dispatch | Real pipeline with full lifecycle |
+| `ci_validation.yml` | `[sentinel] PR — validation` | PR to main (src/, tests/) | Fast gate — quality checks + single-job build/run/test (no ACR, no AKS, stubbed LLM) |
+| `ci_backend_deployment.yml` | `[sentinel] backend — deployment` | Push to main (src/, tests/, azure/) | Build+push to ACR, scale up AKS, deploy, validate, tests against live deployment, promote or rollback, scale to zero |
+| `ci_incident_response.yml` | `[sentinel] incident response — full pipeline` | repository_dispatch | Real pipeline — scales backend up, runs, scales down |
+| `ci_backend_scale.yml` | `[sentinel] backend — scale` | workflow_dispatch + nightly cron | Manual up/down toggle + auto-down safety net (scale-to-zero) |
 
 ## Key Docs
 
 | Doc | Purpose |
 |-----|---------|
-| `Planning/Phase-2/sentinel/ARCHITECTURE.md` | Phase 2 architecture (ephemeral backend, PostgreSQL, agent pipeline, agentic loops, CI/CD, LangFuse) |
+| `Planning/Phase-2/sentinel/ARCHITECTURE.md` | Phase 2 architecture (AKS backend, PostgreSQL, agent pipeline, agentic loops, CI/CD, LangFuse) |
 | `ARCHITECTURE.md` (root) | Phase 1 architecture (current codebase) |
 | `TODO.md` (root) | Phase 1 task tracker |
 
 ## Status
 
-Architecture finalized. All design questions resolved. Waiting on sentinel-infra to provision Azure resources before building.
+Architecture finalized (rev 3 — 2026-07-05: AKS scale-to-zero, `ci_backend_scale.yml` safety net, `/generate/pr-content` scoped to rollback PRs only). Waiting on sentinel-infra to provision Azure resources before building.

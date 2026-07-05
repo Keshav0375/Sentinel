@@ -7,8 +7,9 @@ The app itself is a dummy target. The real product is the **deployment pipeline*
 ## What This Repo Will Contain
 
 - Minimal FastAPI app: `GET /`, `GET /health`, `GET /version`
-- `ci_app_deployment.yml` — GHA workflow: Build → Deploy → Verify → Report to Datadog
-- Demo PRs that create intentional failures across different stages
+- `ci_app_deployment.yml` — GHA workflow: Build → Deploy → Verify → Record (PostgreSQL) → Report to Datadog
+- `ci_demo_prs.yml` — workflow_dispatch: creates demo PRs from static scenario templates (file changes + pre-written titles/descriptions — no backend involvement)
+- Demo PRs across three conditions: **A** clean deploy (no incident), **B** green deploy but the app breaks at runtime (runtime monitor → incident → revert PR), **C** failed deploy (deploy-failure monitor → incident → revert PR)
 
 ## Key Decisions
 
@@ -18,6 +19,8 @@ The app itself is a dummy target. The real product is the **deployment pipeline*
 | App design | Near-trivial (3 endpoints) | Pipeline is the product, not the app |
 | Datadog integration | Dual: native Azure + GHA curl | Auto metrics + custom deploy events |
 | Deploy method | Zip deploy | F1 tier doesn't support containers; Oryx handles pip install |
+| Deploy recording | psql INSERT into Sentinel PostgreSQL (Stage 5, `if: always()`) | Agents correlate incidents against real deploy rows — failed deploys matter most |
+| Auth | OIDC federation (no client secret) | Provisioned by sentinel-infra Terraform |
 
 ## Monitoring
 

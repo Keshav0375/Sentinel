@@ -173,8 +173,8 @@ POST https://api.datadoghq.com/api/v1/events
 #### Stage 3: Deploy
 
 ```bash
-# Login to Azure
-az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+# Login to Azure — OIDC via azure/login@v2 (client-id/tenant-id/subscription-id;
+# no client secret exists, see §3.4)
 
 # Set app version env var
 az webapp config appsettings set \
@@ -224,7 +224,43 @@ The verify step retries with a 30s initial wait + 3 attempts.
 Datadog Event: stage:verify, deploy_status:failed
 ```
 
-#### Stage 5: Final Summary (if: always())
+#### Stage 5: Record Deployment in PostgreSQL (if: always())
+
+Every deploy attempt — success or failure — gets a row in Sentinel's PostgreSQL
+`deployments` table. This is the data the Analysis agent's `get_deploy_details` tool
+and the deploy ↔ incident correlation depend on. **Failed deploys matter most** —
+they're exactly the rows incidents join against.
+
+```bash
+# OIDC login already done in Stage 3 (azure/login@v2)
+sudo apt-get install -y postgresql-client
+
+DB_PASS=$(az keyvault secret show --vault-name sentinel-kv \
+  --name db-password --query value -o tsv)
+
+PGPASSWORD="$DB_PASS" psql \
+  "host=sentinel-pg.postgres.database.azure.com dbname=sentinel user=sentinel_admin sslmode=require" <<SQL
+INSERT INTO deployments
+  (service, pr_number, commit_sha, author, deploy_status, gha_run_id, files_changed, metadata)
+VALUES
+  ('dummy-api', ${PR_NUMBER}, '${SHORT_SHA}', '${PR_AUTHOR}', '${STATUS}',
+   ${GITHUB_RUN_ID}, '${FILES_CHANGED_JSON}'::jsonb,
+   jsonb_build_object('failed_stage', '${FAILED_STAGE:-none}', 'version', '${APP_VERSION}'));
+SQL
+```
+
+Notes:
+- Runs `if: always()` — failed builds/deploys are recorded with their `failed_stage`.
+- Uses the shared OIDC identity's Key Vault read role for `db-password` — no DB
+  credentials stored as GitHub secrets.
+- `incident_id` stays NULL here; the backend backfills it when an incident
+  correlates to this deploy.
+- Implemented via sentinel's shared composite actions, referenced cross-repo:
+  `uses: <owner>/sentinel/.github/actions/get-kv-secrets@main` and
+  `uses: <owner>/sentinel/.github/actions/psql-exec@main` — one SQL/secret
+  implementation maintained in one place.
+
+#### Stage 6: Final Summary (if: always())
 
 Runs regardless of which stage succeeded or failed.
 
@@ -263,6 +299,10 @@ Also ships a structured log line via the Datadog Log Intake API:
 ```
 
 ### 3.2 Datadog Reporting Helper
+
+These helpers live in a **local composite action** (`.github/actions/dd-report/`) so
+every stage calls one implementation instead of copy-pasted curl blocks. Inputs:
+`title`, `tags`, `alert-type`, optional structured log payload.
 
 ```bash
 send_dd_event() {
@@ -313,12 +353,15 @@ jobs:
       - name: Verify deployment
       - name: Report verify failure
         if: failure()
+      - name: Record deployment in PostgreSQL
+        if: always()
       - name: Report final summary
         if: always()
 ```
 
-**Three stages, not four.** No push step needed — zip deploy goes directly to
-App Service. The pipeline is simpler than the original Docker-based design.
+**Build → Deploy → Verify → Record → Summary.** No image push stage — zip deploy
+goes directly to App Service. The record stage writes the `deployments` row that
+Sentinel's agents correlate incidents against.
 
 ### 3.4 Required GitHub Secrets
 
@@ -330,32 +373,67 @@ App Service. The pipeline is simpler than the original Docker-based design.
 | `DD_API_KEY` | Datadog API key | Manual |
 | `DEPLOYED_APP_URL` | Public URL (e.g. `https://dummy-api.azurewebsites.net`) | Manual |
 
+DB access for the record-deployment stage needs no GitHub secret — the OIDC identity
+reads `db-password` from Key Vault at runtime. The demo-PR workflow needs no backend
+access at all (scenario templates are static).
+
 **No `AZURE_CLIENT_SECRET`** — uses OIDC workload identity federation.
 OIDC federated credentials are provisioned by sentinel-infra Terraform (see sentinel-infra ARCHITECTURE.md §4).
 GitHub secrets for AZURE_CLIENT_ID/TENANT_ID/SUBSCRIPTION_ID are auto-pushed by Terraform's `github_actions_secret` resource.
 
 ---
 
-## 4. Demo PR Sequence
+## 4. Demo PR Taxonomy — Three Conditions
 
-Each PR creates a real deploy attempt. Some succeed, some intentionally fail.
+Demo PRs are created by `ci_demo_prs.yml` (manual `workflow_dispatch` with a scenario
+matrix). It is fully self-contained — **no backend involvement**: each scenario in
+the matrix carries its scripted file changes plus a pre-written, realistic PR title
+and description. The workflow applies the changes on a branch and opens the PR.
+(The backend's `/generate/pr-content` agent is used only by `ci_incident_response.yml`
+to write **rollback** PR content — see sentinel ARCHITECTURE §3.4.)
 
-| # | PR Title | What It Does | Expected Datadog Signal |
-|---|----------|-------------|------------------------|
-| 1 | `feat: initial dummy-api` | Working app + deploy pipeline | `deploy_status:succeeded` |
-| 2 | `feat: add /info endpoint` | Trivial app change, clean deploy | `deploy_status:succeeded` |
-| 3 | `fix: break requirements` | Add `nonexistent-package==1.0.0` to requirements.txt | `deploy_status:failed`, `failed_stage:deploy` (pip install fails on server) |
-| 4 | `fix: repair requirements` | Remove the bad package | `deploy_status:succeeded` |
-| 5 | `feat: break health check` | Change `/health` to return 503 | `deploy_status:failed`, `failed_stage:verify` |
-| 6 | `fix: restore health check` | Revert to 200 | `deploy_status:succeeded` |
-| 7 | `feat: add slow startup` | Add 60s `asyncio.sleep` in lifespan | `deploy_status:failed`, `failed_stage:verify` (health check timeout) |
-| 8 | `fix: remove slow startup` | Remove the sleep | `deploy_status:succeeded` |
-| 9 | `feat: wrong version env` | Hardcode `/version` to return `"wrong"` | `deploy_status:failed`, `failed_stage:verify` (version mismatch) |
-| 10 | `fix: use env var for version` | Restore `APP_VERSION` from env | `deploy_status:succeeded` |
+Every demo PR falls into one of three conditions:
 
-**Note:** Demo PR #3 changed from "break Dockerfile" (no Docker anymore) to
-"break requirements.txt" — this triggers a pip install failure on Azure's
-Oryx build, which is the equivalent failure mode for zip deploy.
+| Condition | Deploy pipeline | App at runtime | Datadog trigger | Sentinel outcome |
+|-----------|----------------|----------------|-----------------|------------------|
+| **A — clean** | Green | Healthy | `deploy_status:succeeded` event only (no monitor fires) | No incident. Baseline history for episodic memory. |
+| **B — runtime failure** | **Green** (verify passes) | **Breaks after deploy** — site fails under real traffic | Runtime-health monitor fires (5xx rate / failed health pings) | Incident → agents correlate symptoms with the **last successful deploy** (deployments table) → revert PR |
+| **C — deploy failure** | **Red** (build/deploy/verify fails) | Old version usually keeps serving (Oryx build failure leaves the previous container running) | Deploy-failure event monitor fires on `deploy_status:failed` | Incident → agents identify the failed deploy from the event + CI context → revert PR |
+
+**The B/C nuance matters for the agents:** in C, production often still serves the
+previous version — the revert PR heals **main's deployability**. In B, production is
+actually broken — the revert PR heals **the live site**. Both paths end in a revert
+PR, but the evidence differs: C leans on the deploy event and pipeline logs; B leans
+on runtime error logs plus "what deployed most recently and succeeded?" — which is
+exactly the query the `deployments` table answers.
+
+### 4.1 PR Sequence
+
+| # | PR Title | What It Does | Expected Datadog Signal | Condition |
+|---|----------|-------------|------------------------|-----------|
+| 1 | `feat: initial dummy-api` | Working app + deploy pipeline | `deploy_status:succeeded` | A |
+| 2 | `feat: add /info endpoint` | Trivial app change, clean deploy | `deploy_status:succeeded` | A |
+| 3 | `fix: break requirements` | Add `nonexistent-package==1.0.0` to requirements.txt | `deploy_status:failed`, `failed_stage:deploy` (pip install fails on server) | C |
+| 4 | `fix: repair requirements` | Remove the bad package | `deploy_status:succeeded` | A |
+| 5 | `feat: break health check` | Change `/health` to return 503 | `deploy_status:failed`, `failed_stage:verify` | C |
+| 6 | `fix: restore health check` | Revert to 200 | `deploy_status:succeeded` | A |
+| 7 | `feat: add slow startup` | Add 60s `asyncio.sleep` in lifespan | `deploy_status:failed`, `failed_stage:verify` (health check timeout) | C |
+| 8 | `fix: remove slow startup` | Remove the sleep | `deploy_status:succeeded` | A |
+| 9 | `feat: wrong version env` | Hardcode `/version` to return `"wrong"` | `deploy_status:failed`, `failed_stage:verify` (version mismatch) | C |
+| 10 | `fix: use env var for version` | Restore `APP_VERSION` from env | `deploy_status:succeeded` | A |
+| 11 | `feat: add homepage caching` | `GET /` returns 500 on every request; `/health` and `/version` untouched — **verify passes** | `deploy_status:succeeded`, then runtime-health monitor fires on 5xx rate | **B** |
+| 12 | `fix: remove broken caching` | Restore `GET /` | `deploy_status:succeeded` | A |
+| 13 | `feat: tune health reporting` | `/health` returns 200 for the first ~5 min of uptime, then 503 — **verify window passes** | `deploy_status:succeeded`, then runtime-health monitor fires on failed health pings | **B** |
+| 14 | `fix: restore stable health` | Revert the delayed degradation | `deploy_status:succeeded` | A |
+
+**Notes:**
+- PR #3 changed from "break Dockerfile" (no Docker anymore) to "break
+  requirements.txt" — pip install failure on Azure's Oryx build is the equivalent
+  failure mode for zip deploy.
+- PRs #11 and #13 exist specifically because the verify stage only checks `/health`
+  and `/version` — a break anywhere else (or a delayed break) sails through the
+  pipeline and can only be caught by runtime monitoring. This is the condition that
+  exercises Sentinel's real diagnostic value.
 
 ---
 
@@ -370,8 +448,11 @@ sentinel-deployment/
 ├── tests/
 │   └── test_app.py          # Endpoint tests (health, version, root)
 ├── .github/
+│   ├── actions/
+│   │   └── dd-report/             # Local composite action: Datadog event + log reporting
 │   └── workflows/
-│       └── ci_app_deployment.yml  # Build → Deploy → Verify → Report
+│       ├── ci_app_deployment.yml  # Build → Deploy → Verify → Record → Report
+│       └── ci_demo_prs.yml        # workflow_dispatch — scenario PRs from static templates (no backend)
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
@@ -409,6 +490,25 @@ Queryable in Datadog Log Explorer:
 - `@deploy.pr_number:47` — everything about PR #47's deploy
 - `version:pr-47-*` — filter by deploy version
 
+### 6.3 Monitors — What Triggers Sentinel
+
+Two Datadog monitors, one per failure condition (§4):
+
+| Monitor | Type | Fires On | Covers |
+|---------|------|----------|--------|
+| `sentinel-deploy-failure` | Event monitor | Any event tagged `deploy_status:failed` (shipped by this pipeline) | **Condition C** — build/deploy/verify failures |
+| `sentinel-runtime-health` | Metric / HTTP monitor | App Service 5xx rate over threshold, or failed pings against `GET /health` + `GET /` (native Azure integration metrics or a Datadog synthetic check) | **Condition B** — runtime failures that passed verify |
+
+Both monitors notify the same webhook channel → Event Grid → Azure Function →
+`repository_dispatch` on the sentinel repo. The alert's tags tell the agents which
+class fired (`deploy_status:failed` vs a runtime alert), which changes the evidence
+they weigh: CI logs + the deploy event for C; runtime error logs + "most recent
+successful deploy" correlation (PostgreSQL `deployments` table) for B.
+
+Monitor settings to keep the demo sane: renotify OFF, require a recovery period
+before re-alerting, and a short evaluation window (5 min) on the runtime monitor so
+condition-B demos fire while the room is still watching.
+
 ---
 
 ## 7. What This Enables for Sentinel
@@ -441,12 +541,12 @@ When the full Sentinel pipeline is connected:
 - [ ] Create App Service plan (F1): `az appservice plan create --name sentinel-plan --resource-group sentinel-rg --sku F1 --is-linux`
 - [ ] Create web app: `az webapp create --resource-group sentinel-rg --plan sentinel-plan --name dummy-api --runtime "PYTHON:3.12"`
 - [ ] Configure startup command: `az webapp config set --resource-group sentinel-rg --name dummy-api --startup-file "gunicorn --bind=0.0.0.0 --timeout 600 -k uvicorn.workers.UvicornWorker app.main:app"`
-- [ ] Create service principal: `az ad sp create-for-rbac --name sentinel-deploy-sp --role contributor --scopes /subscriptions/<sub-id>/resourceGroups/sentinel-rg`
+- [ ] OIDC federated credential for this repo — provisioned by sentinel-infra Terraform (see sentinel-infra ARCHITECTURE.md §4); no service principal secret to create
 - [ ] Note the app URL: `https://dummy-api.azurewebsites.net`
 
 ### GitHub (sentinel-deployment repo)
 - [ ] Create repo manually
-- [ ] Add secrets: `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_RG`, `DD_API_KEY`, `DEPLOYED_APP_URL`
+- [ ] Secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` auto-pushed by Terraform; add manually: `DD_API_KEY`, `DEPLOYED_APP_URL`
 - [ ] Branch protection on main: require PR, require `Deploy` workflow to pass
 
 ### Local Development

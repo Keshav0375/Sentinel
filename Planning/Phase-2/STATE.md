@@ -1,18 +1,18 @@
 # Sentinel Phase 2 — Planning State
 
-> Last updated: 2026-07-04
+> Last updated: 2026-07-05
 
 ## Current Phase
 
-Architecture planning complete for all three repos. All design questions resolved. sentinel-infra architecture expanded with OIDC, cross-repo secrets, Key Vault policies, PostgreSQL firewall, and standardized workflow naming. Ready for implementation once Azure resources are bootstrapped.
+Architecture planning complete for all three repos (rev 4 — 2026-07-05). Backend runs on AKS with **scale-to-zero** (node pool 0↔1 per run, `sentinel-backend` concurrency group, `KEEP_WARM` demo mode, nightly auto-down) and a **dynamic per-run backend URL** (resolved from the cluster; Service + LB IP deleted at teardown → $0 infra at idle). HITL is fire-and-forget, `deployments` table written by the deploy pipeline, demo PRs are template-based (`/generate/pr-content` serves rollback PRs only). Reusable composite actions (`backend-up/down`, `get-kv-secrets`, `notify-teams`, `psql-exec`, `dd-report`) and top-level repo buckets (`src/sentinel`, `azure/`, `.github/`, `Planning/`, `.claude/`, `tests/`, `alembic/`) documented. All four architecture docs + READMEs synced. Ready for implementation once Azure resources are bootstrapped.
 
 ## Repo Status
 
 | Repo | Architecture | TODO | Testing | README | Status |
 |------|-------------|------|---------|--------|--------|
-| sentinel (= backend) | **final** | not-started | not-started | draft | Architecture finalized — all 9 design questions resolved |
-| sentinel-deployment | final | not-started | not-started | draft | Ready to build (blocked on Azure + Datadog setup) |
-| sentinel-infra | **final** | not-started | not-started | draft | Architecture finalized — 6 modules, AKS removed, secrets updated |
+| sentinel (= backend) | **final (rev 3)** | not-started | not-started | draft | AKS scale-to-zero, fire-and-forget HITL, 3-table schema, ci_backend_scale.yml, /generate/pr-content = rollback PRs only |
+| sentinel-deployment | **final (rev 3)** | not-started | not-started | draft | Record-deployment stage; demo PRs template-based, 3-condition taxonomy (A/B/C) + 2 monitors (blocked on Azure + Datadog setup) |
+| sentinel-infra | **final (rev 3)** | not-started | not-started | draft | 7 modules — AKS with node_count ignore_changes for scale-to-zero; sentinel-api-token secret |
 
 Note: There is no separate sentinel-backend repo. The sentinel repo IS the backend.
 
@@ -29,6 +29,51 @@ None — all architectural decisions resolved. Implementation can begin once blo
 - [ ] OpenAI API key — who: Keshav — impact: blocks fallback LLM calls
 
 ## Decision Log
+
+### 2026-07-05: Dynamic backend URL + reusable composite actions + repo buckets
+**Context:** The static `SENTINEL_BACKEND_URL` variable forced the LB public IP to persist at scale-zero (~$3-4/mo) — and after the demo-PR correction, no consumer outside the two GHA workflows needs a stable URL. Separately, repeated step blocks (Key Vault reads, Teams posts, psql calls) were copy-pasted across jobs.
+**Decision:** (1) **Dynamic URL:** `backend-up` resolves the LB ingress IP from the cluster and emits `backend-url` as an action/job output (non-secret → outputs are legal); `backend-down` deletes the Service, releasing the public IP → **infra is $0 at idle**. Fresh IP per cold run (+~1-3 min LB provisioning); same IP within a KEEP_WARM session. `SENTINEL_BACKEND_URL` variable removed. (2) **Reusable composite actions** in sentinel `.github/actions/`: `backend-up`, `backend-down`, `get-kv-secrets` (fetch + mask), `notify-teams`, `psql-exec`; local `dd-report` action in sentinel-deployment; cross-repo reuse via `uses: <owner>/sentinel/.github/actions/...@main`. Rule: any step block used twice becomes an action. (3) **Repo buckets** documented (sentinel §1.3): `src/sentinel/` (all reasoning, incl. providers/), `azure/` (k8s manifests — moved from `k8s/`), `.github/` (workflows + actions), `alembic/`, `tests/`, `Planning/`, `.claude/` — file system mirrors "backend reasons, GHA executes."
+**Impact:** sentinel §1.1/§1.3 (new)/§8.1/§8.5/§9/§13/§14. Master, infra cost + KV flow, deployment §3.2/§3 Stage 5/§5. Total cost now ~$5-12/mo (LLM only), $0 infra at idle.
+
+### 2026-07-05: Scale-to-zero backend — node pool 0↔1 per run (amends AKS always-on)
+**Context:** Always-on consumes ~730 of the 750 free B2ats_v2 hrs/mo, leaving nothing for other projects. User chose per-run up/down over the recommended session toggle, accepting the cold-start cost. Key insight driving the design: the **node** is the meter, not the pod — scale-to-zero must target the node pool.
+**Decision:** Node pool idles at 0. Shared composite actions `backend-up` (nodepool→1, replicas→1, wait /ready; ~3-7 min cold) and `backend-down` (both→0). `ci_incident_response.yml`: `ensure-backend-up` replaces the health gate (can't come up → Teams alert + loud fail); `teardown-backend` before summary. `ci_backend_deployment.yml`: scales up before deploy, down after. Safety rails: (1) both workflows serialized via `concurrency: group: sentinel-backend` so one run's teardown can't kill another's backend (GHA caveat documented: max 1 queued run per group); (2) `SENTINEL_KEEP_WARM=true` repo variable skips teardowns for live demo sessions; (3) new `ci_backend_scale.yml` — manual up/down + nightly auto-down cron; (4) Terraform `ignore_changes` on node_count so applies don't fight the workflows. LB IP persists at scale-zero → `BACKEND_URL` stays stable. Node consumption: ~20-80 hrs/mo; backend-computed MTTR excludes spin-up (measured from webhook receipt).
+**Impact:** sentinel ARCHITECTURE §1, §8.4/§8.5 (new), §9.2/§9.3/§9.5, §14. sentinel-infra §3.7 (lifecycle block), §11. Master doc, READMEs synced.
+
+### 2026-07-05: /generate/pr-content scope — rollback PR content ONLY; demo PRs are template-based
+**Context:** Docs had sentinel-deployment's demo-PR workflow calling the backend for realistic PR titles/descriptions. User correction: demo PRs are manual/automated template-style with no agent involvement; the PR-content agent exists solely to write the revert PR during incident response.
+**Decision:** `ci_demo_prs.yml` is self-contained — each scenario carries scripted file changes + a pre-written title/description; no backend call, no `SENTINEL_API_URL` variable, not in the concurrency group. `POST /generate/pr-content`'s only consumer is `ci_incident_response.yml`'s `generate-pr-content` job; its contract now takes incident context (root_cause, evidence_summary, confidence, target_deploy) and returns a `revert:`-prefixed title + Incident/Root Cause/Evidence/Rollback description written for the merge-or-close reviewer.
+**Impact:** sentinel ARCHITECTURE §3.4 rewritten, §1.1/§8.4/§8.5 cleaned. sentinel-deployment §4/§3.4/§5/§8, README. Infra: sentinel-api-token consumer list.
+
+### 2026-07-04: ci_incident_response health gate — validate the backend, never start it *(SUPERSEDED 2026-07-05: scale-to-zero — `ensure-backend-up` scales the backend up instead of gate-and-fail; the Teams-alert-on-failure behavior carries over)*
+**Context:** With the backend always-on on AKS, the incident workflow must not manage its lifecycle — but it must also never process an incident against a dead backend, and never fail silently.
+**Decision:** New `check-backend` gate job (Job 0): `curl /health` + `/ready`. Ready → proceed to parallel context fetch. Down → Teams alert ("incident alert received but backend is unreachable — NOT processed, manual action needed") and the workflow fails loudly. All fetch jobs `needs: check-backend`.
+**Impact:** sentinel ARCHITECTURE §9.3 (job flow + YAML), §9.5, master §2/§8, sentinel README.
+
+### 2026-07-04: Demo PR taxonomy — three conditions (A/B/C) + two Datadog monitors
+**Context:** The 10-PR demo sequence only produced pipeline-detected failures (verify/deploy stage). It had zero scenarios where the deploy is green but the site breaks at runtime — the condition that exercises Sentinel's real diagnostic value.
+**Decision:** Every demo PR is classified: **A** clean (green deploy, healthy app, no incident — baseline memory); **B** runtime failure (green deploy, app breaks under traffic → runtime-health monitor fires → revert PR heals the live site); **C** deploy failure (pipeline red, old version usually keeps serving → deploy-failure event monitor fires → revert PR heals main's deployability). Added PRs #11-14 (B scenarios: break `GET /` while `/health` stays green; delayed `/health` degradation past the verify window). Two Datadog monitors defined: `sentinel-deploy-failure` (event monitor on `deploy_status:failed`) and `sentinel-runtime-health` (5xx rate / failed health pings), both notifying the same webhook → Event Grid path; alert tags tell the agents which evidence class to weigh.
+**Impact:** sentinel-deployment ARCHITECTURE §4 (taxonomy + 14-PR table), new §6.3 (monitors), README. Partially resolves the "monitor definition missing" review gap.
+
+### 2026-07-04: Backend hosting — AKS single replica (supersedes 2026-07-02 ephemeral decision) *(AMENDED 2026-07-05: scale-to-zero — no longer always-on)*
+**Context:** Architecture review found the ephemeral design unimplementable as specced: each GHA job runs on a fresh runner VM, so a container started in a `start-backend` job doesn't exist for `run-agent-pipeline`; GHA also refuses to pass masked secrets between jobs via outputs. The ephemeral pivot had additionally orphaned `/generate/pr-content` (sentinel-deployment's demo-PR workflow had no host to call) and removed the always-on API.
+**Decision:** Backend runs as a single-replica Kubernetes Deployment on AKS — free control plane + 1× B2ats_v2 node (free 750 hrs/mo for 12 months, expires 05/2027). Public LoadBalancer IP (dev); all non-health endpoints require `X-Sentinel-Token` (new Key Vault secret `sentinel-api-token`). Secrets sync Key Vault → K8s Secret at deploy time. Kubelet gets AcrPull. K8s manifests (`k8s/deployment.yaml`, `k8s/service.yaml`) live in the sentinel repo, applied by CI — Terraform provisions the cluster only.
+**Impact:** sentinel ARCHITECTURE §1, §8 (ephemeral lifecycle → AKS deployment), §9 (all three workflows redesigned), §14 (cost). sentinel-infra: AKS module restored (6→7 modules), secret flows rewritten. Master doc synced. Cost: still ~$0 infra for 12 months (+~$0-4 LB IP); ~$30/mo node after.
+
+### 2026-07-04: HITL — fire-and-forget PR creation, no lifecycle tracking
+**Context:** The old design said the backend "watches for the PR merge event" — impossible-adjacent and unnecessary; Phase 2 has no requirement for reviewer/merge-outcome data.
+**Decision:** Sentinel's job ends when the revert PR exists and Teams is notified (or escalation is notified). No waiting states, no merge/close tracking. `revert_prs` table dropped (4→3 tables); `pr_number`/`pr_url` recorded on the `incidents` row by GHA right after PR creation (creation record only). Incident is terminal at pipeline completion; `mttr_seconds` = pipeline duration (alert → decision), not human review latency. The PR on GitHub remains the approval gate and audit trail.
+**Impact:** sentinel ARCHITECTURE §3.3, §5 (schema), §9.3. Master §5, §7. READMEs synced.
+
+### 2026-07-04: deployments table writer — ci_app_deployment.yml records every deploy
+**Context:** Review found the `deployments` table had no writer — `get_deploy_details` and deploy↔incident correlation would query an empty table.
+**Decision:** New Stage 5 "Record Deployment" in ci_app_deployment.yml, `if: always()`: OIDC login → read `db-password` from Key Vault → psql INSERT (service, pr_number, commit_sha, author, deploy_status, gha_run_id, files_changed, metadata incl. failed_stage). Failed deploys recorded too — they're the rows incidents join against. `incident_id` backfilled by the backend on correlation. No DB credentials in GitHub secrets.
+**Impact:** sentinel-deployment ARCHITECTURE §3 (stages renumbered), §3.3, §3.4. PostgreSQL firewall rationale updated (GHA runners write to DB).
+
+### 2026-07-04: Renamed ci_backend_validation.yml → ci_backend_deployment.yml
+**Context:** With AKS hosting the post-merge workflow's job is deployment, not just validation.
+**Decision:** `ci_backend_deployment.yml`: quality → build+push (immutable sha tag, no `latest`) → deploy-to-aks (secret sync, `kubectl set image`, rollout status) → tests against the live deployment (incl. smoke test) → promote `stable` tag on green / `kubectl rollout undo` + Teams alert on red. Nothing pulls `latest` at runtime — AKS pins the sha tag, so a half-validated image can't serve an incident.
+**Impact:** sentinel ARCHITECTURE §9.2, workflow tables everywhere, sentinel-infra §3.1 image table, READMEs.
 
 ### 2026-07-04: Added ci_validation.yml — fast PR gate, split from ci_backend_validation
 **Context:** `ci_backend_validation.yml` runs the full pipeline including ACR push, ACR cleanup, and smoke tests. This is heavy for every PR open/sync (~8-12 min). Developers need fast feedback on PRs.
@@ -65,7 +110,7 @@ None — all architectural decisions resolved. Implementation can begin once blo
 **Decision:** Allow all (`0.0.0.0` to `255.255.255.255`) for dev. DB still protected by username + password. Production would use Private Endpoint + VNet.
 **Impact:** Updated postgresql module (§3.2) with explicit rationale and comparison table of alternatives.
 
-### 2026-07-02: Ephemeral backend — run inside GHA, not AKS
+### 2026-07-02: Ephemeral backend — run inside GHA, not AKS *(SUPERSEDED 2026-07-04: AKS single replica — multi-job GHA design was unimplementable)*
 **Context:** Backend was planned for 24/7 AKS hosting. But the pipeline runs a few times per day during demos. Paying for always-on compute for a 5-minute job is waste.
 **Decision:** Backend runs as an ephemeral Docker container inside the GHA runner. Per-incident lifecycle: fetch secrets → pull image from ACR → docker run → validate /health + /ready → run pipeline → teardown. Zero compute cost (uses GHA free minutes). PostgreSQL stays always-on (free tier). AKS module removed from Terraform.
 **Impact:** Rewrote sentinel/ARCHITECTURE.md §1 (system overview), §8 (K8s manifests → ephemeral lifecycle), §9 (workflows), §10 (Terraform: 7→6 modules), §14 (cost breakdown). No K8s manifests needed. cd_backend.yml simplified to build+push only.
@@ -85,7 +130,7 @@ None — all architectural decisions resolved. Implementation can begin once blo
 **Decision:** Backend returns a detailed response with `resolution_type` (rollback/escalated) + full context. GHA jobs branch on that: rollback path → generate-pr-content job → create-rollback-pr job → notify-rollback job. Escalation path → notify-escalation job. Both → summary job. `draft_rollback_pr` tool removed from backend, replaced by `prepare_rollback_spec` (outputs target SHA + justification, doesn't call GitHub API).
 **Impact:** Updated incident_response.yml with full job DAG. Updated tool table. Notifications moved entirely to GHA.
 
-### 2026-07-01: PR content generation endpoint — specialized agent for demo PRs
+### 2026-07-01: PR content generation endpoint — specialized agent for demo PRs *(SCOPE CHANGED 2026-07-05: rollback PR content only — demo PRs are template-based)*
 **Context:** sentinel-deployment creates demo PRs that intentionally break things. PR titles and descriptions need to look realistic — a template can't produce convincing developer-style justifications for changes that are secretly broken.
 **Decision:** New `POST /generate/pr-content` endpoint on sentinel backend. Takes scenario context (files changed, diff summary, failure class) and returns LLM-generated PR title + description. Uses Haiku 4.5 (constrained generation, not reasoning). sentinel-deployment GHA calls this in a `generate-pr-content` job, passes output to a `create-pr` job.
 **Impact:** Updated sentinel/ARCHITECTURE.md §3.4 (new API contract), §4.7 (model table), §13.3 (new files). New files: `agents/pr_content_generator.py`, `agents/prompts/pr_content_generator.txt`, `api/generate.py`.
