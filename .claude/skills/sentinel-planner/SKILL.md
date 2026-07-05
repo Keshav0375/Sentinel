@@ -1,6 +1,6 @@
 ---
 name: sentinel-planner
-description: "Sentinel Phase 2 planning agent. Manages architecture docs, TODOs, READMEs, reference links, and planning state across all three repos (sentinel, sentinel-deployment, sentinel-infra, sentinel-backend). Trigger: /sentinel-planner"
+description: "Sentinel Phase 2 planning agent. Manages architecture docs, TODOs, READMEs, reference links, and planning state across all repos (sentinel, sentinel-deployment, sentinel-infra). Trigger: /sentinel-planner"
 trigger: /sentinel-planner
 ---
 
@@ -39,7 +39,6 @@ Read the README.md in each repo folder to understand current state per repo:
 - `Planning/Phase-2/sentinel/README.md`
 - `Planning/Phase-2/sentinel-deployment/README.md`
 - `Planning/Phase-2/sentinel-infra/README.md`
-- `Planning/Phase-2/sentinel-backend/README.md`
 
 ### Step 3 — Read context as needed
 
