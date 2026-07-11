@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, release-phase-2]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -47,6 +47,12 @@ jobs:
         run: |
           BRANCH="${{ github.head_ref }}"
           PATTERN="^(feat|fix|refactor|ci|docs|test|chore|planning|ai|hotfix)/[a-z0-9._-]+$"
+
+          # release-phase-2 is the Phase 2 integration branch that merges into main.
+          if [[ "$BRANCH" == "release-phase-2" ]]; then
+            echo "✅ Integration branch '$BRANCH' — allowed"
+            exit 0
+          fi
 
           if [[ ! "$BRANCH" =~ $PATTERN ]]; then
             echo "❌ Branch name '$BRANCH' does not match convention"

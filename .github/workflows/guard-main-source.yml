@@ -1,0 +1,27 @@
+name: Guard main source
+
+# Enforces: main only accepts merges from release-phase-2.
+# GitHub branch protection cannot restrict a pull request's SOURCE branch
+# natively, so this required status check does it. The workflow lives on main
+# (the PR base), so it runs for every PR into main regardless of the head
+# branch's contents. Keep the job name `verify-source-branch` stable — it is
+# referenced by name as a required status check in main's branch protection.
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify-source-branch:
+    name: verify-source-branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure PR into main comes from release-phase-2
+        run: |
+          HEAD="${{ github.head_ref }}"
+          echo "PR source branch: $HEAD"
+          if [ "$HEAD" != "release-phase-2" ]; then
+            echo "::error::main only accepts merges from 'release-phase-2'. This PR is from '$HEAD'."
+            exit 1
+          fi
+          echo "✅ Source is release-phase-2 — merge into main allowed."
