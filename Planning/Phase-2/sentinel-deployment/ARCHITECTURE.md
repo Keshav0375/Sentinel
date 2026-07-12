@@ -256,8 +256,8 @@ Notes:
 - `incident_id` stays NULL here; the backend backfills it when an incident
   correlates to this deploy.
 - Implemented via sentinel's shared composite actions, referenced cross-repo:
-  `uses: <owner>/sentinel/.github/actions/get-kv-secrets@main` and
-  `uses: <owner>/sentinel/.github/actions/psql-exec@main` — one SQL/secret
+  `uses: Keshav0375/Sentinel/.github/actions/get-kv-secrets@main` and
+  `uses: Keshav0375/Sentinel/.github/actions/psql-exec@main` — one SQL/secret
   implementation maintained in one place.
 
 #### Stage 6: Final Summary (if: always())

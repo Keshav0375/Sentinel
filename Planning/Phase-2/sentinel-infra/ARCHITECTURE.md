@@ -381,7 +381,7 @@ resource "azurerm_linux_function_app" "bridge" {
 
   app_settings = {
     "GITHUB_TOKEN"      = "@Microsoft.KeyVault(VaultName=sentinel-kv;SecretName=github-pat)"
-    "GITHUB_REPO"       = "keshxvDev/sentinel"
+    "GITHUB_REPO"       = "Keshav0375/Sentinel"
     "GITHUB_EVENT_TYPE" = "incident-alert"
   }
 }
@@ -523,6 +523,11 @@ GHA workflow                Azure AD
 
 ### 4.2 Terraform resources for OIDC
 
+> **Casing matters.** The GitHub OIDC token's `sub` claim uses the repository's canonical
+> owner/name (`Keshav0375/Sentinel-infra`, `Keshav0375/Sentinel-deployment`,
+> `Keshav0375/Sentinel`), and Azure matches federated-credential subjects as an exact,
+> case-sensitive string. Use the real casing below verbatim.
+
 ```hcl
 # Azure AD Application
 resource "azuread_application" "sentinel_gha" {
@@ -546,7 +551,7 @@ resource "azuread_application_federated_identity_credential" "sentinel_infra_mai
   display_name   = "sentinel-infra-main"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:keshxvDev/sentinel-infra:ref:refs/heads/main"
+  subject        = "repo:Keshav0375/Sentinel-infra:ref:refs/heads/main"
 }
 
 resource "azuread_application_federated_identity_credential" "sentinel_infra_pr" {
@@ -554,7 +559,7 @@ resource "azuread_application_federated_identity_credential" "sentinel_infra_pr"
   display_name   = "sentinel-infra-pr"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:keshxvDev/sentinel-infra:pull_request"
+  subject        = "repo:Keshav0375/Sentinel-infra:pull_request"
 }
 
 resource "azuread_application_federated_identity_credential" "sentinel_main" {
@@ -562,7 +567,7 @@ resource "azuread_application_federated_identity_credential" "sentinel_main" {
   display_name   = "sentinel-main"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:keshxvDev/sentinel:ref:refs/heads/main"
+  subject        = "repo:Keshav0375/Sentinel:ref:refs/heads/main"
 }
 
 resource "azuread_application_federated_identity_credential" "sentinel_pr" {
@@ -570,7 +575,7 @@ resource "azuread_application_federated_identity_credential" "sentinel_pr" {
   display_name   = "sentinel-pr"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:keshxvDev/sentinel:pull_request"
+  subject        = "repo:Keshav0375/Sentinel:pull_request"
 }
 
 resource "azuread_application_federated_identity_credential" "sentinel_deployment_main" {
@@ -578,7 +583,7 @@ resource "azuread_application_federated_identity_credential" "sentinel_deploymen
   display_name   = "sentinel-deployment-main"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:keshxvDev/sentinel-deployment:ref:refs/heads/main"
+  subject        = "repo:Keshav0375/Sentinel-deployment:ref:refs/heads/main"
 }
 ```
 
@@ -608,7 +613,7 @@ az role assignment create --assignee $SP_OBJ_ID \
 az ad app federated-credential create --id $APP_ID --parameters '{
   "name": "sentinel-infra-main",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:keshxvDev/sentinel-infra:ref:refs/heads/main",
+  "subject": "repo:Keshav0375/Sentinel-infra:ref:refs/heads/main",
   "audiences": ["api://AzureADTokenExchange"]
 }'
 
@@ -616,7 +621,7 @@ az ad app federated-credential create --id $APP_ID --parameters '{
 az ad app federated-credential create --id $APP_ID --parameters '{
   "name": "sentinel-infra-pr",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:keshxvDev/sentinel-infra:pull_request",
+  "subject": "repo:Keshav0375/Sentinel-infra:pull_request",
   "audiences": ["api://AzureADTokenExchange"]
 }'
 ```
@@ -638,7 +643,7 @@ automatically using the GitHub provider — no manual copy-paste.
 ```hcl
 provider "github" {
   token = var.github_pat
-  owner = "keshxvDev"
+  owner = "Keshav0375"
 }
 ```
 
@@ -646,37 +651,37 @@ provider "github" {
 
 ```hcl
 resource "github_actions_secret" "sentinel_acr_login_server" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "ACR_LOGIN_SERVER"
   plaintext_value = azurerm_container_registry.sentinel.login_server
 }
 
 resource "github_actions_secret" "sentinel_acr_username" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "ACR_USERNAME"
   plaintext_value = azurerm_container_registry.sentinel.admin_username
 }
 
 resource "github_actions_secret" "sentinel_acr_password" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "ACR_PASSWORD"
   plaintext_value = azurerm_container_registry.sentinel.admin_password
 }
 
 resource "github_actions_secret" "sentinel_azure_client_id" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "AZURE_CLIENT_ID"
   plaintext_value = azuread_application.sentinel_gha.client_id
 }
 
 resource "github_actions_secret" "sentinel_azure_tenant_id" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "AZURE_TENANT_ID"
   plaintext_value = data.azurerm_client_config.current.tenant_id
 }
 
 resource "github_actions_secret" "sentinel_azure_subscription_id" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "AZURE_SUBSCRIPTION_ID"
   plaintext_value = data.azurerm_client_config.current.subscription_id
 }
@@ -686,19 +691,19 @@ resource "github_actions_secret" "sentinel_azure_subscription_id" {
 
 ```hcl
 resource "github_actions_secret" "deployment_azure_client_id" {
-  repository      = "sentinel-deployment"
+  repository      = "Sentinel-deployment"
   secret_name     = "AZURE_CLIENT_ID"
   plaintext_value = azuread_application.sentinel_gha.client_id
 }
 
 resource "github_actions_secret" "deployment_azure_tenant_id" {
-  repository      = "sentinel-deployment"
+  repository      = "Sentinel-deployment"
   secret_name     = "AZURE_TENANT_ID"
   plaintext_value = data.azurerm_client_config.current.tenant_id
 }
 
 resource "github_actions_secret" "deployment_azure_subscription_id" {
-  repository      = "sentinel-deployment"
+  repository      = "Sentinel-deployment"
   secret_name     = "AZURE_SUBSCRIPTION_ID"
   plaintext_value = data.azurerm_client_config.current.subscription_id
 }

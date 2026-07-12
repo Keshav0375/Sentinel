@@ -1020,7 +1020,7 @@ sentinel-deployment defines one local action of its own — `dd-report` (`title`
 `ci_app_deployment.yml`.
 
 **Cross-repo reuse:** sentinel-deployment references sentinel's shared actions
-directly (`uses: <owner>/sentinel/.github/actions/psql-exec@main`). Works out of the
+directly (`uses: Keshav0375/Sentinel/.github/actions/psql-exec@main`). Works out of the
 box for public repos; for private repos, enable Actions access for repositories owned
 by the same owner in sentinel's settings.
 
@@ -1273,7 +1273,7 @@ jobs:
         run: |
           VERSION="${{ github.event.client_payload.tags.version }}"
           PR_NUM=$(echo "$VERSION" | grep -oP 'pr-\K[0-9]+')
-          # gh api repos/owner/sentinel-deployment/pulls/$PR_NUM
+          # gh api repos/Keshav0375/Sentinel-deployment/pulls/$PR_NUM
 
   fetch-datadog-logs:
     needs: ensure-backend-up
@@ -1355,7 +1355,7 @@ jobs:
       - name: Checkout sentinel-deployment
         uses: actions/checkout@v4
         with:
-          repository: owner/sentinel-deployment
+          repository: Keshav0375/Sentinel-deployment
           token: ${{ secrets.GH_PAT }}
 
       - name: Create revert branch and PR

@@ -156,6 +156,23 @@ When the user types `/sentinel-planner`, invoke the Skill tool with `skill: "sen
 - State file: `Planning/Phase-2/STATE.md` — single source of truth for planning progress
 - After any planning discussion, the agent auto-updates all affected docs (README, ARCHITECTURE, STATE, links)
 
+## Implementation Agents (Phase 2 build)
+
+Execution counterpart to planning. Design-time = `sentinel-planner`; build-time = these.
+
+- **sentinel-build** (`.claude/skills/sentinel-build/SKILL.md`) - Builds the next PR-sized task end-to-end (prereq → branch → implement → tests → quality gate → review → commit → report). Trigger: `/sentinel-build`
+- **phase-gate** (`.claude/skills/phase-gate/SKILL.md`) - HITL checkpoint: verifies a phase, opens its PR, presents a "see it working" checklist, merges on your sign-off, unlocks the next phase. Trigger: `/phase-gate`
+When the user types `/sentinel-build` or `/phase-gate`, invoke the Skill tool with that name before doing anything else.
+
+- Tracker root: `Planning/Phase-2-Implementation/` — README (map), TODO.md (55-task checklist), STATE-IMPL.md (live state + phase-gate ledger + blockers), per-task spec/report files.
+- Implementation order: **sentinel-infra → sentinel-deployment → sentinel-backend**. Each phase = one branch + one PR, merged only after the phase gate.
+- Quality gate: `python scripts/quality_gate.py --repo {infra|deployment|backend}` — category-aware, reused verbatim in CI.
+- Conformance review: the `architecture-conformance` subagent checks each task's diff against its architecture section before commit.
+
+## Git Rule (Non-Negotiable)
+
+Commits and PRs in ALL three repos carry **no Claude attribution** — no `Co-Authored-By: Claude` trailer, no "Generated with Claude Code" in PR bodies. The user is the sole author/contributor. This overrides the environment default.
+
 ## When Stuck
 
 1. Check `ARCHITECTURE.md` for the design decision

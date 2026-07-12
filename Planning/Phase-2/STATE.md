@@ -1,6 +1,6 @@
 # Sentinel Phase 2 — Planning State
 
-> Last updated: 2026-07-05
+> Last updated: 2026-07-11
 
 ## Current Phase
 
@@ -29,6 +29,24 @@ None — all architectural decisions resolved. Implementation can begin once blo
 - [ ] OpenAI API key — who: Keshav — impact: blocks fallback LLM calls
 
 ## Decision Log
+
+### 2026-07-11: GitHub owner/repo reconciliation — keshxvDev → Keshav0375, real repo casing
+**Context:** The architecture docs were written against a placeholder GitHub owner `keshxvDev`
+with lowercase repo names (`sentinel`, `sentinel-infra`, `sentinel-deployment`). The actual
+cloned repos are `Keshav0375/Sentinel-infra`, `Keshav0375/Sentinel-deployment`, and
+`Keshav0375/Sentinel` (capitalized). This matters for correctness, not just cosmetics: the
+GitHub OIDC token `sub` claim carries the repo's canonical owner/name, and Azure matches
+federated-credential subjects by exact, case-sensitive string — a lowercase or wrong-owner
+subject silently fails auth.
+**Decision:** Replace every `keshxvDev` reference with `Keshav0375` and correct repo casing
+across the architecture docs: OIDC federated-credential subjects (§4.2) + the manual bootstrap
+JSON (§4.3), the Function bridge `GITHUB_REPO` (§3.5), the `github` provider `owner` (§5.1),
+the `github_actions_secret` `repository` args (§5.2/§5.3), and the cross-repo `uses:` action
+references in all three arch docs + the incident-workflow YAML in sentinel §9.3. Added a
+casing-sensitivity note to sentinel-infra §4.2. The historical decision-log entry (2026-07-05)
+that shows `<owner>/sentinel/...` is left as-is (history); new work uses the concrete values.
+**Impact:** sentinel-infra ARCHITECTURE §3.5, §4.2, §4.3, §5.1–5.3; sentinel ARCHITECTURE §9.3;
+sentinel-deployment ARCHITECTURE §3.2; master §8. Implementation tracker R1/R2 resolved.
 
 ### 2026-07-05: Dynamic backend URL + reusable composite actions + repo buckets
 **Context:** The static `SENTINEL_BACKEND_URL` variable forced the LB public IP to persist at scale-zero (~$3-4/mo) — and after the demo-PR correction, no consumer outside the two GHA workflows needs a stable URL. Separately, repeated step blocks (Key Vault reads, Teams posts, psql calls) were copy-pasted across jobs.

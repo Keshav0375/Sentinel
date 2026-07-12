@@ -37,6 +37,7 @@ Terraform provisions the AKS cluster only — the backend's K8s manifests live i
 | Key Vault access | Two roles: Officer (Terraform), User (GHA) | Terraform writes secrets, GHA only reads them at runtime |
 | PostgreSQL firewall | Allow all (dev) | GHA runners (deploy recording, context fetches) have dynamic IPs outside Azure range; AKS egress alone isn't enough |
 | CI runner images | Custom Docker in ACR | Eliminates per-run tool installs |
+| GitHub identity | Owner `Keshav0375`, repos `Sentinel-infra` / `Sentinel-deployment` / `Sentinel` | OIDC `sub` claims are exact case-sensitive matches — real owner/casing required (reconciled 2026-07-11) |
 
 ## GitHub Secrets (this repo)
 
@@ -63,4 +64,4 @@ No `AZURE_CLIENT_SECRET` — OIDC eliminates it.
 
 ## Status
 
-Architecture finalized. Waiting on Azure resource group creation (manual bootstrap) to start implementation.
+Architecture finalized; GitHub owner/repo identity reconciled to `Keshav0375` + real repo casing (2026-07-11). Waiting on Azure resource group creation (manual bootstrap) to start implementation.

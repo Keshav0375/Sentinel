@@ -290,7 +290,7 @@ Repeated step blocks live as **reusable composite actions** in sentinel's
 `.github/actions/` — `backend-up` (outputs the per-run backend URL), `backend-down`,
 `get-kv-secrets`, `notify-teams`, `psql-exec` — plus a local `dd-report` action in
 sentinel-deployment. sentinel-deployment reuses sentinel's actions cross-repo
-(`uses: <owner>/sentinel/.github/actions/psql-exec@main`).
+(`uses: Keshav0375/Sentinel/.github/actions/psql-exec@main`).
 
 | File | Repo | Name | Trigger | Purpose |
 |------|------|------|---------|---------|
