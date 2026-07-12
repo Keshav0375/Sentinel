@@ -1,7 +1,28 @@
-# Sentinel Phase 2 — System Architecture
+# Sentinel Phase 2 — Architecture Index
 
-> Autonomous DevOps incident response across three repos. Backend on-demand on AKS — single replica, scale-to-zero between runs.
-> Datadog detects failure → agent pipeline diagnoses → rollback PR or escalation → human reviews.
+> **The high-level map.** Sentinel is an autonomous DevOps incident-response agent across
+> three repos: Datadog detects a failure → a multi-agent pipeline diagnoses it → a rollback
+> PR or an escalation → a human reviews. This file is the *whole picture* — system diagrams
+> plus a one-paragraph summary of every concern, each pointing to the file that specifies it
+> in depth.
+>
+> **Agents & skills:** read this for context, then follow the **`→ deep dive`** pointer to the
+> authoritative file when implementing a task. This index does **not** restate detail — it
+> routes you to it.
+
+## How to navigate
+
+| You want… | Go to |
+|-----------|-------|
+| The whole picture, fast | §1–§2 diagrams + §3 summaries (this file) |
+| Which file specifies concern X | **§4 Architecture Map** (this file) |
+| Deep detail to implement a task | the per-repo file your task's **Arch refs** cite (§4) |
+| Build order, tasks, status | [Phase-2-Implementation/](../Phase-2-Implementation/README.md) — tracker · 58 tasks · 16 phases |
+| Decisions, blockers, history | [STATE.md](STATE.md) |
+
+**Deep-dive files (authoritative for detail):**
+[sentinel (backend)](sentinel/ARCHITECTURE.md) · [sentinel-deployment](sentinel-deployment/ARCHITECTURE.md) · [sentinel-infra](sentinel-infra/ARCHITECTURE.md).
+Per-task **Arch refs** point into these at the section level (e.g. `sentinel §3.6`).
 
 ---
 
@@ -9,371 +30,206 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              SENTINEL SYSTEM                                    │
-│                                                                                 │
-│  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐  │
-│  │   sentinel           │  │  sentinel-deployment │  │   sentinel-infra     │  │
-│  │   (backend + CI/CD)  │  │  (dummy app)         │  │   (Terraform IaC)    │  │
-│  │                      │  │                      │  │                      │  │
-│  │  Multi-agent         │  │  FastAPI app on      │  │  7 Terraform modules │  │
-│  │  incident response   │  │  Azure App Service   │  │  that provision all  │  │
-│  │  pipeline. Runs as   │  │  F1. Deployed via    │  │  Azure resources     │  │
-│  │  single-replica      │  │  GHA zip deploy.     │  │  incl. AKS. OIDC     │  │
-│  │  Deployment on AKS   │  │  Intentional         │  │  auth, cross-repo    │  │
-│  │  (1 free node).      │  │  failures generate   │  │  secret              │  │
-│  │  Scale-to-zero.      │  │  real Datadog        │  │  distribution.       │  │
-│  │                      │  │  signal.             │  │  terraform apply     │  │
-│  │  Backend reasons.    │  │                      │  │  = entire stack.     │  │
-│  │  GHA executes.       │  │  The target.         │  │                      │  │
-│  └──────────────────────┘  └──────────────────────┘  └──────────────────────┘  │
+│                              SENTINEL SYSTEM                                      │
+│                                                                                  │
+│  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐   │
+│  │   sentinel           │  │  sentinel-deployment │  │   sentinel-infra     │   │
+│  │   (backend + CI/CD)  │  │  (the target app)    │  │   (Terraform IaC)    │   │
+│  │                      │  │                      │  │                      │   │
+│  │  Multi-agent         │  │  FastAPI app on      │  │  7 Terraform modules │   │
+│  │  incident-response   │  │  App Service F1.     │  │  + identity plane.   │   │
+│  │  pipeline on AKS,    │  │  30 scenario         │  │  Provisions the      │   │
+│  │  scale-to-zero.      │  │  branches generate   │  │  whole Azure stack.  │   │
+│  │                      │  │  real Datadog        │  │  terraform apply     │   │
+│  │  Backend reasons.    │  │  signal. Ground      │  │  = everything;       │   │
+│  │  GHA executes.       │  │  truth + eval set.   │  │  ci_destroy = gone.  │   │
+│  └──────────────────────┘  └──────────────────────┘  └──────────────────────┘   │
 │         │                          │                          │                  │
-│         │ Workflows:               │ Workflows:               │ Workflows:       │
-│         │ ci_validation            │ ci_app_deployment.yml    │ ci_infra_dry.yml │
-│         │ ci_backend_deployment    │ ci_demo_prs.yml          │ ci_infra.yml     │
-│         │ ci_incident_response     │                          │ ci_runners.yml   │
+│         │ Workflows:               │ Workflow:                │ Workflows:       │
+│         │ ci_validation            │ ci_app_deployment.yml    │ ci_infra_dry     │
+│         │ ci_backend_deployment    │ (deploys 1 of 30         │ ci_infra         │
+│         │ ci_incident_response     │  scenario branches)      │ ci_destroy_infra │
+│         │ ci_backend_scale         │                          │ ci_runners       │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Repo | Purpose | Runs On |
-|------|---------|---------|
-| **sentinel** | Agent pipeline, tools, memory, API, eval. The brain. | AKS — single-replica Deployment, node pool scaled 0↔1 per run (free control plane + 1× B2ats_v2 node) |
-| **sentinel-deployment** | Dummy FastAPI app. Deployed to Azure. Breaks on purpose. | Azure App Service F1 (always free) |
-| **sentinel-infra** | Terraform modules. Provisions all Azure resources. | GHA + Terraform CLI |
+| Repo | Purpose | Runs on | → deep dive |
+|------|---------|---------|-------------|
+| **sentinel** | Agent pipeline, tools, memory, API, eval. The brain. | AKS — single-replica Deployment, node pool scaled 0↔1 per run | [sentinel/ARCHITECTURE.md](sentinel/ARCHITECTURE.md) |
+| **sentinel-deployment** | Target app + deploy pipeline. Breaks on purpose to make signal. | Azure App Service F1 (always free) | [sentinel-deployment/ARCHITECTURE.md](sentinel-deployment/ARCHITECTURE.md) |
+| **sentinel-infra** | Terraform modules + identity plane. Provisions all Azure resources. | GHA + Terraform CLI | [sentinel-infra/ARCHITECTURE.md](sentinel-infra/ARCHITECTURE.md) |
+
+**Implementation order:** infra → deployment → backend (each phase = 1 branch + 1 PR, merged
+after a human phase gate). See the [tracker](../Phase-2-Implementation/README.md).
 
 ---
 
-## 2. End-to-End Flow
+## 2. End-to-End Incident Flow
 
 ```
  sentinel-deployment                     Azure                        sentinel
 ┌────────────────────┐    ┌──────────────────────────────┐    ┌────────────────────────┐
-│                    │    │                              │    │                        │
-│  PR merged → GHA   │    │  App Service (F1)            │    │  ci_incident_response  │
-│  deploys broken    │───►│  ← deploy lands here         │    │  .yml (GHA workflow)   │
-│  code via zip +    │    │                              │    │                        │
-│  records deploy    │    │  Datadog monitors            │    │  6-stage pipeline:     │
-│  row in PostgreSQL │    │  App Service health/metrics  │    │                        │
-└────────────────────┘    │         │                     │    │  1. scale up backend   │
-                          │         │ alert fires         │    │  2. fetch context ∥    │
-                          │         ▼                     │    │  3. run-agent-pipeline │
-                          │  Event Grid → Function        │    │     POST → AKS backend │
-                          │  (bridge: repository_dispatch)│───►│  4. rollback/escalate  │
-                          │                              │    │  5. scale to zero      │
-                          │  AKS (node pool 0↔1 per run)  │    │  6. post-summary       │
-                          │  ← sentinel-backend lives     │◄───│  calls backend at      │
-                          │    here (1 replica; node      │    │  per-run LB URL (from  │
-                          │    idles at 0 between runs)   │    │  cluster) + token      │
+│  Deploy a scenario │    │  App Service (F1)            │    │  ci_incident_response  │
+│  branch → GHA      │───►│  ← deploy lands here         │    │  .yml (GHA workflow)   │
+│  deploys + records │    │                              │    │                        │
+│  deploy row in PG  │    │  Datadog monitors            │    │  scale-to-zero pipeline│
+│  (Entra DB token)  │    │  (deploy-failure / runtime)  │    │  1. scale up backend   │
+└────────────────────┘    │         │ alert fires        │    │  2. fetch context ∥    │
+                          │         ▼                    │    │  3. run agent pipeline │
+                          │  Event Grid → Function        │    │  4. rollback/escalate  │
+                          │  bridge: stamps signal_type   │───►│  5. scale to zero      │
+                          │  → repository_dispatch        │    │  6. post-summary       │
                           │                              │    │                        │
-                          │  PostgreSQL (B1MS)            │    │                        │
-                          │  ← backend reads/writes ─────│────│                        │
+                          │  AKS (node 0↔1 per run)       │◄───│  POST /webhooks/incident│
+                          │  ← sentinel-backend lives     │    │  at per-run LB URL +   │
+                          │    here (idles at 0)          │    │  Entra bearer token    │
                           │                              │    │                        │
-                          │  ACR (Standard)               │    │                        │
-                          │  ← images pushed by CI,       │    │                        │
-                          │    pulled by AKS              │    │                        │
-                          │                              │    │                        │
-                          │  Key Vault                    │    │                        │
-                          │  ← secrets read per-job by    │    │                        │
-                          │    GHA + synced to K8s Secret │    │                        │
+                          │  PostgreSQL ← backend RW      │    │                        │
+                          │  ACR ← images  ·  Key Vault   │    │                        │
+                          │  Backend auth = workload      │    │                        │
+                          │  identity (no pod secret)     │    │                        │
                           └──────────────────────────────┘    └──────────┬─────────────┘
                                                                         │
-                                                              ┌─────────┴──────────┐
-                                                              │                    │
-                                                     confidence ≥ 0.7        confidence < 0.7
+                                                     confidence ≥ 0.7 ──┴── confidence < 0.7
                                                               │                    │
                                                               ▼                    ▼
-                                                     Create revert PR      Notify Teams
-                                                     on sentinel-          with full context
-                                                     deployment            (no PR, human
-                                                              │            takes over)
-                                                              │
-                                                              ▼
-                                                     PR = HITL gate
-                                                     Reviewer merges or
-                                                     closes (outcome not
-                                                     tracked — see §7)
+                                                     Revert PR on          Notify Teams
+                                                     sentinel-deployment   (no PR — human
+                                                     = HITL gate           takes over)
 ```
 
-### Flow in Words
-
-1. **sentinel-deployment** merges a PR (some intentionally broken) → GHA deploys to App Service and records the deploy row in PostgreSQL (success or failure)
-2. **Datadog** detects the failure via one of two monitors — deploy-failure events (condition C: pipeline failed) or runtime health (condition B: deploy was green but the site broke) — and fires the webhook
-3. **Event Grid → Azure Function** bridges the alert to GitHub `repository_dispatch`
-4. **sentinel's `ci_incident_response.yml`** starts (scale-to-zero: the backend idles at 0 and is scaled up per run):
-   - Scales the backend up (node pool 0→1, replicas 0→1, wait `/ready` — ~3-7 min cold, instant in a `KEEP_WARM` session) and resolves the backend URL from the cluster (no static URL variable — it flows to later jobs as a job output); if it can't come up → Teams alert + loud workflow failure, the incident is never silently dropped
-   - Fetches context in parallel (service info, PR details, Datadog logs) — each job reads its own secrets from Key Vault (GHA can't pass secrets between jobs)
-   - Runs the agent pipeline via `POST /webhooks/incident` on the AKS backend and polls for the result (10-min cap → escalation on timeout)
-   - Branches on the result: rollback PR (+ writes `pr_number`/`pr_url` on the incident row) or escalation
-   - Scales the backend back to zero (`if: always()`, skipped when `SENTINEL_KEEP_WARM=true`)
-   - Notifies Teams, reports to Datadog
+1. **sentinel-deployment** deploys one of its **30 scenario branches** → records the deploy row in PostgreSQL (success or failure). `→ deep dive: sentinel-deployment §3–§4`
+2. **Datadog** fires one of two monitors — `deploy_failure` (case ii, previous version stays live) or `runtime_error` (case iii, green deploy but the app breaks). Case i (clean) fires neither.
+3. **Event Grid → Function** bridges the alert to `repository_dispatch`, **stamping `signal_type`** so the backend branches: deploy_failure → rollback fast path, runtime_error → full pipeline. `→ deep dive: sentinel-infra §3.4–§3.5`
+4. **`ci_incident_response.yml`** scales the backend up, fetches context in parallel, POSTs to the backend (Entra bearer), branches on the result (rollback PR or escalation), scales back to zero, notifies Teams. `→ deep dive: sentinel §9.3`
 
 ---
 
-## 3. Agent Pipeline
+## 3. Cross-Cutting Architecture — at a glance
 
-Six agents, three agentic patterns (plan-execute, reflexion, reverification):
+### 3.1 Agent pipeline — the brain
+Six agents, three agentic patterns (plan-execute · reflexion · reverification). The
+orchestrator branches on `signal_type`; the runtime path self-corrects via a reflexion loop
+and gates action on confidence.
 
 ```
-Webhook payload (enriched by GHA)
-       │
-       ▼
-  ORCHESTRATOR (Sonnet)  ← plans before dispatching
-       │
-       ▼
-  TRIAGE (Haiku)  ← classify severity, identify service, check duplicates
-       │
-       ▼
-  ANALYSIS (Sonnet)  ← analyze logs + deploy data, form hypothesis
-       │
-       ▼
-  REFLEXION (Haiku)  ← self-critique: confidence < 0.7? loop back (max 2×)
-       │
-       ├── confidence ≥ 0.7 + root cause = specific deploy
-       │   │
-       │   ▼
-       │   RESOLUTION (Sonnet)  ← prepare rollback spec (target SHA + justification)
-       │   │
-       │   ▼
-       │   REVERIFICATION (Haiku)  ← does fix match root cause? PASS/FAIL/ESCALATE
-       │
-       └── confidence < 0.7 or ambiguous root cause
-           │
-           ▼
-           ESCALATE  ← return full context to GHA, no PR
-       │
-       ▼
-  JUDGE (Haiku)  ← score trajectory quality (both paths)
-       │
-       ▼
-  Store to PostgreSQL + complete LangFuse trace
+Webhook (signal_type, GHA-enriched)
+  → ORCHESTRATOR (plans; branches on signal_type)
+        deploy_failure → rollback fast path
+        runtime_error  → TRIAGE → ANALYSIS → REFLEXION (loop if conf<0.7, ≤2×)
+  → conf ≥0.7 + specific deploy → RESOLUTION (rollback spec) → REVERIFICATION
+  → else → ESCALATE
+  → JUDGE (scores both paths) → store PostgreSQL + LangFuse trace
 ```
+Tools are read-only or output-only — **no tool touches external state** (backend reasons, GHA
+executes). Models: Sonnet for reasoning, Haiku for classification; Anthropic default, OpenAI
+fallback. **`→ deep dive: sentinel §4` (loops, models, tools) · `§3.1` (two-case handling)**
 
-### LLM Providers
+### 3.2 Identity & secrets — one identity, many audience-scoped tokens
+No stored cloud client secret, no shared API token, no DB password. Three trust edges, each a
+short-lived Entra token stamped for one audience:
+- **GHA → Azure:** OIDC federation (GitHub JWT → ARM token). No `AZURE_CLIENT_SECRET`.
+- **Caller → backend API:** Entra bearer (`api://sentinel-backend` + `Incident.Write`), validated vs JWKS. No `sentinel-api-token`.
+- **Backend pod → Azure:** AKS workload identity → tokens for Key Vault + PostgreSQL. No pod secret.
 
-| Role | Default (Anthropic) | Fallback (OpenAI) |
-|------|-------------------|-------------------|
-| Reasoning (orchestrator, analysis, resolution) | Sonnet 4.6 | gpt-4o |
-| Classification (triage, reflexion, reverification, judge) | Haiku 4.5 | gpt-4o-mini |
+PostgreSQL is **Entra-only** (token as password); LLM keys sit on a **Key Vault rotation
+policy**. Only `GITHUB_PAT` + `ACR_*` remain as bootstrap secrets. **`→ deep dive: sentinel-infra
+§4` (OIDC + Entra + token model) · `§3.2` (Entra DB) · `§3.3/§3.8` (Key Vault + rotation) · `§3.7`
+(workload identity) · `sentinel §3.6` (inbound validation)**
 
-Switch default provider: `SENTINEL_PRIMARY_PROVIDER=openai`. Automatic fallback on rate limit, timeout, or API error.
+### 3.3 Ground truth & signal types — the 30 scenario branches
+The deploy app is **real ground truth**: 30 pre-authored branches (10 per case) that also serve
+as the eval dataset. Two signal types drive two backend paths; case i is a no-op.
 
-### Tools
+| Case | Branches | What happens | Signal → backend path |
+|------|----------|--------------|-----------------------|
+| i — clean pass | `pass/01..10` | green deploy, healthy | none (no monitor) |
+| ii — deploy fails | `deployfail/01..10` | pipeline red, previous version stays live | `deploy_failure` → rollback |
+| iii — runtime error | `runtime/01..10` | green deploy, live app breaks | `runtime_error` → full incident response |
 
-| Tool | Purpose | Side Effects |
-|------|---------|-------------|
-| `get_service_metadata` | Look up service owner, deps, runbooks | Read-only (PostgreSQL) |
-| `search_past_incidents` | Find similar past incidents | Read-only (PostgreSQL + pgvector) |
-| `fetch_logs` | Get recent error logs | Read-only (Datadog API) |
-| `get_deploy_details` | Get deploy history for a service | Read-only (PostgreSQL) |
-| `prepare_rollback_spec` | Output target SHA + justification | No external calls — output only |
-| `format_escalation` | Structure escalation context for Teams | No external calls — output only |
+**`→ deep dive: sentinel-deployment §4` (cases + `branches.yaml` catalog)**
 
-No tool touches external state. Backend reasons, GHA executes.
+### 3.4 Data & correlation
+Azure PostgreSQL B1MS + pgvector, 3 tables: **`incidents`** (episodic memory + embeddings),
+**`services`** (semantic memory), **`deployments`** (deploy↔incident↔PR↔Datadog). Every incident
+threads a correlation chain `incident_id → alert/dd_event/correlation_id → deploy_id → pr/sha →
+langfuse_trace_id`. **`→ deep dive: sentinel §5`**
+
+### 3.5 Observability
+Datadog (deploy events + logs = the signal), LangFuse (agent traces, prompt management, judge
+scores), PostgreSQL (incident history + MTTR), Microsoft Teams (notifications). **`→ deep dive:
+sentinel §6` (LangFuse) · `sentinel-deployment §6` (Datadog schema)**
+
+### 3.6 HITL safety — fire-and-forget
+The only destructive action is a revert PR, and **the revert PR on sentinel-deployment IS the
+approval gate**. Backend decides rollback vs escalate but never acts on the world; GHA opens the
+PR; a human merges or closes. No `/approvals` endpoint, no PR-outcome tracking. **`→ deep dive:
+sentinel §3.3 + §7`**
+
+### 3.7 Workflows
+`ci_`-prefixed; repeated step blocks are **reusable composite actions** in sentinel's
+`.github/actions/` (reused cross-repo).
+
+| File | Repo | Purpose |
+|------|------|---------|
+| `ci_validation` | sentinel | Fast PR gate (quality + build/run/test, stubbed LLM) |
+| `ci_backend_deployment` | sentinel | Build+push → deploy to AKS → test live → promote/rollback → scale to zero |
+| `ci_incident_response` | sentinel | Real pipeline (repository_dispatch) — scale up, run, scale down |
+| `ci_backend_scale` | sentinel | Manual up/down + nightly auto-down |
+| `ci_app_deployment` | sentinel-deployment | Build → Deploy → Verify → Record → Datadog (one scenario branch) |
+| `ci_infra_dry` / `ci_infra` | sentinel-infra | Terraform validate+plan / apply |
+| `ci_destroy_infra` | sentinel-infra | Manual full teardown (destroy + `az group delete`) |
+| `ci_runners` | sentinel-infra | Build + push CI runner images |
+
+**`→ deep dive: sentinel §9` (job flows + composite actions) · `sentinel-infra §7` (infra CI + destroy) · `sentinel-deployment §3` (deploy pipeline)**
+
+### 3.8 Backend hosting — AKS scale-to-zero
+Single-replica Deployment; node pool idles at **0** and scales 0↔1 per run. No static backend
+URL — resolved from the cluster each run; the LB Service (and public IP) is deleted at teardown
+→ **$0 infra at idle**. `KEEP_WARM` keeps it up for live demos. **`→ deep dive: sentinel §8`
+(manifests, workload identity) · `§8.5` (scale-to-zero lifecycle)**
 
 ---
 
-## 4. Azure Infrastructure
+## 4. Architecture Map — where each thing is specified
 
-Provisioned by sentinel-infra via Terraform. 7 modules, all free tier.
+Fast lookup: a concern → the authoritative file + section. (Your task's **Arch refs** already
+name the section; this is the reverse index.)
 
-```
-sentinel-infra (terraform apply)
-       │
-       ├── modules/aks/           → AKS cluster (control plane always free,
-       │                            1× B2ats_v2 node free 12 months)
-       │                            Hosts sentinel-backend (single replica, public LB)
-       │                            Kubelet gets AcrPull; app deployed by sentinel CI
-       │
-       ├── modules/acr/           → Azure Container Registry (Standard, free 12 months)
-       │                            Images: sentinel-backend, ci-runner
-       │
-       ├── modules/postgresql/    → PostgreSQL Flexible Server (B1MS, free 12 months)
-       │                            DB: sentinel, extension: pgvector
-       │                            Firewall: allow all (dev)
-       │
-       ├── modules/keyvault/      → Key Vault (always free)
-       │                            9 secrets (API keys, DB password, webhooks)
-       │                            RBAC: Terraform writes, GHA reads
-       │
-       ├── modules/event-grid/    → Event Grid Topic (always free)
-       │                            Routes Datadog webhooks
-       │
-       ├── modules/functions/     → Azure Function (Consumption, always free)
-       │                            Bridge: Event Grid → repository_dispatch
-       │
-       └── modules/app-service/   → App Service F1 (always free)
-                                    Target for sentinel-deployment
-```
-
-### Authentication: OIDC Workload Identity Federation
-
-No stored Azure secrets. GitHub proves identity via JWT.
-
-```
-GHA workflow → request JWT from GitHub OIDC provider
-            → az login with JWT
-            → Azure verifies issuer + subject (repo:org/name:ref)
-            → grants scoped access token
-```
-
-One Azure AD app with federated credentials for all three repos. Terraform provisions the credentials.
-
-### Cross-Repo Secret Distribution
-
-Terraform auto-pushes secrets to GitHub repos via `github_actions_secret`:
-
-```
-terraform apply
-    ├── sentinel repo secrets:     ACR_LOGIN_SERVER, ACR_USERNAME, ACR_PASSWORD,
-    │                              AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
-    │
-    └── sentinel-deployment repo:  AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
-```
-
-Two layers: GitHub secrets = identity (who am I). Key Vault = runtime values (API keys, DB password).
+| Concern | Authoritative spec |
+|---------|--------------------|
+| Agent pipeline, loops, models | sentinel §4 |
+| Tools (contracts, side effects) | sentinel §4.8, §13.2 |
+| API contracts + `signal_type` handling | sentinel §3.1–§3.4 |
+| Inbound Entra bearer validation | sentinel §3.6 |
+| DB schema + correlation | sentinel §5 |
+| LangFuse tracing / prompts / scoring | sentinel §6 |
+| HITL / revert-PR gate | sentinel §3.3, §7 |
+| Docker + K8s manifests + workload identity | sentinel §7, §8 |
+| Scale-to-zero lifecycle | sentinel §8.5 |
+| sentinel CI/CD (validation, deploy, incident, scale) | sentinel §9 |
+| Phase-1 → Phase-2 migration cleanup | sentinel §13 |
+| Terraform modules (ACR/PG/KV/EventGrid/Functions/AppService/AKS) | sentinel-infra §3 |
+| Entra-only PostgreSQL auth | sentinel-infra §3.2 |
+| Key Vault RBAC + rotation Function | sentinel-infra §3.3, §3.8 |
+| AKS workload identity + backend UAMI | sentinel-infra §3.7 |
+| Event Grid two-signal routing + bridge | sentinel-infra §3.4–§3.5 |
+| OIDC + Entra identity plane, backend app reg, token model | sentinel-infra §4 |
+| Cross-repo secret/variable distribution | sentinel-infra §5 |
+| Infra CI/CD + `ci_destroy_infra` | sentinel-infra §7 |
+| Bootstrap checklist | sentinel-infra §10 |
+| The app + deploy pipeline + Datadog schema | sentinel-deployment §2–§3, §6 |
+| 30 scenario branches (3 cases) + catalog | sentinel-deployment §4 |
+| Datadog monitors | sentinel-deployment §6.3 |
+| Cost breakdown | sentinel-infra §11 (see §5 below for the roll-up) |
+| Decisions, blockers, history | [STATE.md](STATE.md) |
 
 ---
 
-## 5. Database
+## 5. Cost (roll-up)
 
-Azure PostgreSQL B1MS + pgvector. 3 tables:
-
-| Table | Purpose |
-|-------|---------|
-| `incidents` | Episodic memory — past incidents with embeddings for similarity search. Carries `pr_number`/`pr_url` when a revert PR was created (creation record only) |
-| `services` | Semantic memory — service ownership, dependencies, runbooks |
-| `deployments` | Deploy ↔ incident ↔ PR ↔ Datadog correlation — written by `ci_app_deployment.yml` on every deploy (success and failure) |
-
-### Correlation
-
-Every incident links to all related artifacts:
-
-```
-incident_id → alert_id (Datadog) + dd_event_id + correlation_id
-            → deploy_id → pr_number + commit_sha + gha_run_id
-            → langfuse_trace_id (LLM trace)
-```
-
----
-
-## 6. Observability
-
-| Layer | Tool | What It Captures |
-|-------|------|-----------------|
-| Deploy events | Datadog | Every deploy attempt: stage, status, version, error |
-| Agent traces | LangFuse | Every pipeline run: spans per agent, token usage, judge scores |
-| Prompt management | LangFuse | System prompts loaded LangFuse-first, local fallback |
-| Incident history | PostgreSQL | Full trajectory, root cause, resolution, MTTR |
-| Notifications | Microsoft Teams | Rollback PR created / escalation needed / summary |
-
----
-
-## 7. HITL Safety
-
-The revert PR on sentinel-deployment IS the approval gate. **Fire-and-forget.**
-
-- Backend decides rollback vs escalate — never executes destructive actions
-- GHA creates the PR — backend does not call GitHub API for PR creation
-- Reviewer merges or closes — that's the human-in-the-loop
-- No custom `/approvals` endpoint — GitHub's review system is the gate
-- Sentinel's job ends when the PR exists and Teams is notified. It does NOT watch,
-  poll, or record the PR outcome — no waiting states anywhere. The incident row
-  stores `pr_number`/`pr_url` as a creation record; the PR on GitHub is the audit
-  trail. MTTR = pipeline duration (alert → decision), not human review latency.
-
----
-
-## 8. Workflows (All Repos)
-
-All workflow files use `ci_` prefix. Convention: `ci_<descriptive_scope>.yml`.
-
-Repeated step blocks live as **reusable composite actions** in sentinel's
-`.github/actions/` — `backend-up` (outputs the per-run backend URL), `backend-down`,
-`get-kv-secrets`, `notify-teams`, `psql-exec` — plus a local `dd-report` action in
-sentinel-deployment. sentinel-deployment reuses sentinel's actions cross-repo
-(`uses: <owner>/sentinel/.github/actions/psql-exec@main`).
-
-| File | Repo | Name | Trigger | Purpose |
-|------|------|------|---------|---------|
-| `ci_validation.yml` | sentinel | `[sentinel] PR — validation` | PR to main | Fast gate — quality checks + single-job build/run/test (no ACR, no AKS, stubbed LLM) |
-| `ci_backend_deployment.yml` | sentinel | `[sentinel] backend — deployment` | Push to main | Build+push to ACR (sha tag), scale up AKS, deploy, validate rollout, all tests against live deployment, smoke test, promote or `rollout undo`, scale to zero |
-| `ci_incident_response.yml` | sentinel | `[sentinel] incident response — full pipeline` | repository_dispatch | Real incident pipeline — scales the backend up, runs, scales it down |
-| `ci_backend_scale.yml` | sentinel | `[sentinel] backend — scale` | workflow_dispatch + nightly cron | Manual up/down toggle + auto-down safety net for scale-to-zero |
-| `ci_app_deployment.yml` | sentinel-deployment | `[deployment] deploy — build and ship` | Push to main | Build → Deploy → Verify → Record (PostgreSQL) → Report to Datadog |
-| `ci_demo_prs.yml` | sentinel-deployment | `[deployment] demo — create scenario PRs` | workflow_dispatch | Open intentional-failure PRs from static scenario templates — no backend involvement |
-| `ci_infra_dry.yml` | sentinel-infra | `[infra] terraform — validate and plan` | Push/PR | Terraform validate + plan (dry run) |
-| `ci_infra.yml` | sentinel-infra | `[infra] terraform — apply` | Push to main | Terraform apply |
-| `ci_runners.yml` | sentinel-infra | `[infra] runners — build and push` | ci-images/ changes | Build + push CI runner images to ACR |
-
-### Incident Pipeline Job Flow
-
-```
-ci_incident_response.yml (repository_dispatch) — scale-to-zero, serialized via
-the `sentinel-backend` concurrency group
-
-  ensure-backend-up  ← node pool 0→1, replicas 0→1, wait /ready (~3-7 min cold)
-       │                → resolves + outputs backend-url (no static URL variable)
-       │                can't come up → Teams alert + fail loudly
-       ├────────────────────────────┬──────────────────────────┐
-       ▼                            ▼                          ▼
-  fetch-service-info    fetch-pr-details             fetch-datadog-logs
-       │    (each job reads its own secrets from Key Vault — OIDC;
-       │     GHA blocks secrets in job outputs)
-       └────────────┬───────────────┴──────────────────────────┘
-                    ▼
-  run-agent-pipeline     ← POST ${BACKEND_URL}/webhooks/incident + poll (10-min cap,
-                    │      timeout degrades to escalation)
-           ┌────────┴────────┐
-           │                 │
-     rollback path      escalate path
-           │                 │
-  generate-pr-content   notify-escalation
-           │                 │
-  create-rollback-pr         │
-  (+ psql UPDATE incidents   │
-   SET pr_number, pr_url)    │
-           │                 │
-  notify-rollback            │
-           │                 │
-           └────────┬────────┘
-                    ▼
-  teardown-backend   ← scale to zero (if: always(); skipped when KEEP_WARM)
-                    ▼
-  post-summary       ← Datadog event + Teams summary
-```
-
----
-
-## 9. Cost
-
-| Resource | Monthly Cost |
-|----------|-------------|
-| AKS control plane | Free (always) |
-| AKS node (1× B2ats_v2) | Free — scale-to-zero uses ~20-80 of the 750 free hrs/mo |
-| LoadBalancer public IP | ~$0 — released at teardown; URL resolved fresh per run |
-| PostgreSQL B1MS | Free (12-month) |
-| ACR Standard | Free (12-month) |
-| Key Vault | Free (always) |
-| Event Grid | Free (always) |
-| Azure Functions | Free (always) |
-| App Service F1 | Free (always) |
-| TF state storage | ~$0.01 |
-| LLM calls (Anthropic + OpenAI) | ~$5-12 |
-| GHA minutes | Free (GitHub Pro — 3,000/month) |
-| LangFuse | Free (50K obs/month) |
-| **Total** | **~$5-12/month** |
-
-Backend compute = the free AKS node, scaled to zero between runs — the unused
-~670 free B2ats_v2 hours/month stay available for other projects. After 05/2027 the
-node bills only for scaled-up hours (a few $/month) — `terraform destroy` when the
-project wraps.
-
----
-
-## 10. Detailed Architecture Docs
-
-| Doc | Scope |
-|-----|-------|
-| [sentinel/ARCHITECTURE.md](sentinel/ARCHITECTURE.md) | Agent pipeline, API contracts, agentic loops, reflexion, tools, models, workflows, DB schema, LangFuse, Dockerfile, Phase 1 cleanup |
-| [sentinel-deployment/ARCHITECTURE.md](sentinel-deployment/ARCHITECTURE.md) | Deploy pipeline stages, Datadog event schema, demo PR sequence, app structure |
-| [sentinel-infra/ARCHITECTURE.md](sentinel-infra/ARCHITECTURE.md) | 6 Terraform modules (HCL), OIDC setup, cross-repo secrets, Key Vault policies, PostgreSQL firewall, CI/CD workflows, bootstrap checklist |
-| [STATE.md](STATE.md) | Planning state, decision log, blockers |
+**~$5–12/month — LLM calls only; $0 infra at idle.** Everything else sits in Azure free /
+12-month-free tiers (AKS control plane, PostgreSQL B1MS, ACR, Key Vault, Event Grid, Functions,
+App Service F1) plus GitHub Pro (3,000 GHA min/mo), Datadog Student Pro, and LangFuse free. The
+AKS node scales to zero between runs (~20–80 of 750 free hrs/mo). **`→ deep dive: sentinel-infra
+§11` (per-resource table).**

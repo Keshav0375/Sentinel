@@ -1,5 +1,8 @@
 # sentinel-infra — Architecture Document
 
+> **↑ Deep dive of the [Architecture Index](../ARCHITECTURE.md).** Start there for the whole
+> picture; this file is the authoritative detail for **infra + identity** concerns (index §4 map).
+
 > **Purpose:** Terraform IaC that provisions all Azure resources Sentinel depends on.
 > Single `terraform apply` brings up the entire stack. Also manages CI runner
 > images in ACR and cross-repo secret distribution.
@@ -26,16 +29,16 @@ sentinel-infra repo
 │  │  Registry (ACR)         │    │  (always free)                │ │
 │  │  (free 12 months)       │    │                               │ │
 │  │                         │    │  Secrets:                     │ │
-│  │  Images:                │    │  ├── anthropic-api-key        │ │
-│  │  ├── sentinel-backend   │    │  ├── openai-api-key           │ │
-│  │  └── ci-runner          │    │  ├── db-password              │ │
+│  │  Images:                │    │  ├── anthropic-api-key  ↻     │ │
+│  │  ├── sentinel-backend   │    │  ├── openai-api-key     ↻     │ │
+│  │  └── ci-runner          │    │  ├── dd-app-key   (no db-pwd) │ │
 │  └─────────────────────────┘    │  ├── dd-api-key               │ │
 │                                  │  ├── teams-webhook-url        │ │
 │  ┌─────────────────────────┐    │  ├── langfuse-secret-key      │ │
 │  │  PostgreSQL B1MS        │    │  ├── langfuse-public-key      │ │
 │  │  (free 12 months)       │    │  ├── acr-password              │ │
 │  │                         │    │  ├── github-pat                │ │
-│  │  DB: sentinel           │    │  └── sentinel-api-token        │ │
+│  │  DB: sentinel (Entra)   │    │  (↻ = rotated; no api-token)  │ │
 │  │  Extension: pgvector    │    └──────────────────────────────┘ │
 │  │  32 GB storage          │    ┌──────────────────────────────┐ │
 │  │  Firewall: allow all    │    │  OIDC Federation              │ │
@@ -83,7 +86,11 @@ only — app manifests live in the sentinel repo (k8s/).
 ## 2. Terraform Module Structure
 
 One module per Azure resource group concern. Flat structure — no nested modules.
-7 modules total.
+7 modules total. Beyond the modules, the root also declares the **identity plane**
+(§4): the OIDC SP + federated creds, the backend API app registration (§4.4), the
+backend workload-identity UAMI + federated credential (§3.7), and the Key Vault
+rotation Function + system topic (§3.8) — the last two live in the `functions/`
+module.
 
 ```
 sentinel-infra/
@@ -114,12 +121,15 @@ sentinel-infra/
 │   │   ├── variables.tf
 │   │   └── outputs.tf
 │   │
-│   ├── functions/             # Azure Function App (Event Grid → GHA bridge)
-│   │   ├── main.tf
+│   ├── functions/             # Azure Function Apps: Event Grid → GHA bridge (§3.5)
+│   │   ├── main.tf            #   + Key Vault rotation Function (§3.8)
 │   │   ├── variables.tf
 │   │   ├── outputs.tf
 │   │   └── src/               # Function source code (Python)
-│   │       └── bridge/
+│   │       ├── bridge/        #   Event Grid → repository_dispatch (stamps signal_type)
+│   │       │   ├── __init__.py
+│   │       │   └── function.json
+│   │       └── rotate/        #   SecretNearExpiry → rotate LLM key version
 │   │           ├── __init__.py
 │   │           └── function.json
 │   │
@@ -141,6 +151,7 @@ sentinel-infra/
 │   └── workflows/
 │       ├── ci_infra_dry.yml   # terraform validate + plan on push/PR (dry run)
 │       ├── ci_infra.yml       # terraform apply on merge to main
+│       ├── ci_destroy_infra.yml # manual full teardown — destroy + az cleanup (§7.3)
 │       └── ci_runners.yml     # Build + push CI runner images when Dockerfile changes
 │
 ├── .gitignore
@@ -189,13 +200,33 @@ resource "azurerm_postgresql_flexible_server" "sentinel" {
   version                = "16"
   sku_name               = "B_Standard_B1ms"  # Free 750 hrs/mo for 12 months
   storage_mb             = 32768               # 32 GB (free tier limit)
-  administrator_login    = "sentinel_admin"
-  administrator_password = var.db_password
   zone                   = "1"
 
+  # Microsoft Entra–ONLY authentication — no admin password stored anywhere.
+  # Every client (GHA runners, the backend pod) presents a short-lived Entra
+  # access token (audience https://ossrdbms-aad.database.windows.net) as the
+  # psql password. User/SP tokens live ~1 h; managed-identity tokens ~24 h.
+  # Password auth is disabled for the server entirely.
   authentication {
-    password_auth_enabled = true
+    active_directory_auth_enabled = true
+    password_auth_enabled         = false
   }
+}
+
+# Entra administrator = a security group, so members are added/removed centrally
+# in Entra without touching the server. Group holds: Keshav (human break-glass),
+# the sentinel-gha SP (GHA runners), and the backend pod's workload-identity
+# UAMI (§3.7). Only an Entra admin can create further Entra DB roles.
+resource "azurerm_postgresql_flexible_server_active_directory_administrator" "sentinel" {
+  server_name         = azurerm_postgresql_flexible_server.sentinel.name
+  resource_group_name = var.resource_group_name
+  tenant_id           = data.azurerm_client_config.current.tenant_id
+  object_id           = var.postgres_entra_admin_group_object_id
+  principal_name      = "sentinel-db-admins"
+  principal_type      = "Group"
+
+  # Entra auth must be ON before any Entra DB role is created (Terraform ordering).
+  depends_on = [azurerm_postgresql_flexible_server.sentinel]
 }
 
 resource "azurerm_postgresql_flexible_server_database" "sentinel" {
@@ -212,10 +243,13 @@ resource "azurerm_postgresql_flexible_server_configuration" "pgvector" {
   value     = "VECTOR"
 }
 
-# Firewall: allow all (dev)
-# Two client classes connect: (1) the backend on AKS (stable-ish egress IP),
+# Firewall: allow all (dev). Network reach ≠ auth — every connection still needs
+# a valid Entra token (password auth is disabled), so an open firewall only
+# controls who can *reach* the port, not who can *log in*.
+# Two client classes connect: (1) the backend on AKS (workload-identity token),
 # (2) GHA workflows on GitHub-hosted runners — ci_app_deployment.yml inserts
-# deploy rows, ci_incident_response.yml fetches context + records PR refs.
+# deploy rows, ci_incident_response.yml fetches context + records PR refs
+# (each acquires an Entra DB token from the sentinel-gha SP).
 # GitHub runner IPs rotate across a wide range. During dev we allow all.
 # Production would use Private Endpoint + VNet integration.
 resource "azurerm_postgresql_flexible_server_firewall_rule" "allow_all_dev" {
@@ -239,10 +273,28 @@ they're not Azure services. The AKS backend's egress IP alone isn't enough. Opti
 | Azure-hosted self-hosted runner | Works but costs money | Maybe |
 | Private Endpoint + VNet | Overkill for dev | **Yes** |
 
-We use allow-all for dev. The DB is still protected by username + password.
-Lock down later if needed.
+We use allow-all for dev. The DB is still protected by **Entra token auth** —
+password auth is off, so reaching the port is useless without a valid token
+from a member of the `sentinel-db-admins` group (or an Entra role it created).
+Lock down the network later with Private Endpoint if needed.
 
-**Outputs:** `db_host`, `db_name`, `db_port`
+**Entra DB roles (created once by the Entra admin, not by Terraform):** after the
+server exists, the admin connects and runs `SELECT * FROM pgaadauth_create_principal(...)`
+(or `CREATE ROLE ... ; SECURITY LABEL ...`) to map the `sentinel-gha` SP and the
+backend UAMI to PostgreSQL roles with the right grants. Azure matches the token to
+the role by the principal's Entra object ID, not its name.
+
+**Connecting (token as password):**
+```bash
+# GHA runner (after azure/login OIDC) or any Entra principal
+PGPASSWORD=$(az account get-access-token \
+  --resource https://ossrdbms-aad.database.windows.net \
+  --query accessToken -o tsv)
+psql "host=sentinel-pg.postgres.database.azure.com dbname=sentinel \
+      user=sentinel-gha sslmode=require"   # token supplied via PGPASSWORD
+```
+
+**Outputs:** `db_host`, `db_name`, `db_port` (no password output — there is none)
 
 ### 3.3 Key Vault Module
 
@@ -269,72 +321,121 @@ resource "azurerm_role_assignment" "gha_kv_reader" {
   role_definition_name = "Key Vault Secrets User"
   principal_id         = azuread_service_principal.sentinel_gha.object_id
 }
+
+# Backend pod (workload-identity UAMI, §3.7) — read-only. The pod reads LLM keys
+# directly from Key Vault via workload identity, so no secret needs to be baked
+# into the K8s Secret for those. No stored credential in the pod.
+resource "azurerm_role_assignment" "backend_kv_reader" {
+  scope                = azurerm_key_vault.sentinel.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_user_assigned_identity.backend.principal_id
+}
+
+# Rotation Function (system-assigned MI, §3.8) — Officer, writes new secret
+# versions when a SecretNearExpiry event fires.
+resource "azurerm_role_assignment" "rotator_kv_officer" {
+  scope                = azurerm_key_vault.sentinel.id
+  role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = azurerm_linux_function_app.rotator.identity[0].principal_id
+}
 ```
 
-**Two access levels:**
+**Access levels:**
 
 | Identity | Role | Purpose |
 |----------|------|---------|
-| Terraform SP | `Key Vault Secrets Officer` | Create/update secrets during `terraform apply` |
+| Terraform SP | `Key Vault Secrets Officer` | Create/update secrets + set rotation policies during `terraform apply` |
 | GHA SP (OIDC) | `Key Vault Secrets User` | Read-only — `az keyvault secret show` in ci_incident_response.yml |
+| Backend UAMI (workload identity) | `Key Vault Secrets User` | Read-only — pod reads LLM keys at runtime, no baked-in secret |
+| Rotation Function (system MI) | `Key Vault Secrets Officer` | Writes rotated secret versions (§3.8) |
 
 The GHA SP is the same OIDC-federated identity used by all three repos'
-workflows. It can read secrets but never modify them — only Terraform can
-write secrets.
+workflows. It can read secrets but never modify them — only Terraform (setup)
+and the rotation Function (rotation) write secrets.
 
 **Secrets stored:**
 
-| Secret Name | Description | Consumed By |
-|-------------|-------------|-------------|
-| `anthropic-api-key` | Anthropic LLM provider (default) | Backend (env var `ANTHROPIC_API_KEY`) |
-| `openai-api-key` | OpenAI LLM provider (fallback) | Backend (env var `OPENAI_API_KEY`) |
-| `db-password` | PostgreSQL admin password | Backend (env var `DATABASE_URL`) |
-| `dd-api-key` | Datadog API key | GHA jobs (Datadog event reporting) |
-| `dd-app-key` | Datadog app key | GHA jobs (Datadog log queries) |
-| `teams-webhook-url` | Teams incoming webhook | GHA jobs (notifications) |
-| `langfuse-secret-key` | LangFuse tracing (secret) | Backend (env var `LANGFUSE_SECRET_KEY`) |
-| `langfuse-public-key` | LangFuse tracing (public) | Backend (env var `LANGFUSE_PUBLIC_KEY`) |
-| `acr-password` | ACR admin password | GHA jobs (docker pull/push) |
-| `github-pat` | GitHub PAT with `repo` scope | Azure Function bridge (repository_dispatch) |
-| `sentinel-api-token` | Shared token for backend API auth (`X-Sentinel-Token`) | Backend (env var) + sentinel repo GHA jobs (`ci_incident_response.yml`) |
+| Secret Name | Description | Consumed By | Rotation |
+|-------------|-------------|-------------|----------|
+| `anthropic-api-key` | Anthropic LLM provider (default) | Backend (reads via workload identity) | **Rotation policy** (§3.8) |
+| `openai-api-key` | OpenAI LLM provider (fallback) | Backend (reads via workload identity) | **Rotation policy** (§3.8) |
+| `dd-api-key` | Datadog API key | GHA jobs (Datadog event reporting) | Manual |
+| `dd-app-key` | Datadog app key | GHA jobs (Datadog log queries) | Manual |
+| `teams-webhook-url` | Teams incoming webhook | GHA jobs (notifications) | Manual |
+| `langfuse-secret-key` | LangFuse tracing (secret) | Backend (workload identity) | Manual |
+| `langfuse-public-key` | LangFuse tracing (public) | Backend (workload identity) | Manual |
+| `acr-password` | ACR admin password | GHA jobs (`container:` image pull) | Manual |
+| `github-pat` | GitHub PAT with `repo` scope | Azure Function bridge (repository_dispatch) | Manual |
 
-**Secret flow 1: Key Vault → K8s Secret → backend pod (deploy time):**
+**Removed vs the previous design:**
+- ❌ `db-password` — **gone.** PostgreSQL is Entra-only (§3.2); clients present a
+  short-lived Entra token as the password. Nothing stores a DB password.
+- ❌ `sentinel-api-token` — **gone.** The backend API is protected by Entra bearer
+  tokens (§4.5), validated against Entra JWKS. No shared static token exists.
+
+**Still standing (honest accounting):** `acr-password` and `github-pat` remain
+genuine secrets. `acr-password` is needed because GHA `container:` jobs pull the
+CI-runner image *before* any step runs (can't `az acr login` first); `github-pat`
+is needed by the Function bridge's `repository_dispatch` and Terraform's github
+provider. Both are bootstrap-class, not runtime-request credentials. Eliminating
+them fully would need a GitHub App + Azure-hosted runners (out of scope for now).
+
+**Secret flow 1: backend pod → Key Vault + PostgreSQL via workload identity (runtime):**
 
 ```
 ci_backend_deployment.yml (sentinel repo, merge to main) — deploy-to-aks job:
 │
-├── az keyvault secret show ... for: anthropic-api-key, openai-api-key,
-│   db-password, langfuse-secret-key, langfuse-public-key, dd-api-key,
-│   sentinel-api-token
-│
-├── kubectl create secret generic sentinel-secrets --from-literal=... \
-│     --dry-run=client -o yaml | kubectl apply -f -
-│
 ├── kubectl set image deployment/sentinel-backend sentinel-backend=<ACR>:sha-X
 ├── kubectl rollout status deployment/sentinel-backend
 │
-└── validate: curl $BACKEND_URL/health + /ready  (checks DB + LangFuse)
+└── validate: curl $BACKEND_URL/health + /ready  (checks DB token + LangFuse)
 
-Backend pod consumes the secrets via envFrom — always-on thereafter.
+NO secret sync — no K8s Secret is created. The pod runs under a workload-identity
+service account (§3.7). At runtime it exchanges its projected SA token for an
+Entra token and:
+  • reads anthropic-api-key / openai-api-key / langfuse-* straight from Key Vault
+  • gets a PostgreSQL token (aud https://ossrdbms-aad.database.windows.net) for DB
+Nothing sensitive is baked into the Deployment manifest or a K8s Secret.
 ```
 
-**Secret flow 2: Key Vault → GHA jobs (incident runtime):**
+**Secret flow 2: GHA jobs acquire per-job tokens/secrets (incident runtime):**
 
 ```
-ci_incident_response.yml — each job fetches ONLY what it needs, in-job.
+ci_incident_response.yml — each job acquires ONLY what it needs, in-job.
 (GHA drops masked secrets from job outputs — never pass secrets between jobs.)
 │
-├── fetch-service-info:   az keyvault secret show --name db-password       (psql read)
+├── fetch-service-info:   az account get-access-token --resource \
+│                           https://ossrdbms-aad.database.windows.net   (Entra DB token → psql read)
 ├── fetch-datadog-logs:   az keyvault secret show --name dd-api-key
-├── run-agent-pipeline:   az keyvault secret show --name sentinel-api-token
-├── create-rollback-pr:   az keyvault secret show --name db-password       (psql UPDATE)
+├── run-agent-pipeline:   az account get-access-token --resource \
+│                           api://sentinel-backend                      (Entra token → Authorization: Bearer)
+├── create-rollback-pr:   Entra DB token (psql UPDATE) + github-pat (open PR)
 └── notify-* / summary:   az keyvault secret show --name teams-webhook-url
 
 ci_app_deployment.yml (sentinel-deployment repo):
-└── record-deployment:    az keyvault secret show --name db-password       (psql INSERT)
+└── record-deployment:    az account get-access-token --resource \
+                            https://ossrdbms-aad.database.windows.net   (Entra DB token → psql INSERT)
 ```
 
+Two token audiences, one identity: the `sentinel-gha` SP asks Entra for a
+DB-scoped token *and* an `api://sentinel-backend`-scoped token as needed — see
+§4.5 "one identity, many audience-scoped tokens."
+
 ### 3.4 Event Grid Module
+
+The topic ingests **two distinct Datadog signal types**, both from the
+sentinel-deployment ground-truth app (see sentinel-deployment ARCHITECTURE §4):
+
+| Signal type | Datadog source | Meaning | Backend handling path |
+|-------------|----------------|---------|-----------------------|
+| `deploy_failure` | `sentinel-deploy-failure` event monitor (`deploy_status:failed`) | The deploy itself failed; the previous good version stays live | **Case 2 — rollback** (simple; heal main's deployability) |
+| `runtime_error` | `sentinel-runtime-health` monitor (5xx rate / failed health pings) | Deploy went green but the live app throws errors | **Case 3 — full incident response** (diagnose → rollback/escalate) |
+
+(Case 1 = a clean deploy fires **no** monitor — nothing reaches Event Grid.)
+
+Both monitors POST to the same topic; the bridge Function (§3.5) inspects the
+event, stamps `signal_type` onto the `client_payload`, and dispatches to the
+sentinel repo. The backend incident workflow branches on `signal_type`.
 
 ```hcl
 resource "azurerm_eventgrid_topic" "sentinel" {
@@ -343,6 +444,9 @@ resource "azurerm_eventgrid_topic" "sentinel" {
   resource_group_name = var.resource_group_name
 }
 
+# One subscription → the bridge Function. The Function classifies the payload
+# into deploy_failure vs runtime_error (it does not need two subscriptions —
+# both Datadog monitors carry tags the Function reads).
 resource "azurerm_eventgrid_event_subscription" "to_function" {
   name  = "sentinel-to-function"
   scope = azurerm_eventgrid_topic.sentinel.id
@@ -381,7 +485,7 @@ resource "azurerm_linux_function_app" "bridge" {
 
   app_settings = {
     "GITHUB_TOKEN"      = "@Microsoft.KeyVault(VaultName=sentinel-kv;SecretName=github-pat)"
-    "GITHUB_REPO"       = "keshxvDev/sentinel"
+    "GITHUB_REPO"       = "Keshav0375/Sentinel"
     "GITHUB_EVENT_TYPE" = "incident-alert"
   }
 }
@@ -390,13 +494,20 @@ resource "azurerm_linux_function_app" "bridge" {
 **Bridge function source (Python):**
 
 ```python
-import json
 import httpx
 import azure.functions as func
 
+
+def _classify(data: dict) -> str:
+    """deploy_failure vs runtime_error, from Datadog monitor tags."""
+    tags = " ".join(data.get("tags", [])) + data.get("title", "")
+    return "deploy_failure" if "deploy_status:failed" in tags else "runtime_error"
+
+
 def main(event: func.EventGridEvent):
-    """Event Grid → GitHub repository_dispatch"""
+    """Event Grid → GitHub repository_dispatch, stamped with signal_type."""
     data = event.get_json()
+    signal_type = _classify(data)
 
     httpx.post(
         f"https://api.github.com/repos/{GITHUB_REPO}/dispatches",
@@ -406,10 +517,13 @@ def main(event: func.EventGridEvent):
         },
         json={
             "event_type": GITHUB_EVENT_TYPE,
-            "client_payload": data,
+            "client_payload": {**data, "signal_type": signal_type},
         },
     )
 ```
+
+`signal_type` drives the backend workflow branch: `deploy_failure` → Case 2
+(rollback), `runtime_error` → Case 3 (full incident response).
 
 ### 3.6 App Service Module (for sentinel-deployment)
 
@@ -453,6 +567,12 @@ resource "azurerm_kubernetes_cluster" "sentinel" {
   dns_prefix          = "sentinel"
   sku_tier            = "Free"          # control plane — always free
 
+  # Workload identity: the cluster becomes an OIDC issuer; pods federate their
+  # projected service-account token to an Entra identity for passwordless access
+  # to Key Vault + PostgreSQL. No stored secret in the pod.
+  oidc_issuer_enabled       = true
+  workload_identity_enabled = true
+
   default_node_pool {
     name       = "default"
     node_count = 1
@@ -484,18 +604,115 @@ resource "azurerm_role_assignment" "gha_aks_user" {
   role_definition_name = "Azure Kubernetes Service Cluster User Role"
   principal_id         = azuread_service_principal.sentinel_gha.object_id
 }
+
+# ── Backend workload identity ────────────────────────────────────────────────
+# User-assigned identity the backend pod runs as. It gets Key Vault Secrets User
+# (§3.3) and is a member of sentinel-db-admins for PostgreSQL (§3.2).
+resource "azurerm_user_assigned_identity" "backend" {
+  name                = "sentinel-backend-wi"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+}
+
+# Federate the K8s service account to the UAMI. Subject is the SA that the
+# Deployment runs under; audience is the workload-identity exchange audience.
+resource "azurerm_federated_identity_credential" "backend" {
+  name                = "sentinel-backend-fic"
+  resource_group_name = var.resource_group_name
+  parent_id           = azurerm_user_assigned_identity.backend.id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = azurerm_kubernetes_cluster.sentinel.oidc_issuer_url
+  subject             = "system:serviceaccount:sentinel:sentinel-backend"  # namespace:sa
+}
 ```
+
+The K8s Deployment references this via a ServiceAccount annotated with
+`azure.workload.identity/client-id = <backend UAMI client id>` and the pod label
+`azure.workload.identity/use: "true"` (manifests live in the sentinel repo,
+`azure/k8s/`). Outputs `backend_identity_client_id` for the sentinel repo to
+stamp into the ServiceAccount annotation.
 
 **Lifecycle split:** Terraform provisions the cluster only. The `sentinel-backend`
 Deployment/Service manifests live in the sentinel repo (`azure/k8s/`) and are applied by
 `ci_backend_deployment.yml` — app deployment is CI's job, not Terraform's. Infra
 changes rarely; the app deploys on every merge.
 
-**Outputs:** `aks_cluster_name`, `aks_resource_group`
+**Outputs:** `aks_cluster_name`, `aks_resource_group`, `oidc_issuer_url`,
+`backend_identity_client_id`
 
 ---
 
-## 4. OIDC Authentication (Workload Identity Federation)
+### 3.8 Rotation Function Module (LLM key rotation)
+
+Azure Key Vault has **no dynamic secret engine** (that is a HashiCorp Vault
+concept). It stores static secret *versions* with a **rotation policy** plus an
+Event Grid `SecretNearExpiry` notification. We use that to rotate the LLM keys
+on a schedule — rotation, not on-demand generation (no LLM provider mints
+ephemeral keys).
+
+```hcl
+# Rotation policy: fire SecretNearExpiry 30 days before expiry.
+resource "azurerm_key_vault_secret" "anthropic" {
+  name         = "anthropic-api-key"
+  key_vault_id = azurerm_key_vault.sentinel.id
+  value        = var.anthropic_api_key
+  expiration_date = timeadd(timestamp(), "2160h")  # ~90 days; seeded, then rotator manages
+}
+
+# A second Function App (Consumption, always free) with a system-assigned MI.
+resource "azurerm_linux_function_app" "rotator" {
+  name                = "sentinel-rotator"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  service_plan_id     = azurerm_service_plan.functions.id   # shares the bridge's Y1 plan
+
+  storage_account_name       = azurerm_storage_account.func.name
+  storage_account_access_key = azurerm_storage_account.func.primary_access_key
+
+  identity { type = "SystemAssigned" }        # → Key Vault Secrets Officer (§3.3)
+
+  site_config { application_stack { python_version = "3.12" } }
+}
+
+# Event Grid: Key Vault SecretNearExpiry → rotator Function.
+resource "azurerm_eventgrid_system_topic" "kv" {
+  name                   = "sentinel-kv-events"
+  location               = var.location
+  resource_group_name    = var.resource_group_name
+  source_arm_resource_id = azurerm_key_vault.sentinel.id
+  topic_type             = "Microsoft.KeyVault.vaults"
+}
+
+resource "azurerm_eventgrid_system_topic_event_subscription" "rotate" {
+  name                = "sentinel-rotate-on-near-expiry"
+  system_topic        = azurerm_eventgrid_system_topic.kv.name
+  resource_group_name = var.resource_group_name
+  included_event_types = ["Microsoft.KeyVault.SecretNearExpiry"]
+
+  azure_function_endpoint {
+    function_id = "${azurerm_linux_function_app.rotator.id}/functions/rotate"
+  }
+}
+```
+
+**Rotator Function logic (Python):** on `SecretNearExpiry`, read the secret name
+from the event → call the provider's key-management API to mint a fresh key
+(Anthropic Admin API `/v1/organizations/api_keys` where org-admin is available;
+otherwise the function logs a "manual rotation required" alert to Teams) →
+`set_secret` a new version with a fresh 90-day expiry. The backend always reads
+the *latest* version via workload identity, so it picks up rotated keys with no
+redeploy.
+
+> **Honesty note:** true zero-touch rotation needs a provider key API. Anthropic
+> exposes an Admin API for API-key management on qualifying plans; if that is not
+> available on the student/dev account, the rotator degrades to a scheduled
+> reminder rather than silently doing nothing.
+
+**Outputs:** none consumed downstream (self-contained).
+
+---
+
+## 4. Identity Plane — OIDC + Entra (Workload Identity Federation)
 
 All three repos authenticate to Azure via OIDC — no stored client secrets.
 GitHub proves identity via JWT, Azure trusts it via federated credentials.
@@ -523,6 +740,11 @@ GHA workflow                Azure AD
 
 ### 4.2 Terraform resources for OIDC
 
+> **Casing matters.** The GitHub OIDC token's `sub` claim uses the repository's canonical
+> owner/name (`Keshav0375/Sentinel-infra`, `Keshav0375/Sentinel-deployment`,
+> `Keshav0375/Sentinel`), and Azure matches federated-credential subjects as an exact,
+> case-sensitive string. Use the real casing below verbatim.
+
 ```hcl
 # Azure AD Application
 resource "azuread_application" "sentinel_gha" {
@@ -546,7 +768,7 @@ resource "azuread_application_federated_identity_credential" "sentinel_infra_mai
   display_name   = "sentinel-infra-main"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:keshxvDev/sentinel-infra:ref:refs/heads/main"
+  subject        = "repo:Keshav0375/Sentinel-infra:ref:refs/heads/main"
 }
 
 resource "azuread_application_federated_identity_credential" "sentinel_infra_pr" {
@@ -554,7 +776,7 @@ resource "azuread_application_federated_identity_credential" "sentinel_infra_pr"
   display_name   = "sentinel-infra-pr"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:keshxvDev/sentinel-infra:pull_request"
+  subject        = "repo:Keshav0375/Sentinel-infra:pull_request"
 }
 
 resource "azuread_application_federated_identity_credential" "sentinel_main" {
@@ -562,7 +784,7 @@ resource "azuread_application_federated_identity_credential" "sentinel_main" {
   display_name   = "sentinel-main"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:keshxvDev/sentinel:ref:refs/heads/main"
+  subject        = "repo:Keshav0375/Sentinel:ref:refs/heads/main"
 }
 
 resource "azuread_application_federated_identity_credential" "sentinel_pr" {
@@ -570,7 +792,7 @@ resource "azuread_application_federated_identity_credential" "sentinel_pr" {
   display_name   = "sentinel-pr"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:keshxvDev/sentinel:pull_request"
+  subject        = "repo:Keshav0375/Sentinel:pull_request"
 }
 
 resource "azuread_application_federated_identity_credential" "sentinel_deployment_main" {
@@ -578,7 +800,7 @@ resource "azuread_application_federated_identity_credential" "sentinel_deploymen
   display_name   = "sentinel-deployment-main"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:keshxvDev/sentinel-deployment:ref:refs/heads/main"
+  subject        = "repo:Keshav0375/Sentinel-deployment:ref:refs/heads/main"
 }
 ```
 
@@ -608,7 +830,7 @@ az role assignment create --assignee $SP_OBJ_ID \
 az ad app federated-credential create --id $APP_ID --parameters '{
   "name": "sentinel-infra-main",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:keshxvDev/sentinel-infra:ref:refs/heads/main",
+  "subject": "repo:Keshav0375/Sentinel-infra:ref:refs/heads/main",
   "audiences": ["api://AzureADTokenExchange"]
 }'
 
@@ -616,7 +838,7 @@ az ad app federated-credential create --id $APP_ID --parameters '{
 az ad app federated-credential create --id $APP_ID --parameters '{
   "name": "sentinel-infra-pr",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:keshxvDev/sentinel-infra:pull_request",
+  "subject": "repo:Keshav0375/Sentinel-infra:pull_request",
   "audiences": ["api://AzureADTokenExchange"]
 }'
 ```
@@ -624,6 +846,63 @@ az ad app federated-credential create --id $APP_ID --parameters '{
 After this, add `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
 to sentinel-infra GitHub repo secrets. Then `ci_infra.yml` can run and Terraform
 manages all remaining federated credentials for the other repos.
+
+### 4.4 Backend API app registration (inbound Entra bearer auth)
+
+The sentinel backend is registered as its own Entra app so callers can obtain
+tokens **scoped to it** and the backend can validate them against Entra JWKS —
+no shared static token (this is what deleted `sentinel-api-token`).
+
+```hcl
+# The backend API as an Entra app: audience = api://sentinel-backend, with an
+# app role that callers must hold.
+resource "azuread_application" "sentinel_backend" {
+  display_name    = "sentinel-backend-api"
+  identifier_uris = ["api://sentinel-backend"]
+
+  app_role {
+    allowed_member_types = ["Application"]
+    display_name         = "Incident.Write"
+    description          = "Call the incident pipeline and write results"
+    value                = "Incident.Write"
+    id                   = "11111111-1111-1111-1111-111111111111"  # stable GUID
+    enabled              = true
+  }
+}
+
+resource "azuread_service_principal" "sentinel_backend" {
+  client_id = azuread_application.sentinel_backend.client_id
+}
+
+# Grant the GHA identity the Incident.Write app role on the backend API.
+resource "azuread_app_role_assignment" "gha_incident_write" {
+  app_role_id         = "11111111-1111-1111-1111-111111111111"
+  principal_object_id = azuread_service_principal.sentinel_gha.object_id
+  resource_object_id  = azuread_service_principal.sentinel_backend.object_id
+}
+```
+
+**What the backend validates** (FastAPI dependency, sentinel repo §—): signature
+against `https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys`, `iss` =
+your tenant, `aud` = `api://sentinel-backend`, `exp` not passed, and the
+`roles` claim contains `Incident.Write`. `/health` and `/ready` stay open (K8s
+probes can't carry tokens). Tenant ID + audience are **public config, not
+secrets** — pushed to the sentinel repo as GitHub *variables*, not secrets.
+
+### 4.5 One identity, many audience-scoped tokens
+
+The `sentinel-gha` SP is a **single identity** that requests a **different token
+per destination**. A token stamped for one audience is rejected by another —
+this is by design and limits blast radius. There is no single reusable token.
+
+| GHA is talking to… | `--resource` / audience | How obtained |
+|--------------------|-------------------------|--------------|
+| Azure control plane (terraform, `az keyvault`, `az aks`) | `https://management.azure.com` | `azure/login` default |
+| Sentinel backend API | `api://sentinel-backend` | `az account get-access-token --resource api://sentinel-backend` |
+| PostgreSQL | `https://ossrdbms-aad.database.windows.net` | `az account get-access-token --resource <that>` |
+
+The backend pod does the same via **workload identity** (§3.7): one UAMI, two
+audience-scoped tokens (Key Vault, PostgreSQL).
 
 ---
 
@@ -638,7 +917,7 @@ automatically using the GitHub provider — no manual copy-paste.
 ```hcl
 provider "github" {
   token = var.github_pat
-  owner = "keshxvDev"
+  owner = "Keshav0375"
 }
 ```
 
@@ -646,37 +925,37 @@ provider "github" {
 
 ```hcl
 resource "github_actions_secret" "sentinel_acr_login_server" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "ACR_LOGIN_SERVER"
   plaintext_value = azurerm_container_registry.sentinel.login_server
 }
 
 resource "github_actions_secret" "sentinel_acr_username" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "ACR_USERNAME"
   plaintext_value = azurerm_container_registry.sentinel.admin_username
 }
 
 resource "github_actions_secret" "sentinel_acr_password" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "ACR_PASSWORD"
   plaintext_value = azurerm_container_registry.sentinel.admin_password
 }
 
 resource "github_actions_secret" "sentinel_azure_client_id" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "AZURE_CLIENT_ID"
   plaintext_value = azuread_application.sentinel_gha.client_id
 }
 
 resource "github_actions_secret" "sentinel_azure_tenant_id" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "AZURE_TENANT_ID"
   plaintext_value = data.azurerm_client_config.current.tenant_id
 }
 
 resource "github_actions_secret" "sentinel_azure_subscription_id" {
-  repository      = "sentinel"
+  repository      = "Sentinel"
   secret_name     = "AZURE_SUBSCRIPTION_ID"
   plaintext_value = data.azurerm_client_config.current.subscription_id
 }
@@ -686,19 +965,19 @@ resource "github_actions_secret" "sentinel_azure_subscription_id" {
 
 ```hcl
 resource "github_actions_secret" "deployment_azure_client_id" {
-  repository      = "sentinel-deployment"
+  repository      = "Sentinel-deployment"
   secret_name     = "AZURE_CLIENT_ID"
   plaintext_value = azuread_application.sentinel_gha.client_id
 }
 
 resource "github_actions_secret" "deployment_azure_tenant_id" {
-  repository      = "sentinel-deployment"
+  repository      = "Sentinel-deployment"
   secret_name     = "AZURE_TENANT_ID"
   plaintext_value = data.azurerm_client_config.current.tenant_id
 }
 
 resource "github_actions_secret" "deployment_azure_subscription_id" {
-  repository      = "sentinel-deployment"
+  repository      = "Sentinel-deployment"
   secret_name     = "AZURE_SUBSCRIPTION_ID"
   plaintext_value = data.azurerm_client_config.current.subscription_id
 }
@@ -724,12 +1003,21 @@ terraform apply
         └── fetched at runtime by ci_incident_response.yml via az keyvault secret show
 ```
 
-**Two layers of secrets:**
-- **GitHub repo secrets** = identity (who am I?) — OIDC credentials, ACR access
-- **Key Vault secrets** = runtime values (what do I need?) — API keys, DB password, webhook URLs
+**Three layers now:**
+- **GitHub repo *variables*** (non-secret) = identity pointers — `AZURE_CLIENT_ID`,
+  `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, and `SENTINEL_API_AUDIENCE`
+  (`api://sentinel-backend`). These are just IDs; safe to expose.
+- **GitHub repo secrets** = the few genuine bootstrap credentials — `ACR_*`,
+  `GITHUB_PAT`. No `AZURE_CLIENT_SECRET` (OIDC), no `DB_PASSWORD` (Entra DB auth),
+  no `sentinel-api-token` (Entra bearer).
+- **Key Vault secrets** = runtime values — LLM API keys (rotated), Datadog keys,
+  Teams webhook, LangFuse keys. **No DB password** (Entra token auth).
 
-GitHub secrets are set once by Terraform and rarely change. Key Vault secrets
-can be updated independently via `az keyvault secret set` without re-running Terraform.
+Terraform also pushes `SENTINEL_API_AUDIENCE` + `AZURE_TENANT_ID` as variables to
+the sentinel repo so `ci_incident_response.yml` can request the backend token and
+the backend can validate `aud`/`iss`. GitHub identity pointers are set once and
+rarely change; Key Vault secrets update independently via `az keyvault secret set`
+(or the rotation Function) without re-running Terraform.
 
 ---
 
@@ -834,6 +1122,7 @@ Follows the cross-repo standard (defined in sentinel/ARCHITECTURE.md §9):
 |------|------|---------|
 | `ci_infra_dry.yml` | `[infra] terraform — validate and plan` | Dry run on push/PR |
 | `ci_infra.yml` | `[infra] terraform — apply` | Apply on merge to main |
+| `ci_destroy_infra.yml` | `[infra] terraform — destroy (full teardown)` | Manual full teardown (§7.3) |
 | `ci_runners.yml` | `[infra] runners — build and push` | Build + push CI runner images |
 
 Job IDs: `kebab-case` verb-noun. Job names: Title case.
@@ -901,7 +1190,7 @@ jobs:
 
       - name: Terraform Plan
         id: plan
-        run: terraform plan -var="db_password=${{ secrets.DB_PASSWORD }}" -var="github_pat=${{ secrets.GITHUB_PAT }}" -no-color -out=tfplan
+        run: terraform plan -var="github_pat=${{ secrets.GITHUB_PAT }}" -var="postgres_entra_admin_group_object_id=${{ vars.PG_ADMIN_GROUP_OBJECT_ID }}" -no-color -out=tfplan
 
       - name: Post Plan to PR
         if: github.event_name == 'pull_request'
@@ -955,8 +1244,75 @@ jobs:
         run: terraform init
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}" -var="github_pat=${{ secrets.GITHUB_PAT }}"
+        run: terraform apply -auto-approve -var="github_pat=${{ secrets.GITHUB_PAT }}" -var="postgres_entra_admin_group_object_id=${{ vars.PG_ADMIN_GROUP_OBJECT_ID }}"
 ```
+
+### 7.3 `ci_destroy_infra.yml` — Full teardown (manual)
+
+**Name:** `[infra] terraform — destroy (full teardown)`
+
+The mirror of `ci_infra.yml`. **Decision: "everything, always"** — one run frees
+*all* Sentinel resources from Azure, including the OIDC app registration and the
+Terraform state. Use it to end the project, or to reset to a clean slate before
+re-bootstrapping. It is **manual-only** (`workflow_dispatch`) with a typed
+confirmation + environment protection so it can never fire on a push.
+
+**Two-stage destroy** (the state storage is a *manually*-bootstrapped resource
+that lives outside the Terraform state it holds, so `terraform destroy` alone
+can't remove it):
+
+```yaml
+name: "[infra] terraform — destroy (full teardown)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DESTROY to confirm full teardown'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy:
+    name: Full Teardown
+    runs-on: ubuntu-latest
+    environment: destroy          # protection rule → manual approval
+    if: ${{ inputs.confirm == 'DESTROY' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+
+      # Auth is acquired HERE, at job start. The ARM token stays valid ~1 h, so
+      # the job completes even after stage 1 deletes the very OIDC app it logged
+      # in with.
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ── Stage 1: destroy everything Terraform manages (incl. imported OIDC app,
+      #    federated creds, all 8 modules) ──────────────────────────────────────
+      - name: Terraform Init
+        run: terraform init
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve -var="github_pat=${{ secrets.GITHUB_PAT }}" -var="postgres_entra_admin_group_object_id=${{ vars.PG_ADMIN_GROUP_OBJECT_ID }}"
+
+      # ── Stage 2: az cleanup of the manual bootstrap resources Terraform can't
+      #    reach — the resource group leftovers and the state storage RG ─────────
+      - name: Delete bootstrap resource groups
+        run: |
+          az group delete --name sentinel-rg        --yes --no-wait || true
+          az group delete --name sentinel-state-rg  --yes --no-wait || true
+```
+
+> **Restart cost (accepted with "everything, always"):** because the OIDC app +
+> federated creds + state are gone, bringing Sentinel back requires re-running the
+> manual bootstrap (§4.3 + §10 steps 1–4) before `ci_infra.yml` can authenticate
+> again. This is deliberate — the trade for the simplest teardown mental model.
 
 ---
 
@@ -991,15 +1347,24 @@ Azure Storage provides native state locking via blob leases. No DynamoDB needed.
 
 ## 9. Required GitHub Secrets (sentinel-infra repo)
 
-| Secret | Description | How Set |
-|--------|-------------|---------|
+**GitHub *variables* (non-secret — just identifiers):**
+
+| Variable | Description | How Set |
+|----------|-------------|---------|
 | `AZURE_CLIENT_ID` | OIDC app client ID | Manual (from bootstrap §4.3) |
 | `AZURE_TENANT_ID` | Azure AD tenant ID | Manual |
 | `AZURE_SUBSCRIPTION_ID` | Azure subscription ID | Manual |
-| `DB_PASSWORD` | PostgreSQL admin password | Manual (you choose this) |
-| `GITHUB_PAT` | GitHub PAT with `repo` scope | Manual (for github_actions_secret provider) |
+| `PG_ADMIN_GROUP_OBJECT_ID` | Object ID of the `sentinel-db-admins` Entra group | Manual (from bootstrap) |
 
-**No `AZURE_CLIENT_SECRET`** — OIDC eliminates it entirely.
+**GitHub *secrets* (genuine credentials):**
+
+| Secret | Description | How Set |
+|--------|-------------|---------|
+| `GITHUB_PAT` | GitHub PAT with `repo` scope | Manual (for github_actions_secret provider + Function bridge) |
+
+**No `AZURE_CLIENT_SECRET`** — OIDC eliminates it.
+**No `DB_PASSWORD`** — PostgreSQL is Entra-only (§3.2); clients present a token.
+**No `sentinel-api-token`** — the backend API uses Entra bearer tokens (§4.4).
 
 ---
 
@@ -1019,35 +1384,58 @@ Azure Storage provides native state locking via blob leases. No DynamoDB needed.
    az storage container create --name tfstate --account-name sentineltfstate
    ```
 
-3. [ ] Create OIDC service principal + federated credentials (§4.3)
+3. [ ] Create OIDC service principal + first federated credential (§4.3)
 
-4. [ ] Add 5 secrets to sentinel-infra GitHub repo (§9)
-
-5. [ ] First `terraform apply` (can be local or via GHA):
+4. [ ] Create the `sentinel-db-admins` Entra group and note its object ID (this
+   becomes the PostgreSQL Entra admin, §3.2). Add yourself now; the GHA SP + the
+   backend UAMI are added after step 5 creates them:
    ```bash
-   terraform init
-   terraform apply -var="db_password=<your-password>" -var="github_pat=<your-pat>"
+   az ad group create --display-name sentinel-db-admins --mail-nickname sentinel-db-admins
+   PG_ADMIN_GROUP_OBJECT_ID=$(az ad group show --group sentinel-db-admins --query id -o tsv)
+   az ad group member add --group sentinel-db-admins --member-id $(az ad signed-in-user show --query id -o tsv)
    ```
 
-6. [ ] Populate Key Vault with runtime secrets:
+5. [ ] Add GitHub *variables* + `GITHUB_PAT` secret to sentinel-infra repo (§9) —
+   incl. `PG_ADMIN_GROUP_OBJECT_ID`. **No** `DB_PASSWORD`.
+
+6. [ ] First `terraform apply` (can be local or via GHA):
    ```bash
-   az keyvault secret set --vault-name sentinel-kv --name anthropic-api-key --value "sk-ant-..."
-   az keyvault secret set --vault-name sentinel-kv --name openai-api-key --value "sk-..."
+   terraform init
+   terraform apply -var="github_pat=<your-pat>" \
+     -var="postgres_entra_admin_group_object_id=$PG_ADMIN_GROUP_OBJECT_ID"
+   ```
+   Then add the created SP + backend UAMI to the admin group:
+   ```bash
+   az ad group member add --group sentinel-db-admins --member-id <sentinel_gha SP object id>
+   az ad group member add --group sentinel-db-admins --member-id <backend UAMI principal id>
+   ```
+
+7. [ ] Populate Key Vault with runtime secrets (no `db-password`, no
+   `sentinel-api-token` — both eliminated):
+   ```bash
+   az keyvault secret set --vault-name sentinel-kv --name anthropic-api-key --value "sk-ant-..." --expires "$(date -u -d '+90 days' +%Y-%m-%dT%H:%M:%SZ)"
+   az keyvault secret set --vault-name sentinel-kv --name openai-api-key --value "sk-..." --expires "$(date -u -d '+90 days' +%Y-%m-%dT%H:%M:%SZ)"
    az keyvault secret set --vault-name sentinel-kv --name dd-api-key --value "..."
    az keyvault secret set --vault-name sentinel-kv --name dd-app-key --value "..."
    az keyvault secret set --vault-name sentinel-kv --name teams-webhook-url --value "https://..."
    az keyvault secret set --vault-name sentinel-kv --name langfuse-secret-key --value "sk-lf-..."
    az keyvault secret set --vault-name sentinel-kv --name langfuse-public-key --value "pk-lf-..."
-   az keyvault secret set --vault-name sentinel-kv --name sentinel-api-token --value "$(openssl rand -hex 32)"
    ```
 
-7. [ ] Build and push first CI runner image manually (§6.2)
+8. [ ] Create Entra DB roles: connect to PostgreSQL as the group admin (token as
+   password) and map the SP + backend UAMI to DB roles with grants:
+   ```sql
+   SELECT * FROM pgaadauth_create_principal('sentinel-gha', false, false);
+   SELECT * FROM pgaadauth_create_principal('sentinel-backend-wi', false, false);
+   -- then GRANT the needed privileges on the sentinel DB to each role
+   ```
 
-8. [ ] Verify PostgreSQL: `psql` connection test from local machine
+9. [ ] Build and push first CI runner image manually (§6.2)
 
-9. [ ] Verify AKS: `az aks get-credentials --resource-group sentinel-rg --name sentinel-aks && kubectl get nodes`
+10. [ ] Verify AKS + workload identity: `az aks get-credentials --resource-group sentinel-rg --name sentinel-aks && kubectl get nodes`
+    (Terraform already enabled `oidc_issuer_enabled` + `workload_identity_enabled`.)
 
-10. [ ] Run `alembic upgrade head` against PostgreSQL to create tables
+11. [ ] Run `alembic upgrade head` against PostgreSQL (Entra token auth) to create tables
 
 ### After bootstrap — ongoing
 
@@ -1068,8 +1456,8 @@ Azure Storage provides native state locking via blob leases. No DynamoDB needed.
 | PostgreSQL B1MS | Free | 12-month free |
 | ACR Standard | Free | 12-month free (100 GB) |
 | Key Vault | Free | Always free |
-| Event Grid | Free | Always free (100K ops) |
-| Azure Functions | Free | Always free (1M reqs) |
+| Event Grid | Free | Always free (100K ops) — custom topic + KV system topic |
+| Azure Functions | Free | Always free (1M reqs) — bridge + rotator share the Y1 plan |
 | App Service F1 | Free | Always free |
 | Storage (TF state) | ~$0.01 | Negligible |
 | **Total** | **~$0/month at idle** | **12 months** |

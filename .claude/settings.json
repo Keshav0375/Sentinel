@@ -24,13 +24,32 @@
       "Bash(git*)",
       "Bash(docker*)",
       "Bash(echo*)",
-      "Bash(tree*)"
+      "Bash(tree*)",
+      "Bash(gh auth *)",
+      "Bash(gh --version)",
+      "PowerShell($g = Get-Command gh -ErrorAction SilentlyContinue; if \\($g\\) { $g.Source; gh auth status } else { \"gh not found\" })",
+      "PowerShell($w = Get-Command winget -ErrorAction SilentlyContinue; if \\($w\\) { \"winget: $\\($w.Source\\)\"; winget install --id GitHub.cli -e --source winget --accept-package-agreements --accept-source-agreements } else { \"winget not found\" })",
+      "Bash(git fetch *)",
+      "Bash(git checkout *)",
+      "Bash(git pull *)",
+      "PowerShell($gh = \"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\"; if \\(Test-Path $gh\\) { & $gh --version; \"----AUTH----\"; & $gh auth status } else { \"gh.exe not at default path\"; \\(Get-Command gh -ErrorAction SilentlyContinue\\).Source })",
+      "Read(//c/Users/DELL/OneDrive - University of Windsor/Desktop/Agentic-Engineering/**)",
+      "Bash(ls -la Sentinel-development-project)",
+      "Bash(cd \"c:/Users/DELL/OneDrive - University of Windsor/Desktop/Agentic-Engineering/Sentinel\" && mkdir -p .claude/skills/sentinel-build/instructions .claude/skills/phase-gate .claude/agents scripts && echo \"dirs ready\" && ls .claude/agents 2>/dev/null)",
+      "Bash(python scripts/quality_gate.py --repo infra --path \"../Sentinel-development-project/Sentinel-infra\" --json)",
+      "Bash(echo \"exit=$?\")",
+      "Edit(/.claude/skills/sentinel-build/**)",
+      "Edit(/.claude/skills/phase-gate/**)",
+      "Edit(/.claude/skills/sentinel-planner/**)"
     ],
     "deny": [
       "Bash(rm -rf /)*",
       "Bash(curl*)",
       "Bash(wget*)",
       "Bash(sudo*)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\DELL\\OneDrive - University of Windsor\\Desktop\\Agentic-Engineering\\Sentinel\\.claude\\skills\\sentinel-build"
     ]
   }
 }

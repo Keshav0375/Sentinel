@@ -69,6 +69,22 @@ Each doc type in the planning system serves a specific purpose. Follow these pat
 - Don't write architecture until decisions are finalized in discussions
 - Update when decisions change — architecture reflects current truth
 
+### 2a. `Planning/Phase-2/ARCHITECTURE.md` — the master **Architecture Index** (special)
+
+The master doc is **not** a fourth full architecture — it is a lean, diagram-first **index**
+that agents and skills land on first for the whole picture, then leave via pointers.
+
+**Rules:**
+- Keep it **short and high-level**: system diagrams (three-repo, end-to-end), a one-paragraph
+  summary per cross-cutting concern, and a **concern → authoritative file+§ map**.
+- **Do not duplicate deep detail** that lives in a per-repo `*/ARCHITECTURE.md`. If a concern
+  grows detail, put the detail in the per-repo file and leave only a summary + `→ deep dive`
+  pointer here. When a decision changes contracts, edit the **per-repo** file (authoritative);
+  update the index only if the diagram/summary/map changed.
+- Per-task **Arch refs** (in the implementation tracker) point into the **per-repo** files, not
+  the index. The `architecture-conformance` agent verifies against those per-repo sections.
+- Keep the §4 map and the per-repo file section numbers in sync when sections are added/renamed.
+
 ## 3. TODO.md (per repo folder — created when architecture is final)
 
 **Purpose:** Implementation task tracker. Each task maps to code that needs to be written.
