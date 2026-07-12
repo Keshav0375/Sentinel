@@ -1,5 +1,149 @@
 # Sentinel
 
+> [!IMPORTANT]
+> ### 🚧 Phase 2 is under active construction
+> Sentinel is being rebuilt as a **cloud-native, multi-repo system** on Azure — an AKS
+> scale-to-zero backend, Terraform IaC, real Datadog signal from 30 ground-truth scenario
+> branches, and **passwordless Entra security end-to-end** (OIDC, workload identity, bearer
+> tokens). The README below documents the **Phase 1 MVP**; Phase 2 spans three repos:
+>
+> | Repo | Role | Link |
+> |------|------|------|
+> | **Sentinel** _(this repo · default branch)_ | Multi-agent backend + CI/CD — the brain | **https://github.com/Keshav0375/Sentinel** |
+> | **Sentinel-infra** | Terraform IaC + identity plane | **https://github.com/Keshav0375/Sentinel-infra** |
+> | **Sentinel-deployment** | Target app + 30 scenario branches (ground truth) | **https://github.com/Keshav0375/Sentinel-deployment** |
+>
+> **The diagram below is the architectural view of Phase 2** — every repo, request, flow, auth
+> edge, and CI/CD pipeline in one picture.
+
+## 🏗️ Phase 2 — Full Architecture (every request · flow · pipeline)
+
+```mermaid
+flowchart TB
+    %% ================= NODES (declared inside their repos) =================
+    subgraph INFRA["🏗️ sentinel-infra — Terraform IaC · provisions everything"]
+        direction TB
+        TF["terraform apply"]
+        IDP["Identity plane<br/>OIDC app · backend Entra app<br/>api://sentinel-backend · workload identity<br/>Key Vault rotation"]
+        CIINFRA["ci_infra_dry · ci_infra"]
+        DESTROY["ci_destroy_infra<br/>full teardown → az group delete"]
+        RUNNERS["ci_runners → CI images"]
+    end
+
+    subgraph AZURE["☁️ Azure · resource group sentinel-rg · all free tier"]
+        direction TB
+        AKS["AKS · scale-to-zero<br/>1× B2ats_v2 node 0↔1 per run"]
+        ACR["ACR<br/>backend + runner images"]
+        PG[("PostgreSQL B1MS + pgvector<br/>Entra-only auth · no password<br/>incidents · services · deployments")]
+        KV["Key Vault<br/>LLM keys ↻ rotated · rotator Fn"]
+        EG["Event Grid Topic"]
+        FUNC["Function bridge<br/>classifies + stamps signal_type"]
+        APP["App Service F1<br/>dummy-api"]
+    end
+
+    subgraph DEPLOY["🎯 sentinel-deployment — the target app"]
+        direction TB
+        BRANCHES["30 scenario branches<br/>pass · deployfail · runtime · 10 each"]
+        CIAPP["ci_app_deployment<br/>Build → Deploy → Verify → Record → Datadog"]
+    end
+
+    subgraph DD["📊 Datadog"]
+        direction TB
+        MDEP["monitor · deploy-failure"]
+        MRUN["monitor · runtime-health"]
+    end
+
+    subgraph BACKEND["🧠 sentinel — backend + CI/CD · the brain"]
+        direction TB
+        CIVAL["ci_validation<br/>PR fast gate"]
+        CIDEP["ci_backend_deployment<br/>build → push → deploy → test → promote"]
+        CISCALE["ci_backend_scale<br/>up/down + nightly auto-down"]
+        CIINC["ci_incident_response<br/>scale up → fetch ∥ → run → branch → scale down"]
+        subgraph PIPE["Agent pipeline · runs on AKS"]
+            direction TB
+            ORCH["Orchestrator<br/>plans · branches on signal_type"]
+            TRIAGE["Triage"]
+            ANAL["Analysis"]
+            REFLEX["Reflexion<br/>self-critique loop ≤2×"]
+            RESOLVE["Resolution<br/>rollback spec"]
+            REVER["Reverification"]
+            JUDGE["Judge<br/>scores trajectory"]
+        end
+    end
+
+    LF["📈 LangFuse<br/>traces · prompts · scores"]
+    TEAMS["💬 Microsoft Teams"]
+    REVERTPR{{"Revert PR on sentinel-deployment<br/>= HITL gate · human merges or closes"}}
+
+    %% ================= PROVISIONING =================
+    TF --> IDP
+    TF -->|provisions| AKS
+    TF --> ACR
+    TF --> PG
+    TF --> KV
+    TF --> EG
+    TF --> FUNC
+    TF --> APP
+    CIINFRA --> TF
+    IDP -.->|OIDC · no client secret| AKS
+
+    %% ================= DEPLOY FLOW =================
+    BRANCHES --> CIAPP
+    CIAPP -->|zip deploy| APP
+    CIAPP -->|Entra DB token · deploy row| PG
+    CIAPP -->|deploy events + logs| DD
+    APP -->|logs + metrics| DD
+
+    %% ================= ALERT ROUTING =================
+    MDEP -->|signal_type = deploy_failure| EG
+    MRUN -->|signal_type = runtime_error| EG
+    EG --> FUNC
+    FUNC -->|repository_dispatch + signal_type| CIINC
+
+    %% ================= INCIDENT PIPELINE =================
+    CIINC -->|1 · scale backend up| CISCALE
+    CISCALE --> AKS
+    CIINC -->|3 · POST /webhooks/incident · Authorization: Bearer| ORCH
+    ORCH -->|deploy_failure · rollback fast path| RESOLVE
+    ORCH -->|runtime_error| TRIAGE
+    TRIAGE --> ANAL --> REFLEX
+    REFLEX -->|conf ≥ 0.7 + specific deploy| RESOLVE
+    REFLEX -->|conf &lt; 0.7 · ambiguous| JUDGE
+    RESOLVE --> REVER --> JUDGE
+
+    %% ================= BACKEND DATA + RUNTIME AUTH =================
+    ORCH -.->|workload identity → LLM keys| KV
+    ORCH -.->|workload identity → Entra DB token| PG
+    JUDGE -->|store incident| PG
+    JUDGE -->|traces + scores| LF
+
+    %% ================= BACKEND CI/CD =================
+    CIVAL -. gates PRs .-> CIDEP
+    CIDEP -->|push image| ACR
+    CIDEP -->|kubectl deploy| AKS
+    ACR -->|kubelet pull · AcrPull| AKS
+
+    %% ================= HITL LOOP =================
+    RESOLVE -->|rollback spec| REVERTPR
+    REVERTPR -->|human merges → redeploy| BRANCHES
+    REVER -.->|escalate · low confidence| TEAMS
+    CIINC -->|notify outcome| TEAMS
+
+    %% ================= STYLING =================
+    style INFRA fill:#e8f0fe,stroke:#4285f4,color:#1a1a1a
+    style AZURE fill:#e6f4ea,stroke:#34a853,color:#1a1a1a
+    style DEPLOY fill:#fef7e0,stroke:#fbbc04,color:#1a1a1a
+    style DD fill:#f3e8fd,stroke:#a142f4,color:#1a1a1a
+    style BACKEND fill:#fce8e6,stroke:#ea4335,color:#1a1a1a
+    style PIPE fill:#ffffff,stroke:#ea4335,color:#1a1a1a
+    style REVERTPR fill:#fff3cd,stroke:#d39e00,color:#1a1a1a
+```
+
+_This is the architectural view of Phase 2._ Deep-dive docs live in
+[`Planning/Phase-2/ARCHITECTURE.md`](Planning/Phase-2/ARCHITECTURE.md) (the architecture index).
+
+---
+
 **Autonomous DevOps incident response agent** — multi-agent pipeline that triages alerts, diagnoses root causes, drafts remediation plans, and communicates status, with a mandatory human-approval gate before any destructive action.
 
 Built as a portfolio project demonstrating production-grade agentic engineering: multi-agent orchestration, HITL safety, episodic memory, trajectory evaluation, and real-time observability.
