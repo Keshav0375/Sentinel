@@ -192,6 +192,44 @@ Estimate : ~20 merges/month = 60 min → 2% of quota
 
 ---
 
+## Azure Identity — Entra Auth, Key Vault Rotation, Workload Identity (rev-5)
+
+### Docs
+
+| Doc | URL | What It Covers |
+|-----|-----|----------------|
+| Entra auth — PostgreSQL Flexible Server | https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-azure-ad-authentication | Token-based DB login, admin model, `pgaadauth_create_principal`, token lifetimes |
+| Configure Entra auth — PostgreSQL | https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/how-to-configure-sign-in-azure-ad-authentication | Retrieve token, connect with token as password |
+| Key Vault secret rotation tutorial | https://learn.microsoft.com/en-us/azure/key-vault/secrets/tutorial-rotation | Rotation policy + `SecretNearExpiry` → Event Grid → Function pattern |
+| Key Vault autorotation overview | https://learn.microsoft.com/en-us/azure/key-vault/general/autorotation | Which asset types autorotate; single vs dual credential |
+| AKS Workload Identity overview | https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview | OIDC issuer, federated credential, SA annotation, `DefaultAzureCredential` |
+| Entra protected web API (validate token) | https://learn.microsoft.com/en-us/entra/identity-platform/scenario-protected-web-api-app-configuration | App registration, app roles, JWKS validation (aud/iss/roles) |
+
+### Key Findings (what drives our architecture)
+
+**PostgreSQL Entra auth (rev-5 change 3a):**
+- Modes: PG-only, Entra-only, or both. We use **Entra-only** (`password_auth_enabled=false`).
+- The **token is the password**: `az account get-access-token --resource https://ossrdbms-aad.database.windows.net` → pass as `PGPASSWORD`. Username = the Entra principal name (SP/UAMI/group).
+- **Token lifetime:** ~1 h for user/SP, **~24 h for a system-assigned managed identity** — the backend refreshes before expiry.
+- Terraform must ensure Entra auth is ON before creating Entra DB roles (explicit `depends_on`); Azure matches token→role by the principal's **object ID**, not name.
+- Admin can be a **group** (`sentinel-db-admins`) — add/remove members centrally without touching the server. Non-admin roles created via `pgaadauth_create_principal(...)`.
+
+**Key Vault rotation (rev-5 change 3b):**
+- Key Vault has **no dynamic secret engine** (that's HashiCorp Vault). It stores static versions + a **rotation policy**.
+- Pattern: rotation policy fires **`SecretNearExpiry`** (default 30 days before expiry; a short expiry fires within ~15 min) → **Event Grid system topic** → **Function App** (system MI with Secrets Officer) generates the new value, writes a **new secret version**, updates the provider. Single-credential rotation has a brief lag window; a two-set variant avoids it.
+- For LLM keys there's no ephemeral-key API — the Function rotates by calling the provider's key-management API (Anthropic Admin API where available) or degrades to a Teams reminder.
+
+**AKS Workload Identity (rev-5 change 3c):**
+- Enable **`oidc_issuer_enabled` + `workload_identity_enabled`** on the cluster.
+- Federate: **UAMI** ← `azurerm_federated_identity_credential` with `issuer = cluster oidc_issuer_url`, `subject = system:serviceaccount:<ns>:<sa>`, `audience = api://AzureADTokenExchange`.
+- Pod opts in with label **`azure.workload.identity/use: "true"`** + a ServiceAccount annotated **`azure.workload.identity/client-id`**. Code uses `DefaultAzureCredential`/`WorkloadIdentityCredential`; scopes use v2 `<resource>/.default`. Max 20 federated creds per identity.
+
+**Backend inbound Entra bearer (rev-5 change 4):**
+- Register the API app with `identifier_uris = ["api://sentinel-backend"]` + an **app role** (`Incident.Write`, `allowed_member_types = ["Application"]`); grant it to the `sentinel-gha` SP via `azuread_app_role_assignment`.
+- Validate inbound JWTs against `https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys` (PyJWT `PyJWKClient`): check signature (RS256), `aud`, `iss`, `exp`, and `roles` contains `Incident.Write`. Tenant + audience are public config.
+
+---
+
 ## Architecture Change: DigitalOcean → Azure App Service
 
 **Why:** DigitalOcean requires a payment method even with the $200 student credit. Azure Student account is already active with $139 credit, and App Service F1 tier is always-free (no credit consumed).

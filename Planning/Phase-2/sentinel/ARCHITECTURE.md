@@ -1,5 +1,8 @@
 # sentinel — Phase 2 Architecture Document
 
+> **↑ Deep dive of the [Architecture Index](../ARCHITECTURE.md).** Start there for the whole
+> picture; this file is the authoritative detail for **backend** concerns (see the index's §4 map).
+
 > **Purpose:** The sentinel repo IS the backend — it contains the multi-agent incident
 > response pipeline (FastAPI + OpenAI Agents SDK), GHA orchestration workflows, and all
 > CI/CD pipelines. Runs as a **single-replica Deployment on AKS** (free control plane +
@@ -74,16 +77,18 @@ image pull before the pipeline starts. For live demos, set the repo variable
 │  └─────────────────────────────────────────────────────────┘     │
 │                                                                   │
 │  Service: LoadBalancer → public IP (dev). All non-health          │
-│  endpoints require X-Sentinel-Token (shared secret, Key Vault).   │
+│  endpoints require an Entra bearer token (aud api://sentinel-     │
+│  backend), validated vs Entra JWKS — no shared secret (§3.6).     │
 │                                                                   │
-│  Connects to:                                                     │
-│  ├── Azure PostgreSQL B1MS (always-on, free 12 months)           │
-│  ├── Anthropic API / OpenAI API (LLM calls)                      │
+│  Connects to (via workload identity — no stored secret):          │
+│  ├── Azure PostgreSQL B1MS (Entra token auth, free 12 months)    │
+│  ├── Anthropic API / OpenAI API (keys read from Key Vault)       │
 │  ├── Datadog API (log fetching)                                   │
 │  ├── LangFuse Cloud (tracing)                                     │
 │  └── GitHub API (PR details)                                      │
 │                                                                   │
-│  Secrets from: Key Vault → K8s Secret (synced at deploy time)     │
+│  Identity: workload-identity ServiceAccount → Entra tokens for    │
+│  Key Vault + PostgreSQL at runtime (no K8s Secret of app creds).  │
 └──────────────────────────────────────────────────────────────────┘
 
 Always-on Azure resources (free tier):
@@ -208,10 +213,12 @@ This means: given any incident, you can trace back to the exact PR, the exact de
 ## 3. API Contracts
 
 > **Auth:** the backend is exposed on a public AKS LoadBalancer IP (dev). Every
-> non-health endpoint requires the `X-Sentinel-Token` header — a shared secret stored
-> in Key Vault (`sentinel-api-token`), injected into the backend as an env var and
-> fetched by calling workflows. Requests without it get 401. `/health` and `/ready`
-> stay open for probes.
+> non-health endpoint requires an **Entra bearer token** — `Authorization: Bearer
+> <jwt>` — validated against Entra JWKS (§3.6). No shared static secret exists
+> (the old `X-Sentinel-Token`/`sentinel-api-token` is gone). Callers (GHA, a human
+> on Swagger) mint a token scoped to `api://sentinel-backend`; requests without a
+> valid token get 401, without the `Incident.Write` role get 403. `/health` and
+> `/ready` stay open for K8s probes.
 
 ### 3.1 Webhook Receiver
 
@@ -225,6 +232,7 @@ X-Correlation-ID: {correlation_id}
   "alert_id": "evt-abc123",
   "dd_event_id": "dd-evt-456",
   "correlation_id": "uuid-from-bridge",
+  "signal_type": "deploy_failure",   // deploy_failure (case ii) | runtime_error (case iii) — stamped by the bridge
   "title": "Deploy FAILED for PR #5",
   "severity": "error",
   "tags": {
@@ -252,6 +260,17 @@ Response 202:
 ```
 
 The `context` field is pre-fetched by GHA parallel jobs. This means the agent pipeline starts with data already in hand — no cold-start data fetching.
+
+**Two-case handling via `signal_type`** (from sentinel-deployment's 30 scenario
+branches, §sentinel-deployment §4):
+
+| `signal_type` | Case | Backend path |
+|---------------|------|--------------|
+| `deploy_failure` | ii — deploy failed, previous version still live | **Rollback fast path.** The offending deploy never went live; the orchestrator skips deep runtime diagnosis and goes straight to `prepare_rollback_spec` on the failed deploy's SHA (evidence = deploy event + CI logs). Still confidence-gated + judged. |
+| `runtime_error` | iii — green deploy, live app breaking | **Full incident pipeline.** Triage → analysis → reflexion → resolution/escalation — correlate runtime error logs against the most-recent *successful* deploy (`deployments` table). |
+
+The orchestrator reads `signal_type` in its plan step (§4.1) and picks the path.
+Case i (clean pass) never reaches the backend — no monitor fires.
 
 ### 3.2 Incident Query
 
@@ -290,8 +309,9 @@ for evaluating the agent anyway.
 A dedicated endpoint that generates the **revert PR's title and description** during
 an incident. It has exactly one consumer: the `generate-pr-content` job inside
 `ci_incident_response.yml`, on the rollback path, immediately before
-`create-rollback-pr`. **Demo PRs do NOT use this** — sentinel-deployment's
-`ci_demo_prs.yml` creates those from static scenario templates, no backend involved.
+`create-rollback-pr`. This is used **only on the rollback path** (cases ii and
+iii that resolve to a rollback). sentinel-deployment has no PR-generation workflow
+— its scenarios are real git branches (§sentinel-deployment §4).
 
 **Why an agent and not a template?** The revert PR is the HITL surface — a human
 decides merge-or-close based on its description. That description must synthesize
@@ -302,7 +322,7 @@ interpolate fields; it can't summarize evidence.
 ```
 POST /generate/pr-content
 Content-Type: application/json
-X-Sentinel-Token: {token}
+Authorization: Bearer {entra-jwt}
 
 {
   "incident_id": "inc-uuid",
@@ -346,7 +366,7 @@ Response 200:
     needs: run-agent-pipeline
     if: needs.run-agent-pipeline.outputs.resolution-type == 'rollback'
     steps:
-      - # POST $BACKEND_URL/generate/pr-content (X-Sentinel-Token) with the
+      - # POST $BACKEND_URL/generate/pr-content (Authorization: Bearer) with the
         # pipeline outputs: incident_id, root_cause, evidence, confidence, target deploy
         # → outputs: pr-title, pr-description → consumed by create-rollback-pr
 ```
@@ -354,10 +374,56 @@ Response 200:
 ### 3.5 Health Probes
 
 ```
-GET /health    → 200 {"status": "ok"}        (liveness)
-GET /ready     → 200 {"status": "ready"}     (readiness — DB connected, models loaded)
+GET /health    → 200 {"status": "ok"}        (liveness)   ← OPEN, no auth
+GET /ready     → 200 {"status": "ready"}     (readiness — DB connected, models loaded)  ← OPEN
                  503 {"status": "not_ready"}
 ```
+
+These two are the **only** unauthenticated endpoints — K8s kubelet probes can't
+carry a bearer token, and load balancers must probe freely.
+
+### 3.6 Inbound Auth — Entra Bearer Validation (FastAPI dependency)
+
+Every non-health route depends on `require_incident_write`, a FastAPI dependency
+that validates the incoming JWT **statelessly** against Entra's public keys — no
+shared secret, no DB lookup.
+
+```python
+# src/sentinel/api/auth.py  (new)
+from fastapi import Depends, HTTPException, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import jwt  # PyJWT + jwt.PyJWKClient
+
+_JWKS = jwt.PyJWKClient(f"https://login.microsoftonline.com/{TENANT_ID}/discovery/v2.0/keys")
+
+async def require_incident_write(
+    creds: HTTPAuthorizationCredentials = Security(HTTPBearer()),
+) -> dict:
+    try:
+        key = _JWKS.get_signing_key_from_jwt(creds.credentials).key
+        claims = jwt.decode(
+            creds.credentials, key, algorithms=["RS256"],
+            audience="api://sentinel-backend",
+            issuer=f"https://sts.windows.net/{TENANT_ID}/",   # v1; use login.microsoftonline.com/<tid>/v2.0 for v2
+        )
+    except jwt.PyJWTError as exc:
+        raise HTTPException(401, "invalid token") from exc
+    if "Incident.Write" not in claims.get("roles", []):
+        raise HTTPException(403, "missing Incident.Write role")
+    return claims
+```
+
+- **Config, not secrets:** `TENANT_ID` and the audience `api://sentinel-backend`
+  are public identifiers — supplied as env from GitHub *variables* / pod env,
+  never Key Vault.
+- **What's checked:** signature (RS256 against JWKS), `aud`, `iss`, `exp`, and the
+  `roles` claim contains `Incident.Write`.
+- **One identity, many tokens:** the caller (GHA `sentinel-gha` SP, or a human)
+  obtains this token via `az account get-access-token --resource api://sentinel-backend`
+  — a *different* token from the ARM/DB tokens the same identity uses elsewhere
+  (see sentinel-infra §4.5).
+- **Swagger:** declaring `HTTPBearer` renders an **Authorize** button in `/docs`,
+  so manual verification attaches the token to requests automatically.
 
 ---
 
@@ -811,7 +877,8 @@ applied by `ci_backend_deployment.yml` on every merge to main.
 
 | File | Purpose |
 |------|---------|
-| `azure/k8s/deployment.yaml` | Deployment, `replicas: 1`, image from ACR, `envFrom` the `sentinel-secrets` Secret, liveness `/health`, readiness `/ready` |
+| `azure/k8s/deployment.yaml` | Deployment, `replicas: 1`, image from ACR, `serviceAccountName: sentinel-backend` + workload-identity label, `envFrom` the **non-secret** `sentinel-config` ConfigMap, liveness `/health`, readiness `/ready` |
+| `azure/k8s/serviceaccount.yaml` | ServiceAccount annotated `azure.workload.identity/client-id: <backend UAMI client id>` (from the infra output) — federates the pod to Entra (§sentinel-infra §3.7) |
 | `azure/k8s/service.yaml` | `Service type: LoadBalancer` — created at backend-up, **deleted at backend-down** (releases the public IP → $0 idle). The URL is resolved fresh each run (§8.5). |
 
 ```yaml
@@ -827,14 +894,17 @@ spec:
     matchLabels: { app: sentinel-backend }
   template:
     metadata:
-      labels: { app: sentinel-backend }
+      labels:
+        app: sentinel-backend
+        azure.workload.identity/use: "true"   # opt the pod into workload identity
     spec:
+      serviceAccountName: sentinel-backend     # annotated with the backend UAMI client-id
       containers:
         - name: sentinel-backend
           image: sentinelacr.azurecr.io/sentinel-backend:sha-PLACEHOLDER  # set by CI via kubectl set image
           ports: [{ containerPort: 8000 }]
           envFrom:
-            - secretRef: { name: sentinel-secrets }
+            - configMapRef: { name: sentinel-config }   # NON-secret config only (see §8.2)
           readinessProbe:
             httpGet: { path: /ready, port: 8000 }
             initialDelaySeconds: 10
@@ -856,31 +926,38 @@ spec:
   ports: [{ port: 80, targetPort: 8000 }]
 ```
 
-### 8.2 Secrets: Key Vault → K8s Secret (Synced at Deploy Time)
+### 8.2 No K8s Secret — Workload Identity at Runtime
 
-`ci_backend_deployment.yml` reads runtime secrets from Key Vault (OIDC, read-only
-role) and recreates the `sentinel-secrets` K8s Secret on every deploy — no CSI
-driver, no operator, no secrets in the repo:
+The pod holds **no application credentials**. It runs under the `sentinel-backend`
+ServiceAccount (federated to the backend UAMI, §sentinel-infra §3.7) and fetches
+what it needs from Entra *at runtime* via `DefaultAzureCredential` /
+`WorkloadIdentityCredential`:
+
+- **LLM + LangFuse keys** → read straight from Key Vault (`azure-keyvault-secrets`
+  SDK) — always the latest (rotated) version.
+- **PostgreSQL** → mint an Entra DB token (scope
+  `https://ossrdbms-aad.database.windows.net/.default`) and use it as the psql
+  password; refresh before the ~24 h managed-identity token expires.
+
+The deploy workflow only applies a **non-secret** ConfigMap:
 
 ```bash
-kv() { az keyvault secret show --vault-name sentinel-kv --query value -o tsv --name "$1"; }
-
 az aks get-credentials --resource-group sentinel-rg --name sentinel-aks
 
-kubectl create secret generic sentinel-secrets \
-  --from-literal=DATABASE_URL="postgresql://sentinel_admin:$(kv db-password)@sentinel-pg.postgres.database.azure.com/sentinel" \
-  --from-literal=ANTHROPIC_API_KEY="$(kv anthropic-api-key)" \
-  --from-literal=OPENAI_API_KEY="$(kv openai-api-key)" \
-  --from-literal=LANGFUSE_PUBLIC_KEY="$(kv langfuse-public-key)" \
-  --from-literal=LANGFUSE_SECRET_KEY="$(kv langfuse-secret-key)" \
-  --from-literal=DD_API_KEY="$(kv dd-api-key)" \
-  --from-literal=SENTINEL_API_TOKEN="$(kv sentinel-api-token)" \
+kubectl create configmap sentinel-config \
   --from-literal=SENTINEL_PRIMARY_PROVIDER="anthropic" \
+  --from-literal=AZURE_TENANT_ID="<tenant-id>" \
+  --from-literal=SENTINEL_API_AUDIENCE="api://sentinel-backend" \
+  --from-literal=KEY_VAULT_URL="https://sentinel-kv.vault.azure.net" \
+  --from-literal=PGHOST="sentinel-pg.postgres.database.azure.com" \
+  --from-literal=PGDATABASE="sentinel" \
+  --from-literal=PGUSER="sentinel-backend-wi" \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Updating a secret = `az keyvault secret set` + re-run the deploy workflow. No
-Terraform, no manual kubectl against prod.
+Nothing here is a secret — all identifiers/config. Rotating an LLM key = the
+rotation Function writes a new version (§sentinel-infra §3.8); the pod picks it up
+on its next read, **no redeploy**.
 
 ### 8.3 Image Pull: AcrPull Role, No imagePullSecrets
 
@@ -899,7 +976,7 @@ design had a fatal flaw plus real functional gaps:
 | Ad-hoc queries (`GET /incidents`) | Not available | Available while scaled up (or via `ci_backend_scale.yml up`) |
 | Cold start | Pull image + start + validate every run, per job | ~3-7 min per cold run (node + image pull); zero within a `KEEP_WARM` session |
 | Cost | $0 | Node-hours only while scaled up (~20-80 hrs/mo of the free 750) |
-| Exposure | localhost only | Public LB IP — mitigated by `X-Sentinel-Token` on all non-health endpoints |
+| Exposure | localhost only | Public LB IP — mitigated by **Entra bearer auth** (aud `api://sentinel-backend`, role `Incident.Write`) on all non-health endpoints (§3.6) |
 
 Trade-off accepted: we take on K8s manifests, a public endpoint, and per-run scaling
 logic in exchange for a working multi-workflow orchestration model at near-zero
@@ -946,7 +1023,8 @@ address instantly.
 **Rules that make per-run scaling safe:**
 
 1. **Serialization.** Every backend-using workflow (`ci_incident_response.yml` and
-   `ci_backend_deployment.yml` — `ci_demo_prs.yml` never touches the backend) declares:
+   `ci_backend_deployment.yml` — sentinel-deployment's `ci_app_deployment.yml`
+   never touches the backend) declares:
    ```yaml
    concurrency:
      group: sentinel-backend
@@ -986,10 +1064,10 @@ All workflow files use the `ci_` prefix for consistency. Naming pattern: `ci_<de
 | `ci_backend_deployment.yml` | sentinel | Deploy on merge — lint, typecheck, build + push image to ACR, scale up AKS, deploy, validate rollout, all tests against the live deployment, smoke test, rollback on failure, ACR cleanup, scale to zero |
 | `ci_incident_response.yml` | sentinel | Real incident pipeline (repository_dispatch) — scales the backend up, runs, scales it down (§8.5) |
 | `ci_backend_scale.yml` | sentinel | Manual `up`/`down` toggle (workflow_dispatch) + nightly auto-down cron — scale-to-zero safety net |
-| `ci_app_deployment.yml` | sentinel-deployment | Build → Deploy → Verify → Record deploy in PostgreSQL → Report to Datadog |
-| `ci_demo_prs.yml` | sentinel-deployment | Create demo PRs from static scenario templates (workflow_dispatch) — no backend involvement |
+| `ci_app_deployment.yml` | sentinel-deployment | Build → Deploy → Verify → Record deploy in PostgreSQL → Report to Datadog. Deploys one of the 30 scenario branches (§sentinel-deployment §4) |
 | `ci_infra_dry.yml` | sentinel-infra | Terraform validate + plan (dry run, never applies) |
 | `ci_infra.yml` | sentinel-infra | Terraform apply (merge to main only) |
+| `ci_destroy_infra.yml` | sentinel-infra | Manual full teardown — `terraform destroy` + `az group delete` (§sentinel-infra §7.3) |
 | `ci_runners.yml` | sentinel-infra | Build + push CI runner images to ACR |
 
 **Workflow `name:` field:** `[repo] scope — description`
@@ -1011,9 +1089,11 @@ it becomes an action.**
 |--------|------------------|---------|
 | `backend-up` | — → `backend-url` | `ci_incident_response` (ensure-backend-up), `ci_backend_deployment` (deploy-to-aks), `ci_backend_scale` (up) |
 | `backend-down` | — | `ci_incident_response` (teardown-backend), `ci_backend_deployment` (promote-or-rollback), `ci_backend_scale` (down + nightly cron) |
-| `get-kv-secrets` | `names` (list) → one output per secret, each `::add-mask::`ed | Every job that reads a runtime secret, in both repos |
+| `get-kv-secrets` | `names` (list) → one output per secret, each `::add-mask::`ed | Every job that reads a runtime secret (Datadog/Teams/LangFuse), in both repos |
+| `get-db-token` | — → `pg-token` (Entra DB token, `::add-mask::`ed) | Any job that runs psql — replaces the old `db-password` fetch |
+| `get-backend-token` | — → `bearer` (aud `api://sentinel-backend`, masked) | run-agent-pipeline, generate-pr-content, backend smoke tests |
 | `notify-teams` | `title`, `body`, `severity`, `webhook-url` | notify-rollback, notify-escalation, summary, backend-up failure alerts, deploy-rollback alert |
-| `psql-exec` | `sql`, `db-password` → `result` (JSON) | fetch-service-info (read), create-rollback-pr (UPDATE incidents), sentinel-deployment's record-deployment (INSERT) |
+| `psql-exec` | `sql`, `pg-token` → `result` (JSON) | fetch-service-info (read), create-rollback-pr (UPDATE incidents), sentinel-deployment's record-deployment (INSERT) |
 
 sentinel-deployment defines one local action of its own — `dd-report` (`title`,
 `tags`, `alert-type`, optional log payload) — used by every reporting stage of
@@ -1104,8 +1184,8 @@ Jobs:
       - pytest tests/test_agents/ tests/test_api/ -x             (integration)
       - Smoke test: POST canned incident payload to
         {needs.deploy-to-aks.outputs.backend-url}/webhooks/incident
-        (X-Sentinel-Token) → poll → assert incident stored, resolution or
-        escalation produced, judge score present
+        (Authorization: Bearer, aud api://sentinel-backend) → poll → assert
+        incident stored, resolution or escalation produced, judge score present
 
   promote-or-rollback:
     name: Promote or Rollback
@@ -1259,8 +1339,8 @@ jobs:
         id: fetch
         run: |
           SERVICE="${{ github.event.client_payload.tags.service }}"
-          # DB_PASS=$(az keyvault secret show --vault-name sentinel-kv --name db-password --query value -o tsv)
-          # psql query services table → output as JSON (non-secret)
+          # PG_TOKEN=$(az account get-access-token --resource https://ossrdbms-aad.database.windows.net --query accessToken -o tsv)
+          # psql (PGPASSWORD=$PG_TOKEN, user=sentinel-gha) query services table → JSON (non-secret)
 
   fetch-pr-details:
     needs: ensure-backend-up
@@ -1318,9 +1398,10 @@ jobs:
       - name: POST enriched payload to backend and poll for result
         id: run
         run: |
-          # TOKEN=$(az keyvault secret show --vault-name sentinel-kv --name sentinel-api-token --query value -o tsv)
-          # Merge: client_payload + service metadata + PR details + logs
-          # POST $BACKEND_URL/webhooks/incident (X-Sentinel-Token: $TOKEN) → incident_id
+          # TOKEN=$(az account get-access-token --resource api://sentinel-backend --query accessToken -o tsv)
+          # Merge: client_payload (incl. signal_type) + service metadata + PR details + logs
+          # POST $BACKEND_URL/webhooks/incident (Authorization: Bearer $TOKEN) → incident_id
+          #   signal_type=deploy_failure → backend rollback fast path; runtime_error → full pipeline (§3.1)
           # Poll GET $BACKEND_URL/incidents/$INCIDENT_ID every 15s, max 10 min
           # On timeout: set resolution-type=escalated, evidence="pipeline timeout" —
           # the workflow degrades to the escalation path, never a silent failure
@@ -1340,7 +1421,7 @@ jobs:
       - name: Call PR content generation agent
         id: generate
         run: |
-          # POST $BACKEND_URL/generate/pr-content (X-Sentinel-Token) with:
+          # POST $BACKEND_URL/generate/pr-content (Authorization: Bearer) with:
           #   scenario context, root cause, target deploy, evidence
           # Returns: title, description (realistic developer-style text)
 
@@ -1370,7 +1451,8 @@ jobs:
 
       - name: Record PR on incident row (creation record only — see §3.3)
         run: |
-          # Azure login (OIDC) → az keyvault secret show db-password
+          # Azure login (OIDC) → PG_TOKEN=$(az account get-access-token \
+          #   --resource https://ossrdbms-aad.database.windows.net --query accessToken -o tsv)
           # psql UPDATE incidents SET pr_number=$PR_NUM, pr_url=$PR_URL
           #   WHERE id='${{ needs.run-agent-pipeline.outputs.incident-id }}'
           # No lifecycle tracking — merge/close outcome lives on GitHub only
@@ -1496,6 +1578,9 @@ One `terraform apply` creates the entire Sentinel infrastructure from zero. One 
 | `alembic` | Database migrations | Manual CREATE TABLE |
 | `langfuse` | LLM tracing, prompt mgmt, scoring | None (new) |
 | `httpx` | Async HTTP (Datadog API, Teams webhook, GitHub API) | Already in Phase 1 |
+| `pyjwt[crypto]` | Validate inbound Entra bearer JWTs against JWKS (§3.6) | None (new — replaces `X-Sentinel-Token`) |
+| `azure-identity` | `WorkloadIdentityCredential` / `DefaultAzureCredential` — pod fetches Entra tokens for Key Vault + PostgreSQL (§8.2) | None (new) |
+| `azure-keyvault-secrets` | Read LLM/LangFuse keys from Key Vault at runtime via workload identity | None (new — replaces K8s Secret sync) |
 
 ---
 
@@ -1503,9 +1588,11 @@ One `terraform apply` creates the entire Sentinel infrastructure from zero. One 
 
 ### Azure (provisioned by sentinel-infra)
 - [ ] AKS cluster (1× B2ats_v2 node) with AcrPull on ACR — `az aks get-credentials` works
+- [ ] AKS **workload identity** enabled (OIDC issuer) + backend UAMI + federated credential (§sentinel-infra §3.7); ServiceAccount `sentinel-backend` annotated with the UAMI client-id
 - [ ] ACR with admin access or service principal
-- [ ] PostgreSQL B1MS with pgvector extension enabled
-- [ ] Key Vault with secrets: anthropic-api-key, openai-api-key, db-password, dd-api-key, teams-webhook-url, langfuse-secret-key, langfuse-public-key, sentinel-api-token
+- [ ] PostgreSQL B1MS with pgvector — **Entra-only auth**; the GHA SP + backend UAMI mapped to DB roles (no `db-password`)
+- [ ] Backend registered as an Entra app (`api://sentinel-backend`, `Incident.Write` role) for inbound auth (§3.6 / sentinel-infra §4.4)
+- [ ] Key Vault with secrets: anthropic-api-key, openai-api-key, dd-api-key, teams-webhook-url, langfuse-secret-key, langfuse-public-key (**no** db-password, **no** sentinel-api-token)
 
 ### External Services
 - [ ] Anthropic API key (primary LLM provider)
@@ -1561,7 +1648,7 @@ Phase 1 has synthetic data generators, local SQLite, and scripts that won't exis
 | `src/sentinel/tools/hitl.py` | Remove entirely — HITL gate is the GitHub PR review, not a tool. |
 | `src/sentinel/agents/orchestrator.py` | Linear chain → plan-execute with reflexion loops. |
 | `src/sentinel/eval/judge.py` | Local JSON report → LangFuse scores. |
-| `src/sentinel/eval/runner.py` | Iterates scenarios from `data/` → runs against LangFuse datasets. |
+| `src/sentinel/eval/runner.py` | Iterates synthetic scenarios from `data/` → **deploys the 30 sentinel-deployment scenario branches** and scores agent output against each branch's ground-truth label in `scenarios/branches.yaml` (case, expected `signal_type`, expected resolution). The branches ARE the eval dataset; results push to LangFuse. |
 | `src/sentinel/config.py` | Add: DB connection string, Datadog API config, Teams webhook URL, LangFuse keys, asyncpg pool settings. |
 | `Dockerfile` | Remove `COPY data/ ./data/`. No synthetic data in container. |
 
@@ -1575,16 +1662,21 @@ Phase 1 has synthetic data generators, local SQLite, and scripts that won't exis
 | `src/sentinel/agents/pr_content_generator.py` | PR content generation agent definition |
 | `src/sentinel/agents/prompts/pr_content_generator.txt` | System prompt for PR title/description generation |
 | `src/sentinel/api/generate.py` | `/generate/pr-content` endpoint |
+| `src/sentinel/api/auth.py` | **Entra bearer validation** — `require_incident_write` FastAPI dependency (JWKS, aud/iss/exp/role) (§3.6) |
+| `src/sentinel/infra/azure_identity.py` | Workload-identity helpers — Key Vault reads + PostgreSQL Entra token acquisition (§8.2) |
 | `alembic/` | Migration directory with `alembic.ini`, `env.py`, versions/ |
 | `alembic/versions/001_initial_schema.py` | Creates 3 tables + pgvector extension |
 | `alembic/versions/002_seed_services.py` | Inserts initial service data (replaces `data/seed.py`) |
-| `azure/k8s/deployment.yaml` | Single-replica backend Deployment (probes, resources, envFrom secret) |
+| `azure/k8s/deployment.yaml` | Single-replica backend Deployment (workload-identity SA + label, probes, resources, `envFrom` non-secret ConfigMap) |
+| `azure/k8s/serviceaccount.yaml` | Workload-identity ServiceAccount (annotated with backend UAMI client-id) |
 | `azure/k8s/service.yaml` | LoadBalancer Service — created/deleted per run (dynamic URL, §8.5) |
 | `.github/actions/backend-up/` | Composite: scale up + apply manifests + wait ready + output `backend-url` |
 | `.github/actions/backend-down/` | Composite: delete Service + scale to zero |
 | `.github/actions/get-kv-secrets/` | Composite: fetch + mask Key Vault secrets |
+| `.github/actions/get-db-token/` | Composite: mint + mask an Entra PostgreSQL token (replaces db-password fetch) |
+| `.github/actions/get-backend-token/` | Composite: mint + mask an `api://sentinel-backend` token |
 | `.github/actions/notify-teams/` | Composite: Teams webhook notification |
-| `.github/actions/psql-exec/` | Composite: run SQL against sentinel PostgreSQL |
+| `.github/actions/psql-exec/` | Composite: run SQL against sentinel PostgreSQL (token auth) |
 | `.github/workflows/ci_validation.yml` | Fast PR gate — quality + single-job build/run/test |
 | `.github/workflows/ci_backend_deployment.yml` | Post-merge — build+push to ACR, deploy to AKS, tests, promote/rollback, scale to zero |
 | `.github/workflows/ci_incident_response.yml` | Real incident pipeline workflow |

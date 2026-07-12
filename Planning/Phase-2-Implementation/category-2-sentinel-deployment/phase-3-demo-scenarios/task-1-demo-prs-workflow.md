@@ -1,43 +1,67 @@
-# task-1 — `ci_demo_prs.yml` + 14-PR scenario templates (A/B/C)   ·   [category-2-sentinel-deployment / phase-3-demo-scenarios]
+# task-1 — 30 scenario branches + `scenarios/branches.yaml` catalog   ·   [category-2-sentinel-deployment / phase-3-scenario-branches]
 
 | Field | Value |
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-deployment` |
-| **Phase branch** | `impl/deploy-phase-3-demo-scenarios` |
+| **Phase branch** | `impl/deploy-phase-3-scenario-branches` |
 | **Commit prefix** | `feat:` |
-| **Arch refs** | sentinel-deployment/ARCHITECTURE.md §4 (taxonomy + 14-PR table) |
-| **Depends on** | [[task-1-fastapi-app]], [[task-2-ci-app-deployment]] |
-| **Referenced by** | demo runs feeding backend incident pipeline |
+| **Arch refs** | sentinel-deployment/ARCHITECTURE.md §4 (30 branches, 3 cases) + §4.1 (catalog) |
+| **Depends on** | [[task-1-fastapi-app]], [[task-2-ci-app-deployment]], [[task-3-datadog-monitors]] |
+| **Referenced by** | backend incident pipeline (signal_type) + eval runner (ground truth) |
+
+> ⚠ **rev-5 (2026-07-12):** supersedes the old `ci_demo_prs.yml` + 14-PR (A/B/C) design.
+> The demo app is now **real ground truth**; there is **no PR-faking workflow**. Scenarios
+> are **30 real git branches** (10 per case), each with a fixed ground-truth label. The
+> branch set doubles as the eval dataset (replaces Phase-1 synthetic scenario JSON).
 
 ## Spec
-Self-contained demo-PR generator — **no backend involvement** (§4). Each scenario carries
-scripted file changes + a pre-written realistic title/description; the workflow applies them
-on a branch and opens the PR.
+Author 30 scenario branches off `main` and a machine-readable catalog. Each branch is a
+self-contained change that, when deployed by `ci_app_deployment.yml`, produces exactly one
+of three outcomes.
 
 **Files created:**
-- `.github/workflows/ci_demo_prs.yml` — `workflow_dispatch` with a scenario input/matrix; for the chosen scenario: create branch, apply the scripted diff, `gh pr create` with the template title/body.
-- `demo-scenarios/` — one entry per PR #1–14 (§4.1 table): the file change(s) + title + description + expected Datadog signal + condition (A/B/C). Notable: #3 bad requirements (C), #5 health 503 (C), #7 slow startup (C), #9 wrong version (C), #11 `GET /` 500 with verify passing (**B**), #13 delayed `/health` degradation (**B**), even-numbered fixes (A).
+- `scenarios/branches.yaml` — one entry per branch: `branch`, `case` (`pass|deployfail|runtime`),
+  `fault` (what it injects), `expected_signal_type` (`—|deploy_failure|runtime_error`),
+  `expected_resolution` (`none|rollback|rollback_or_escalate`), and `expected_failed_stage`
+  for case ii. This file is the **ground truth** the eval runner (backend §6.2) scores against.
+- **30 branches** pushed to `Keshav0375/Sentinel-deployment`:
+  - `pass/01..10` — trivial safe changes (add `/info`, tweak log line, add field to `GET /`,
+    comment bump…). Green deploy, healthy, **no monitor fires** (true negatives).
+  - `deployfail/01..10` — deploy breaks (bad requirement, `/health` 503, slow-startup timeout,
+    version mismatch, syntax error, bad start command…). Previous version stays live →
+    `deploy-failure` event monitor → `signal_type=deploy_failure`.
+  - `runtime/01..10` — green deploy, breaks at runtime (`GET /` 500 with verify passing,
+    delayed `/health` degradation, memory leak, unhandled exception on a payload…) →
+    `runtime-health` monitor → `signal_type=runtime_error`.
+
+No `ci_demo_prs.yml`. No backend involvement in authoring. No `SENTINEL_API_URL`.
 
 ## Prerequisites
-- [ ] actionlint. [ ] task 1.1 app to mutate. [ ] `gh` + repo write for live PR creation.
+- [ ] task 1.1 app to mutate. [ ] task 2.2 `ci_app_deployment.yml` exists. [ ] task 2.3 monitors defined.
+- [ ] `gh` + repo write to push branches. [ ] Datadog + App Service live (⛔ B6 + Azure) for end-to-end signal.
 
 ## Acceptance Criteria
-- [ ] Workflow validates; opens a real PR from a chosen scenario with the scripted change + pre-written text.
-- [ ] All 14 scenarios encoded with correct A/B/C classification; B scenarios (#11/#13) pass verify but break at runtime.
-- [ ] No backend/`SENTINEL_API_URL` reference; not in any concurrency group.
+- [ ] `scenarios/branches.yaml` validates (schema) with exactly 30 entries, 10 per case.
+- [ ] Every branch exists, applies cleanly on `main`, and matches its catalogued fault.
+- [ ] Deploying a `deployfail/*` branch yields `deploy_status:failed` + the catalogued `failed_stage`;
+      the previously-deployed version keeps serving.
+- [ ] Deploying a `runtime/*` branch passes verify (`/health`+`/version`) but the runtime monitor fires.
+- [ ] Deploying a `pass/*` branch stays green and fires no monitor.
 
 ## Tests
-- **Lint:** actionlint, yamllint; validate each scenario's diff applies cleanly.
-- **Integration:** dispatch scenario #3 → a PR opens that, when merged, yields `deploy_status:failed failed_stage:deploy`; dispatch #11 → merges green but breaks `GET /` at runtime.
+- **Lint:** `yamllint` on `branches.yaml`; assert each branch diff applies to `main`.
+- **Integration:** deploy one per case (`pass/01`, `deployfail/01`, `runtime/01`) → assert the
+  Datadog signal + `signal_type` the bridge would stamp (sentinel-infra §3.5).
 - **Quality gate:** `--repo deployment`.
 
 ## How to Verify (phase gate)
-1. actionlint clean; a dry scenario apply produces the expected diff.
-2. Dispatch one A, one C (#3/#5), one B (#11) → PRs open with realistic text; merging reproduces the documented Datadog signal.
+1. `branches.yaml` schema-valid, 30 entries; a dry apply of a sample from each case produces the expected diff.
+2. Deploy `deployfail/01` (previous version keeps serving; `deploy_failure` event) and `runtime/01`
+   (green deploy, `runtime_error` after verify) → both reproduce the documented Datadog signal.
 
 ## Report   ·   _filled on completion_
 _not yet implemented_
 
 ## BLOCKED
-_Live PR creation needs repo write; end-to-end signal needs Category-2 phase-2 wired. Workflow + scenarios writable now._
+_End-to-end signal needs Category-2 phase-2 wired + Datadog/App Service live (B6). Branches + catalog writable now._

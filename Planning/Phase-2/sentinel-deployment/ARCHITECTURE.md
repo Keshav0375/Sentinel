@@ -1,10 +1,16 @@
 # sentinel-deployment — Architecture Document
 
+> **↑ Deep dive of the [Architecture Index](../ARCHITECTURE.md).** Start there for the whole
+> picture; this file is the authoritative detail for the **target app + ground-truth** concerns
+> (index §4 map).
+
 > **Purpose:** A near-trivial FastAPI app deployed to Azure App Service (F1 free tier)
-> via GitHub Actions. The app itself is a dummy target — the real value is the
-> **deployment pipeline**, which ships structured logs and events to Datadog on every
-> PR merge. Successful deploys, failed builds, broken health checks — all land as
-> real Datadog signal that Sentinel's agents can later analyze.
+> via GitHub Actions. It is the system's **real ground truth** — genuinely deployed,
+> genuinely emitting logs and events to Datadog on every deploy. The **deployment
+> pipeline** is the product; **30 pre-authored scenario branches** (§4) drive three
+> outcomes — clean pass, deploy failure, and green-deploy-but-runtime-error — which
+> land as real Datadog signal for Sentinel's agents to analyze and become the eval
+> dataset. (Supersedes the old `ci_demo_prs.yml` template-PR model, now removed.)
 
 ---
 
@@ -235,11 +241,13 @@ they're exactly the rows incidents join against.
 # OIDC login already done in Stage 3 (azure/login@v2)
 sudo apt-get install -y postgresql-client
 
-DB_PASS=$(az keyvault secret show --vault-name sentinel-kv \
-  --name db-password --query value -o tsv)
+# Entra DB token as the psql password — no db-password secret anywhere.
+PGPASSWORD=$(az account get-access-token \
+  --resource https://ossrdbms-aad.database.windows.net \
+  --query accessToken -o tsv)
 
-PGPASSWORD="$DB_PASS" psql \
-  "host=sentinel-pg.postgres.database.azure.com dbname=sentinel user=sentinel_admin sslmode=require" <<SQL
+PGPASSWORD="$PGPASSWORD" psql \
+  "host=sentinel-pg.postgres.database.azure.com dbname=sentinel user=sentinel-gha sslmode=require" <<SQL
 INSERT INTO deployments
   (service, pr_number, commit_sha, author, deploy_status, gha_run_id, files_changed, metadata)
 VALUES
@@ -251,8 +259,9 @@ SQL
 
 Notes:
 - Runs `if: always()` — failed builds/deploys are recorded with their `failed_stage`.
-- Uses the shared OIDC identity's Key Vault read role for `db-password` — no DB
-  credentials stored as GitHub secrets.
+- Auth is a **short-lived Entra DB token** from the OIDC identity (audience
+  `https://ossrdbms-aad.database.windows.net`) — no `db-password`, no DB
+  credential stored as a GitHub secret anywhere.
 - `incident_id` stays NULL here; the backend backfills it when an incident
   correlates to this deploy.
 - Implemented via sentinel's shared composite actions, referenced cross-repo:
@@ -373,9 +382,9 @@ Sentinel's agents correlate incidents against.
 | `DD_API_KEY` | Datadog API key | Manual |
 | `DEPLOYED_APP_URL` | Public URL (e.g. `https://dummy-api.azurewebsites.net`) | Manual |
 
-DB access for the record-deployment stage needs no GitHub secret — the OIDC identity
-reads `db-password` from Key Vault at runtime. The demo-PR workflow needs no backend
-access at all (scenario templates are static).
+DB access for the record-deployment stage needs no GitHub secret — the OIDC
+identity mints a short-lived Entra DB token at runtime (Postgres is Entra-only).
+There is no demo-PR workflow anymore; scenarios are real git branches (§4).
 
 **No `AZURE_CLIENT_SECRET`** — uses OIDC workload identity federation.
 OIDC federated credentials are provisioned by sentinel-infra Terraform (see sentinel-infra ARCHITECTURE.md §4).
@@ -383,57 +392,75 @@ GitHub secrets for AZURE_CLIENT_ID/TENANT_ID/SUBSCRIPTION_ID are auto-pushed by 
 
 ---
 
-## 4. Demo PR Taxonomy — Three Conditions
+## 4. Scenario Surface — 30 Branches, 3 Cases
 
-Demo PRs are created by `ci_demo_prs.yml` (manual `workflow_dispatch` with a scenario
-matrix). It is fully self-contained — **no backend involvement**: each scenario in
-the matrix carries its scripted file changes plus a pre-written, realistic PR title
-and description. The workflow applies the changes on a branch and opens the PR.
-(The backend's `/generate/pr-content` agent is used only by `ci_incident_response.yml`
-to write **rollback** PR content — see sentinel ARCHITECTURE §3.4.)
+**Pivot (supersedes the old demo-PR model):** the demo app is now **real ground
+truth** — genuinely deployed to App Service, genuinely emitting logs to Datadog.
+There is no PR-faking workflow: **`ci_demo_prs.yml` is removed.** Instead the repo
+ships **30 pre-authored scenario branches** (10 per case, expandable later). Each
+branch is a self-contained change with a known ground-truth label; deploying it
+produces exactly one of three outcomes.
 
-Every demo PR falls into one of three conditions:
+| Case | 10 branches | Deploy pipeline | App at runtime | Datadog signal | `signal_type` | Sentinel outcome |
+|------|-------------|-----------------|----------------|----------------|---------------|------------------|
+| **i — clean pass** | `pass/01..10` | Green | Healthy, every endpoint 200 | success event only (no monitor) | — | **No incident** — true negative / baseline memory |
+| **ii — deploy fails** | `deployfail/01..10` | **Red** (build/deploy/verify) | Previous good version stays live | deploy-failure event monitor (`deploy_status:failed`) | `deploy_failure` | **Case 2 — rollback** (heal main's deployability) |
+| **iii — runtime error** | `runtime/01..10` | **Green** (verify passes) | Live app throws 5xx / errors | runtime-health monitor (5xx / failed pings) | `runtime_error` | **Case 3 — full incident response** (diagnose → rollback/escalate) |
 
-| Condition | Deploy pipeline | App at runtime | Datadog trigger | Sentinel outcome |
-|-----------|----------------|----------------|-----------------|------------------|
-| **A — clean** | Green | Healthy | `deploy_status:succeeded` event only (no monitor fires) | No incident. Baseline history for episodic memory. |
-| **B — runtime failure** | **Green** (verify passes) | **Breaks after deploy** — site fails under real traffic | Runtime-health monitor fires (5xx rate / failed health pings) | Incident → agents correlate symptoms with the **last successful deploy** (deployments table) → revert PR |
-| **C — deploy failure** | **Red** (build/deploy/verify fails) | Old version usually keeps serving (Oryx build failure leaves the previous container running) | Deploy-failure event monitor fires on `deploy_status:failed` | Incident → agents identify the failed deploy from the event + CI context → revert PR |
+**Two signal types → two handling paths** (case i produces neither):
 
-**The B/C nuance matters for the agents:** in C, production often still serves the
-previous version — the revert PR heals **main's deployability**. In B, production is
-actually broken — the revert PR heals **the live site**. Both paths end in a revert
-PR, but the evidence differs: C leans on the deploy event and pipeline logs; B leans
-on runtime error logs plus "what deployed most recently and succeeded?" — which is
-exactly the query the `deployments` table answers.
+- **`deploy_failure` (case ii):** the deploy never went live, so App Service keeps
+  serving the previous version. The fix is a simple rollback of `main` to the last
+  good SHA — no deep diagnosis. Evidence = the deploy-failure event + CI logs.
+- **`runtime_error` (case iii):** the broken version **is** live. Headline case —
+  the full agent pipeline correlates runtime error logs with the most-recent
+  successful deploy (the `deployments` table), then rolls back or escalates.
 
-### 4.1 PR Sequence
+**Why branches, not PRs:** each branch is a stable, replayable scenario with a
+fixed ground-truth label. The sentinel-repo eval harness deploys a branch, watches
+what Datadog + the agents do, and scores against the known label — so **the 30
+branches _are_ the eval dataset** (they replace the Phase-1 synthetic scenario
+JSON). To run one: deploy the branch via `ci_app_deployment.yml`, let the signal
+flow, observe the outcome.
 
-| # | PR Title | What It Does | Expected Datadog Signal | Condition |
-|---|----------|-------------|------------------------|-----------|
-| 1 | `feat: initial dummy-api` | Working app + deploy pipeline | `deploy_status:succeeded` | A |
-| 2 | `feat: add /info endpoint` | Trivial app change, clean deploy | `deploy_status:succeeded` | A |
-| 3 | `fix: break requirements` | Add `nonexistent-package==1.0.0` to requirements.txt | `deploy_status:failed`, `failed_stage:deploy` (pip install fails on server) | C |
-| 4 | `fix: repair requirements` | Remove the bad package | `deploy_status:succeeded` | A |
-| 5 | `feat: break health check` | Change `/health` to return 503 | `deploy_status:failed`, `failed_stage:verify` | C |
-| 6 | `fix: restore health check` | Revert to 200 | `deploy_status:succeeded` | A |
-| 7 | `feat: add slow startup` | Add 60s `asyncio.sleep` in lifespan | `deploy_status:failed`, `failed_stage:verify` (health check timeout) | C |
-| 8 | `fix: remove slow startup` | Remove the sleep | `deploy_status:succeeded` | A |
-| 9 | `feat: wrong version env` | Hardcode `/version` to return `"wrong"` | `deploy_status:failed`, `failed_stage:verify` (version mismatch) | C |
-| 10 | `fix: use env var for version` | Restore `APP_VERSION` from env | `deploy_status:succeeded` | A |
-| 11 | `feat: add homepage caching` | `GET /` returns 500 on every request; `/health` and `/version` untouched — **verify passes** | `deploy_status:succeeded`, then runtime-health monitor fires on 5xx rate | **B** |
-| 12 | `fix: remove broken caching` | Restore `GET /` | `deploy_status:succeeded` | A |
-| 13 | `feat: tune health reporting` | `/health` returns 200 for the first ~5 min of uptime, then 503 — **verify window passes** | `deploy_status:succeeded`, then runtime-health monitor fires on failed health pings | **B** |
-| 14 | `fix: restore stable health` | Revert the delayed degradation | `deploy_status:succeeded` | A |
+### 4.1 Branch Catalog (10 per case)
 
-**Notes:**
-- PR #3 changed from "break Dockerfile" (no Docker anymore) to "break
-  requirements.txt" — pip install failure on Azure's Oryx build is the equivalent
-  failure mode for zip deploy.
-- PRs #11 and #13 exist specifically because the verify stage only checks `/health`
-  and `/version` — a break anywhere else (or a delayed break) sails through the
-  pipeline and can only be caught by runtime monitoring. This is the condition that
-  exercises Sentinel's real diagnostic value.
+Ground-truth labels live in `scenarios/branches.yaml` — one entry per branch with
+its case, the fault it injects, and the expected `signal_type` + resolution. The
+eval harness reads this file to score agent runs against the known label. A
+representative spread (full 30 enumerated in the file):
+
+**Case i — `pass/*` (clean, 10):** trivial safe changes — add `/info`, tweak a log
+line, add a field to `GET /`, bump a comment. All deploy green and stay healthy.
+These are the true negatives that prove Sentinel doesn't cry wolf.
+
+**Case ii — `deployfail/*` (deploy fails, previous version stays live, 10):**
+
+| Branch | Fault injected | Failed stage |
+|--------|----------------|--------------|
+| `deployfail/01` | Add `nonexistent-package==1.0.0` to requirements.txt | deploy (Oryx pip install) |
+| `deployfail/02` | `/health` returns 503 | verify |
+| `deployfail/03` | 60s `asyncio.sleep` in lifespan → health timeout | verify |
+| `deployfail/04` | Hardcode `/version` to `"wrong"` → version mismatch | verify |
+| `deployfail/05` | Syntax error in `main.py` → app won't boot | verify |
+| `deployfail/06–10` | Spread across build/deploy/verify (bad start command, missing module, bad env, port clash, import error) | build/deploy/verify |
+
+**Case iii — `runtime/*` (green deploy, breaks at runtime, 10):**
+
+| Branch | Fault injected | How it slips past verify |
+|--------|----------------|--------------------------|
+| `runtime/01` | `GET /` returns 500 every call; `/health`+`/version` fine | verify only checks `/health`+`/version` |
+| `runtime/02` | `/health` 200 for first ~5 min, then 503 | degrades after the verify window |
+| `runtime/03` | Memory leak → 5xx under sustained traffic | fine at first ping |
+| `runtime/04` | Unhandled exception on a specific payload | verify uses a safe payload |
+| `runtime/05` | Latency spike (blocking call) on `GET /` | verify tolerates one slow call |
+| `runtime/06–10` | Spread (intermittent 5xx, bad downstream call, resource exhaustion, wrong content-type, silent data error) | passes the narrow verify checks |
+
+**The nuance that makes case iii the star:** the verify stage only probes `/health`
+and `/version`. Any break elsewhere — or a delayed break — sails through the
+pipeline green and can only be caught by runtime monitoring, which is exactly where
+Sentinel's diagnostic value lives (correlate the runtime symptom back to "what
+deployed most recently and succeeded?" via the `deployments` table).
 
 ---
 
@@ -447,19 +474,23 @@ sentinel-deployment/
 │   └── config.py            # AppConfig (pydantic-settings)
 ├── tests/
 │   └── test_app.py          # Endpoint tests (health, version, root)
+├── scenarios/
+│   └── branches.yaml         # Ground-truth catalog: 30 branches, case + fault + expected signal_type/resolution
 ├── .github/
 │   ├── actions/
 │   │   └── dd-report/             # Local composite action: Datadog event + log reporting
 │   └── workflows/
-│       ├── ci_app_deployment.yml  # Build → Deploy → Verify → Record → Report
-│       └── ci_demo_prs.yml        # workflow_dispatch — scenario PRs from static templates (no backend)
+│       └── ci_app_deployment.yml  # Build → Deploy → Verify → Record → Report
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
 └── README.md
 ```
 
-No Dockerfile, no app.yaml, no container registry. Zip deploy keeps it simple.
+No Dockerfile, no app.yaml, no container registry, **no `ci_demo_prs.yml`**. The
+30 scenario branches are real git branches (catalogued in `scenarios/branches.yaml`);
+deploying one via `ci_app_deployment.yml` is what generates signal. Zip deploy keeps
+the app itself simple.
 
 ---
 
@@ -492,18 +523,21 @@ Queryable in Datadog Log Explorer:
 
 ### 6.3 Monitors — What Triggers Sentinel
 
-Two Datadog monitors, one per failure condition (§4):
+Two Datadog monitors, one per failure case (§4). Case i (clean pass) fires
+neither.
 
 | Monitor | Type | Fires On | Covers |
 |---------|------|----------|--------|
-| `sentinel-deploy-failure` | Event monitor | Any event tagged `deploy_status:failed` (shipped by this pipeline) | **Condition C** — build/deploy/verify failures |
-| `sentinel-runtime-health` | Metric / HTTP monitor | App Service 5xx rate over threshold, or failed pings against `GET /health` + `GET /` (native Azure integration metrics or a Datadog synthetic check) | **Condition B** — runtime failures that passed verify |
+| `sentinel-deploy-failure` | Event monitor | Any event tagged `deploy_status:failed` (shipped by this pipeline) | **Case ii** — build/deploy/verify failures → `signal_type=deploy_failure` |
+| `sentinel-runtime-health` | Metric / HTTP monitor | App Service 5xx rate over threshold, or failed pings against `GET /health` + `GET /` (native Azure integration metrics or a Datadog synthetic check) | **Case iii** — runtime failures that passed verify → `signal_type=runtime_error` |
 
 Both monitors notify the same webhook channel → Event Grid → Azure Function →
-`repository_dispatch` on the sentinel repo. The alert's tags tell the agents which
-class fired (`deploy_status:failed` vs a runtime alert), which changes the evidence
-they weigh: CI logs + the deploy event for C; runtime error logs + "most recent
-successful deploy" correlation (PostgreSQL `deployments` table) for B.
+`repository_dispatch` on the sentinel repo. The bridge Function classifies the
+payload and stamps `signal_type` (`deploy_failure` vs `runtime_error`, see
+sentinel-infra §3.5), which the backend workflow branches on: CI logs + the deploy
+event drive the **rollback** path (case ii); runtime error logs + "most recent
+successful deploy" correlation (PostgreSQL `deployments` table) drive the **full
+incident-response** path (case iii).
 
 Monitor settings to keep the demo sane: renotify OFF, require a recovery period
 before re-alerting, and a short evaluation window (5 min) on the runtime monitor so
@@ -513,18 +547,19 @@ condition-B demos fire while the room is still watching.
 
 ## 7. What This Enables for Sentinel
 
-After 10+ PRs, Datadog contains:
+After deploying the 30 scenario branches, Datadog contains:
 
-1. **Deploy events on a timeline** — visible in Events Explorer, tagged with PR + version
-2. **Deploy logs** — searchable by status, stage, PR number
-3. **Failure patterns** — build failures (bad deps), health check failures, version mismatches
+1. **Deploy events on a timeline** — visible in Events Explorer, tagged with branch + version
+2. **Deploy logs** — searchable by status, stage, deploy version
+3. **Failure patterns** — deploy failures (case ii) and runtime errors (case iii)
 4. **Before/after correlation** — events mark exactly when each deploy happened
 
 When the full Sentinel pipeline is connected:
-- Datadog monitor triggers on `deploy_status:failed` → webhook → Event Grid → Sentinel GHA
-- Sentinel agents fetch recent deploy logs via Datadog API
-- Agents correlate the failed deploy with the PR that caused it
-- Sentinel drafts a revert PR on sentinel-deployment
+- A monitor fires → webhook → Event Grid → bridge stamps `signal_type` → Sentinel GHA
+- `deploy_failure` → **rollback** path; `runtime_error` → **full incident response**
+- Sentinel agents fetch recent deploy logs via Datadog API + correlate against the
+  `deployments` table to find the offending deploy
+- Sentinel drafts a revert PR on sentinel-deployment (HITL gate)
 
 ---
 

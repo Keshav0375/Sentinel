@@ -19,8 +19,9 @@ Category  →  Phase (= 1 branch + 1 PR)  →  Task (= 1 commit, PR-sized)
   `sentinel-infra` → `sentinel-deployment` → `sentinel-backend`.
   Infra first so deployment and backend build on real, provisioned ground truth.
 - **16 phases** total. **Each phase is one git branch and one pull request.**
-- **~55 tasks** total. Each task is one PR-sized commit on its phase branch, ships
-  **unit + integration tests**, and must pass the category **quality gate** (§4).
+- **~58 tasks** total (rev-5 added infra 3.5/3.6 + backend 5.6). Each task is one PR-sized
+  commit on its phase branch, ships **unit + integration tests**, and must pass the category
+  **quality gate** (§4).
 
 The master checklist is [TODO.md](TODO.md) — headings + status only. The full technical
 detail for each task lives in its own file (§2).
@@ -55,14 +56,39 @@ Each `category-N-*/` has its own `README.md` indexing its phases and tasks, and 
 ## 4. Architecture reference (read before building a task)
 
 Every task cites the section it implements. Never deviate from architecture without asking.
+**Start at the index** for the whole picture, then follow its §4 map to the per-repo file your
+task's **Arch refs** name — the per-repo files are authoritative for detail.
 
 | Doc | Scope |
 |-----|-------|
-| [../Phase-2/ARCHITECTURE.md](../Phase-2/ARCHITECTURE.md) | Master — three-repo system, end-to-end flow, cost. |
-| [../Phase-2/sentinel-infra/ARCHITECTURE.md](../Phase-2/sentinel-infra/ARCHITECTURE.md) | 7 Terraform modules, OIDC, cross-repo secrets, CI. |
-| [../Phase-2/sentinel-deployment/ARCHITECTURE.md](../Phase-2/sentinel-deployment/ARCHITECTURE.md) | Deploy pipeline stages, Datadog schema, 14-PR demo taxonomy. |
-| [../Phase-2/sentinel/ARCHITECTURE.md](../Phase-2/sentinel/ARCHITECTURE.md) | Agents, tools, memory, API, DB schema, K8s, workflows, Phase-1 cleanup. |
+| [../Phase-2/ARCHITECTURE.md](../Phase-2/ARCHITECTURE.md) | **Architecture Index — start here.** Whole picture in diagrams + a concern→file §4 map. Routes to the deep-dive files below. |
+| [../Phase-2/sentinel-infra/ARCHITECTURE.md](../Phase-2/sentinel-infra/ARCHITECTURE.md) | 7 Terraform modules + identity plane, Entra DB auth, KV rotation, workload identity, `ci_destroy_infra`, cross-repo secrets, CI. |
+| [../Phase-2/sentinel-deployment/ARCHITECTURE.md](../Phase-2/sentinel-deployment/ARCHITECTURE.md) | Deploy pipeline stages, Datadog schema, **30 scenario branches (3 cases)**. |
+| [../Phase-2/sentinel/ARCHITECTURE.md](../Phase-2/sentinel/ARCHITECTURE.md) | Agents, tools, memory, API (+ Entra bearer §3.6, signal_type two-case), DB schema, K8s (workload identity), workflows, Phase-1 cleanup. |
 | [../Phase-2/STATE.md](../Phase-2/STATE.md) | Planning decision log + open blockers. |
+
+> ⚠ **rev-5 (2026-07-12) supersedes several existing task bodies — read the arch first.**
+> The TODO row descriptions are current, but some task-file *bodies* predate the security +
+> ground-truth overhaul. When building these, follow the cited arch section, not the stale body:
+>
+> | Task file | Superseded by |
+> |-----------|---------------|
+> | infra 2.2 postgresql-module | Entra-only auth + admin group (infra §3.2) — no `db-password`/password auth |
+> | infra 2.3 keyvault-module | secret inventory minus db-password/api-token; 4 RBAC roles (infra §3.3) |
+> | infra 3.1 aks-module | + workload identity (OIDC issuer, backend UAMI, federated cred) (infra §3.7) |
+> | infra 3.2 event-grid / 3.3 functions-bridge | two-signal routing + bridge stamps `signal_type` (infra §3.4/§3.5) |
+> | infra 4.1 cross-repo-secrets | variables + `SENTINEL_API_AUDIENCE`, no `DB_PASSWORD` (infra §5) |
+> | infra 4.3 infra-workflows | add `ci_destroy_infra.yml` (infra §7.3) |
+> | deploy 2.2 ci-app-deployment | record stage uses Entra DB token, not `db-password` (deploy §3 Stage 5) |
+> | backend 5.1 webhook-receiver | `signal_type` two-case handling (sentinel §3.1) |
+> | backend 5.5 app-lifespan | workload-identity KV/DB wiring; auth moved to 5.6 |
+> | backend 7.2 k8s-manifests | ServiceAccount + workload-identity label; ConfigMap not Secret (sentinel §8.2) |
+> | backend 7.3 composite-actions | + `get-db-token`, `get-backend-token`; `psql-exec` takes a token (sentinel §9) |
+> | backend 6.2 eval-runner | scores against 30 branches / `branches.yaml`, not synthetic JSON (sentinel §13.2) |
+>
+> New rev-5 tasks: infra [3.5 backend-entra-app](category-1-sentinel-infra/phase-3-compute-modules/task-5-backend-entra-app.md),
+> infra [3.6 keyvault-rotation](category-1-sentinel-infra/phase-3-compute-modules/task-6-keyvault-rotation.md),
+> backend [5.6 entra-bearer-auth](category-3-sentinel-backend/phase-5-api/task-6-entra-bearer-auth.md).
 
 ## 5. The build loop (per task)
 

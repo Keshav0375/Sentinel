@@ -20,7 +20,7 @@ agents diagnose. **Implemented second** (needs infra: App Service, Key Vault, Po
 |-------|--------|-------|---------|
 | **1 — The App** | `impl/deploy-phase-1-app` | FastAPI app · app tests | §2, §5 |
 | **2 — Deploy Pipeline** | `impl/deploy-phase-2-deploy-pipeline` | dd-report action · ci_app_deployment · Datadog monitors | §3, §6.3 |
-| **3 — Demo Scenarios** | `impl/deploy-phase-3-demo-scenarios` | ci_demo_prs + 14-PR taxonomy | §4 |
+| **3 — Scenario Branches** | `impl/deploy-phase-3-scenario-branches` | 30 scenario branches (3 cases) + branches.yaml — replaces ci_demo_prs | §4 |
 
 ## Tasks
 
@@ -29,4 +29,4 @@ agents diagnose. **Implemented second** (needs infra: App Service, Key Vault, Po
 - **2.1** [dd-report composite action](phase-2-deploy-pipeline/task-1-dd-report-action.md)
 - **2.2** [ci_app_deployment.yml](phase-2-deploy-pipeline/task-2-ci-app-deployment.md)
 - **2.3** [Datadog monitors](phase-2-deploy-pipeline/task-3-datadog-monitors.md)
-- **3.1** [ci_demo_prs + scenarios](phase-3-demo-scenarios/task-1-demo-prs-workflow.md)
+- **3.1** [30 scenario branches + branches.yaml](phase-3-demo-scenarios/task-1-demo-prs-workflow.md)

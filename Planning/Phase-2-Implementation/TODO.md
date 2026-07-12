@@ -7,7 +7,11 @@
 > **Status:** ⬜ not-started · 🔵 in-progress · ⛔ blocked · 🟡 done-pending-review · ✅ verified
 > **Legend:** 🔒 = phase locked until the previous phase gate is signed off.
 
-**Overall:** 0 / 55 tasks verified · 0 / 16 phases merged.
+**Overall:** 0 / 58 tasks verified · 0 / 16 phases merged.
+> **rev-5 (2026-07-12):** tasks added/modified for the security + ground-truth overhaul —
+> Entra-only Postgres, Key Vault rotation, backend Entra app + AKS workload identity,
+> `ci_destroy_infra`, 30 scenario branches (replaces demo PRs), inbound Entra bearer auth.
+> See [../Phase-2/STATE.md](../Phase-2/STATE.md) decision log.
 
 ---
 
@@ -25,23 +29,25 @@ _Implement first — provisions the ground truth every other repo depends on._ �
 | # | Task | File | Status |
 |---|------|------|--------|
 | 2.1 | ACR module | [task-1](category-1-sentinel-infra/phase-2-core-modules/task-1-acr-module.md) | ⬜ |
-| 2.2 | PostgreSQL module (+ pgvector, firewall) | [task-2](category-1-sentinel-infra/phase-2-core-modules/task-2-postgresql-module.md) | ⬜ |
-| 2.3 | Key Vault module (+ RBAC roles, secrets) | [task-3](category-1-sentinel-infra/phase-2-core-modules/task-3-keyvault-module.md) | ⬜ |
+| 2.2 | PostgreSQL module (+ pgvector, **Entra-only auth** + admin group, firewall) | [task-2](category-1-sentinel-infra/phase-2-core-modules/task-2-postgresql-module.md) | ⬜ |
+| 2.3 | Key Vault module (+ RBAC roles, secrets — **no db-password/api-token**) | [task-3](category-1-sentinel-infra/phase-2-core-modules/task-3-keyvault-module.md) | ⬜ |
 
 ### Phase 3 — Compute & Networking Modules  ·  branch `impl/infra-phase-3-compute-modules`  ·  Gate: 🔒
 | # | Task | File | Status |
 |---|------|------|--------|
-| 3.1 | AKS module (+ AcrPull, scale-to-zero lifecycle) | [task-1](category-1-sentinel-infra/phase-3-compute-modules/task-1-aks-module.md) | ⬜ |
-| 3.2 | Event Grid module | [task-2](category-1-sentinel-infra/phase-3-compute-modules/task-2-event-grid-module.md) | ⬜ |
-| 3.3 | Azure Function bridge module (+ Python source) | [task-3](category-1-sentinel-infra/phase-3-compute-modules/task-3-functions-bridge-module.md) | ⬜ |
+| 3.1 | AKS module (+ AcrPull, scale-to-zero, **workload identity: OIDC issuer + backend UAMI + federated cred**) | [task-1](category-1-sentinel-infra/phase-3-compute-modules/task-1-aks-module.md) | ⬜ |
+| 3.2 | Event Grid module (+ **two-signal routing**) | [task-2](category-1-sentinel-infra/phase-3-compute-modules/task-2-event-grid-module.md) | ⬜ |
+| 3.3 | Azure Function bridge module (+ Python source, **stamps `signal_type`**) | [task-3](category-1-sentinel-infra/phase-3-compute-modules/task-3-functions-bridge-module.md) | ⬜ |
 | 3.4 | App Service module (F1 target) | [task-4](category-1-sentinel-infra/phase-3-compute-modules/task-4-app-service-module.md) | ⬜ |
+| 3.5 | **Identity plane** — backend Entra app (`api://sentinel-backend` + `Incident.Write`) + role grant to `sentinel-gha` | [task-5](category-1-sentinel-infra/phase-3-compute-modules/task-5-backend-entra-app.md) | ⬜ |
+| 3.6 | **Key Vault rotation** — rotation policy + rotator Function (`SecretNearExpiry` → new version) | [task-6](category-1-sentinel-infra/phase-3-compute-modules/task-6-keyvault-rotation.md) | ⬜ |
 
 ### Phase 4 — Cross-Repo Wiring & CI  ·  branch `impl/infra-phase-4-wiring-and-ci`  ·  Gate: 🔒
 | # | Task | File | Status |
 |---|------|------|--------|
-| 4.1 | Cross-repo secret distribution (github provider) | [task-1](category-1-sentinel-infra/phase-4-wiring-and-ci/task-1-cross-repo-secrets.md) | ⬜ |
+| 4.1 | Cross-repo secret/variable distribution (github provider — vars + `SENTINEL_API_AUDIENCE`, **no DB_PASSWORD**) | [task-1](category-1-sentinel-infra/phase-4-wiring-and-ci/task-1-cross-repo-secrets.md) | ⬜ |
 | 4.2 | CI runner image (Dockerfile + build-push) | [task-2](category-1-sentinel-infra/phase-4-wiring-and-ci/task-2-ci-runner-image.md) | ⬜ |
-| 4.3 | Infra workflows (dry / apply / runners) | [task-3](category-1-sentinel-infra/phase-4-wiring-and-ci/task-3-infra-workflows.md) | ⬜ |
+| 4.3 | Infra workflows (dry / apply / **destroy** / runners) | [task-3](category-1-sentinel-infra/phase-4-wiring-and-ci/task-3-infra-workflows.md) | ⬜ |
 | 4.4 | Root wiring + outputs + end-to-end apply | [task-4](category-1-sentinel-infra/phase-4-wiring-and-ci/task-4-root-wiring-and-apply.md) | ⬜ |
 
 ---
@@ -59,13 +65,13 @@ _Implement second — the target app + deploy pipeline that generates real Datad
 | # | Task | File | Status |
 |---|------|------|--------|
 | 2.1 | `dd-report` composite action | [task-1](category-2-sentinel-deployment/phase-2-deploy-pipeline/task-1-dd-report-action.md) | ⬜ |
-| 2.2 | `ci_app_deployment.yml` (Build→Deploy→Verify→Record→Summary) | [task-2](category-2-sentinel-deployment/phase-2-deploy-pipeline/task-2-ci-app-deployment.md) | ⬜ |
-| 2.3 | Datadog monitors (deploy-failure + runtime-health) | [task-3](category-2-sentinel-deployment/phase-2-deploy-pipeline/task-3-datadog-monitors.md) | ⬜ |
+| 2.2 | `ci_app_deployment.yml` (Build→Deploy→Verify→Record[**Entra DB token**]→Summary) | [task-2](category-2-sentinel-deployment/phase-2-deploy-pipeline/task-2-ci-app-deployment.md) | ⬜ |
+| 2.3 | Datadog monitors (deploy-failure → `deploy_failure`; runtime-health → `runtime_error`) | [task-3](category-2-sentinel-deployment/phase-2-deploy-pipeline/task-3-datadog-monitors.md) | ⬜ |
 
-### Phase 3 — Demo Scenarios  ·  branch `impl/deploy-phase-3-demo-scenarios`  ·  Gate: 🔒
+### Phase 3 — Scenario Branches  ·  branch `impl/deploy-phase-3-scenario-branches`  ·  Gate: 🔒
 | # | Task | File | Status |
 |---|------|------|--------|
-| 3.1 | `ci_demo_prs.yml` + 14-PR scenario templates (A/B/C) | [task-1](category-2-sentinel-deployment/phase-3-demo-scenarios/task-1-demo-prs-workflow.md) | ⬜ |
+| 3.1 | **30 scenario branches** (10 per case) + `scenarios/branches.yaml` catalog — replaces `ci_demo_prs.yml` | [task-1](category-2-sentinel-deployment/phase-3-demo-scenarios/task-1-demo-prs-workflow.md) | ⬜ |
 
 ---
 
@@ -75,7 +81,7 @@ _Implement third — the multi-agent brain. Migrates Phase-1 code to Phase-2 (se
 ### Phase 1 — Data Layer Foundation  ·  branch `impl/backend-phase-1-data-layer`  ·  Gate: 🔒
 | # | Task | File | Status |
 |---|------|------|--------|
-| 1.1 | Add Phase-2 deps (asyncpg, pgvector, alembic, langfuse) | [task-1](category-3-sentinel-backend/phase-1-data-layer/task-1-phase2-dependencies.md) | ⬜ |
+| 1.1 | Add Phase-2 deps (asyncpg, pgvector, alembic, langfuse, **pyjwt[crypto], azure-identity, azure-keyvault-secrets**) | [task-1](category-3-sentinel-backend/phase-1-data-layer/task-1-phase2-dependencies.md) | ⬜ |
 | 1.2 | asyncpg pool — `infra/database.py` | [task-2](category-3-sentinel-backend/phase-1-data-layer/task-2-asyncpg-database-pool.md) | ⬜ |
 | 1.3 | Alembic setup + `001_initial_schema` (3 tables + pgvector) | [task-3](category-3-sentinel-backend/phase-1-data-layer/task-3-alembic-initial-schema.md) | ⬜ |
 | 1.4 | `002_seed_services` migration | [task-4](category-3-sentinel-backend/phase-1-data-layer/task-4-seed-services-migration.md) | ⬜ |
@@ -110,24 +116,25 @@ _Implement third — the multi-agent brain. Migrates Phase-1 code to Phase-2 (se
 ### Phase 5 — API & App  ·  branch `impl/backend-phase-5-api`  ·  Gate: 🔒
 | # | Task | File | Status |
 |---|------|------|--------|
-| 5.1 | `POST /webhooks/incident` receiver | [task-1](category-3-sentinel-backend/phase-5-api/task-1-webhook-receiver.md) | ⬜ |
+| 5.1 | `POST /webhooks/incident` receiver (+ **`signal_type` two-case branch**) | [task-1](category-3-sentinel-backend/phase-5-api/task-1-webhook-receiver.md) | ⬜ |
 | 5.2 | `GET /incidents*` query endpoints | [task-2](category-3-sentinel-backend/phase-5-api/task-2-incident-query-endpoints.md) | ⬜ |
 | 5.3 | `POST /generate/pr-content` endpoint | [task-3](category-3-sentinel-backend/phase-5-api/task-3-generate-pr-content-endpoint.md) | ⬜ |
-| 5.4 | `/health` + `/ready` probes | [task-4](category-3-sentinel-backend/phase-5-api/task-4-health-ready-probes.md) | ⬜ |
-| 5.5 | `main.py` lifespan + concurrency + token auth | [task-5](category-3-sentinel-backend/phase-5-api/task-5-app-lifespan-and-concurrency.md) | ⬜ |
+| 5.4 | `/health` + `/ready` probes (open, no auth) | [task-4](category-3-sentinel-backend/phase-5-api/task-4-health-ready-probes.md) | ⬜ |
+| 5.5 | `main.py` lifespan + concurrency + **workload-identity KV/DB wiring** | [task-5](category-3-sentinel-backend/phase-5-api/task-5-app-lifespan-and-concurrency.md) | ⬜ |
+| 5.6 | **`api/auth.py`** — Entra bearer validation (JWKS: aud/iss/exp/`Incident.Write`); apply to non-health routes | [task-6](category-3-sentinel-backend/phase-5-api/task-6-entra-bearer-auth.md) | ⬜ |
 
 ### Phase 6 — Eval  ·  branch `impl/backend-phase-6-eval`  ·  Gate: 🔒
 | # | Task | File | Status |
 |---|------|------|--------|
 | 6.1 | `eval/judge.py` → LangFuse scores | [task-1](category-3-sentinel-backend/phase-6-eval/task-1-judge-langfuse-scores.md) | ⬜ |
-| 6.2 | `eval/runner.py` → LangFuse datasets | [task-2](category-3-sentinel-backend/phase-6-eval/task-2-eval-runner-datasets.md) | ⬜ |
+| 6.2 | `eval/runner.py` → deploy **30 scenario branches**, score vs `branches.yaml` ground truth → LangFuse | [task-2](category-3-sentinel-backend/phase-6-eval/task-2-eval-runner-datasets.md) | ⬜ |
 
 ### Phase 7 — Container & K8s  ·  branch `impl/backend-phase-7-container-and-k8s`  ·  Gate: 🔒
 | # | Task | File | Status |
 |---|------|------|--------|
 | 7.1 | Dockerfile update (drop `data/`, torch-cpu) | [task-1](category-3-sentinel-backend/phase-7-container-and-k8s/task-1-dockerfile-update.md) | ⬜ |
-| 7.2 | `azure/k8s/` deployment + service manifests | [task-2](category-3-sentinel-backend/phase-7-container-and-k8s/task-2-k8s-manifests.md) | ⬜ |
-| 7.3 | Composite actions (backend-up/down, kv-secrets, teams, psql) | [task-3](category-3-sentinel-backend/phase-7-container-and-k8s/task-3-composite-actions.md) | ⬜ |
+| 7.2 | `azure/k8s/` deployment + **serviceaccount (workload identity)** + service manifests (ConfigMap, not Secret) | [task-2](category-3-sentinel-backend/phase-7-container-and-k8s/task-2-k8s-manifests.md) | ⬜ |
+| 7.3 | Composite actions (backend-up/down, kv-secrets, **get-db-token, get-backend-token**, teams, psql) | [task-3](category-3-sentinel-backend/phase-7-container-and-k8s/task-3-composite-actions.md) | ⬜ |
 
 ### Phase 8 — CI/CD Workflows  ·  branch `impl/backend-phase-8-cicd`  ·  Gate: 🔒
 | # | Task | File | Status |

@@ -1,24 +1,42 @@
 # Sentinel Phase 2 — Planning State
 
-> Last updated: 2026-07-11
+> Last updated: 2026-07-12
 
 ## Current Phase
 
-Architecture planning complete for all three repos (rev 4 — 2026-07-05). Backend runs on AKS with **scale-to-zero** (node pool 0↔1 per run, `sentinel-backend` concurrency group, `KEEP_WARM` demo mode, nightly auto-down) and a **dynamic per-run backend URL** (resolved from the cluster; Service + LB IP deleted at teardown → $0 infra at idle). HITL is fire-and-forget, `deployments` table written by the deploy pipeline, demo PRs are template-based (`/generate/pr-content` serves rollback PRs only). Reusable composite actions (`backend-up/down`, `get-kv-secrets`, `notify-teams`, `psql-exec`, `dd-report`) and top-level repo buckets (`src/sentinel`, `azure/`, `.github/`, `Planning/`, `.claude/`, `tests/`, `alembic/`) documented. All four architecture docs + READMEs synced. Ready for implementation once Azure resources are bootstrapped.
+Architecture planning complete for all three repos (**rev 5 — 2026-07-12**: security
++ ground-truth overhaul). Four cross-cutting changes landed: **(1)** `ci_destroy_infra`
+full-teardown workflow ("everything, always" — `terraform destroy` + `az group delete`,
+re-bootstrap on restart); **(2)** sentinel-deployment pivot — `ci_demo_prs.yml` removed,
+replaced by **30 real scenario branches (10 per case)**: clean pass / deploy-fail /
+runtime-error, with two Datadog signal types → two backend paths, and the branches
+become the eval dataset; **(3)** **Azure-native dynamic secrets** — PostgreSQL switched
+to **Entra-only auth** (no db-password; short-lived tokens), LLM keys on a **Key Vault
+rotation policy + rotator Function**, backend reads secrets via **AKS workload
+identity**; **(4)** **inbound Entra bearer auth** on the backend (`api://sentinel-backend`
++ `Incident.Write`, validated vs JWKS) — deletes `sentinel-api-token`. Net: no stored
+Azure client secret, no DB password, no shared API token — only `GITHUB_PAT` + `ACR_*`
+remain as bootstrap secrets. Prior rev-4 model intact underneath (AKS scale-to-zero,
+dynamic per-run URL, fire-and-forget HITL, `deployments` table, composite actions). All
+four architecture docs synced; READMEs + trackers updated. Ready for implementation once
+Azure resources are bootstrapped.
 
 ## Repo Status
 
 | Repo | Architecture | TODO | Testing | README | Status |
 |------|-------------|------|---------|--------|--------|
-| sentinel (= backend) | **final (rev 3)** | not-started | not-started | draft | AKS scale-to-zero, fire-and-forget HITL, 3-table schema, ci_backend_scale.yml, /generate/pr-content = rollback PRs only |
-| sentinel-deployment | **final (rev 3)** | not-started | not-started | draft | Record-deployment stage; demo PRs template-based, 3-condition taxonomy (A/B/C) + 2 monitors (blocked on Azure + Datadog setup) |
-| sentinel-infra | **final (rev 3)** | not-started | not-started | draft | 7 modules — AKS with node_count ignore_changes for scale-to-zero; sentinel-api-token secret |
+| sentinel (= backend) | **final (rev 4)** | not-started | not-started | draft | AKS scale-to-zero; **inbound Entra bearer auth (§3.6)**; **workload identity** for KV + DB (no K8s Secret); **signal_type two-case handling**; eval = 30 branches; fire-and-forget HITL |
+| sentinel-deployment | **final (rev 4)** | not-started | not-started | draft | **30 scenario branches (3 cases)** replace ci_demo_prs; real ground truth; 2 Datadog signal types; Entra DB token for record-deployment |
+| sentinel-infra | **final (rev 4)** | not-started | not-started | draft | 8 concerns — Entra-only Postgres, KV rotation Function, backend Entra app reg, AKS workload identity, Event Grid two-signal, **ci_destroy_infra**; no db-password/sentinel-api-token |
 
 Note: There is no separate sentinel-backend repo. The sentinel repo IS the backend.
 
 ## Open Decisions
 
-None — all architectural decisions resolved. Implementation can begin once blockers are cleared.
+None — all architectural decisions resolved (rev 5 secrets/auth/ground-truth overhaul
+approved 2026-07-12). Implementation can begin once blockers are cleared. New setup
+prerequisites (Entra DB admin group, backend app registration, AKS workload identity)
+are folded into the blockers/bootstrap, not open decisions.
 
 ## Blockers
 
@@ -29,6 +47,90 @@ None — all architectural decisions resolved. Implementation can begin once blo
 - [ ] OpenAI API key — who: Keshav — impact: blocks fallback LLM calls
 
 ## Decision Log
+
+### 2026-07-12: Master ARCHITECTURE.md reshaped into a high-level Architecture Index
+**Context:** The master doc had drifted into a fourth full architecture, duplicating detail
+that lives in the per-repo files. Agents/skills need a fast whole-picture entry point that
+routes to authoritative deep-dives, not a redundant long read.
+**Decision:** Rewrote `Planning/Phase-2/ARCHITECTURE.md` as a lean, diagram-first **index**:
+"How to navigate" table, the two system diagrams (three-repo + end-to-end), §3 one-paragraph
+summaries per cross-cutting concern each with a `→ deep dive` pointer, and a §4 **concern →
+authoritative file+§ map**. Deep detail stays in the per-repo files (authoritative). Added
+bidirectional "↑ Deep dive of the Architecture Index" backlinks to all three per-repo arch
+headers, framed the master as "start here" in the implementation tracker §4, and added a
+doc-patterns rule (§2a) so the planner keeps the index lean going forward. Per-task **Arch
+refs** and the `architecture-conformance` agent continue to target the per-repo sections.
+**Impact:** Phase-2/ARCHITECTURE.md (rewritten); sentinel/ sentinel-deployment/ sentinel-infra/
+ARCHITECTURE.md headers (backlinks); Phase-2-Implementation/README §4; sentinel-planner
+doc-patterns.md §2a.
+
+### 2026-07-12: Inbound backend auth — Entra bearer token (deletes sentinel-api-token)
+**Context:** The backend API was protected by a shared static token `X-Sentinel-Token`
+(`sentinel-api-token` in Key Vault, injected as env + copied to GHA). A static shared
+secret is a standing leak risk and doesn't demonstrate real API-auth understanding.
+**Decision:** Adopt Entra bearer auth. sentinel-infra registers the backend as an Entra
+app (`api://sentinel-backend`) with an `Incident.Write` app role granted to the
+`sentinel-gha` SP. Callers mint a token scoped to that audience
+(`az account get-access-token --resource api://sentinel-backend`) and send
+`Authorization: Bearer`. The backend adds a FastAPI dependency (`api/auth.py`,
+`pyjwt[crypto]`) validating the JWT against Entra JWKS (iss/aud/exp/role) — no shared
+secret. `/health` + `/ready` stay open for K8s probes. Tenant ID + audience are public
+config (GitHub variables), not secrets. `sentinel-api-token` deleted from Key Vault +
+GitHub. Documented the "one identity, many audience-scoped tokens" model to correct the
+"single reusable token" misconception.
+**Impact:** sentinel §3 (auth note), §3.1/§3.6 (new validation dep), §1.1, §8.2/§8.4,
+§9.2/§9.3, §11 (pyjwt), §12, §13.3 (api/auth.py). sentinel-infra §4.4 (app reg) + §4.5
+(token model). Master §4 (Authentication). sentinel-deployment (Bearer on backend calls).
+
+### 2026-07-12: Dynamic secrets — Azure-native (Entra DB auth + Key Vault rotation), NOT HashiCorp Vault
+**Context:** Goal was "zero secret leakage — everything dynamic." Clarified that a
+"dynamic secret engine" is a **HashiCorp Vault** concept; Azure Key Vault only stores
+static versions with rotation policies. Chose Azure-native over standing up Vault
+(cost/ops fit for free tier + scale-to-zero AKS).
+**Decision:** (a) **PostgreSQL → Entra-only auth** (`active_directory_auth_enabled=true`,
+`password_auth_enabled=false`): clients present a short-lived Entra token (audience
+`https://ossrdbms-aad.database.windows.net`, ~1 h user / ~24 h MI) as the psql password;
+admin = `sentinel-db-admins` Entra group; DB roles map the SP + backend UAMI. `db-password`
+deleted. (b) **LLM API keys → Key Vault rotation policy + rotator Function** (system topic
+`SecretNearExpiry` → Function with Secrets Officer writes a new version; provider Admin API
+where available, else Teams reminder). (c) **Backend → AKS workload identity** (OIDC issuer
++ UAMI + federated credential + annotated ServiceAccount) reads KV + gets DB tokens with no
+pod secret. Honest limit: `GITHUB_PAT` + `ACR_*` remain as bootstrap secrets.
+**Impact:** sentinel-infra §3.2 (Entra Postgres), §3.3 (KV roles + inventory), §3.7 (AKS
+WI + backend UAMI), §3.8 (rotation Function), §5/§9/§10 (no db-password, PG_ADMIN_GROUP
+var). sentinel §8.2 (no K8s Secret), §11 (azure-identity, azure-keyvault-secrets), §12.
+sentinel-deployment §3 Stage 5 (Entra DB token). Master §4, §5.
+
+### 2026-07-12: sentinel-deployment pivot — 30 scenario branches replace ci_demo_prs (ground truth + eval set)
+**Context:** Demo PRs were template-based via `ci_demo_prs.yml`. The pivot makes the demo
+app **real ground truth** and needs a stable, replayable, labelled scenario surface that
+also serves as the eval dataset.
+**Decision:** Remove `ci_demo_prs.yml` entirely. Ship **30 pre-authored scenario branches**
+(10 per case): **(i)** clean pass — green deploy, healthy, no monitor (true negative);
+**(ii)** deploy fails — pipeline red, previous version stays live, `deploy-failure` event
+monitor → `signal_type=deploy_failure` → **backend Case 2 rollback**; **(iii)** green
+deploy but runtime error — `runtime-health` monitor → `signal_type=runtime_error` →
+**Case 3 full incident response**. Two Datadog signal types, two backend handling paths.
+Ground-truth labels live in `scenarios/branches.yaml`; the branches replace the Phase-1
+synthetic scenario JSON as the eval dataset. The Event Grid bridge stamps `signal_type`;
+the orchestrator branches on it.
+**Impact:** sentinel-deployment §1, §4 (rewritten: 30-branch/3-case), §4.1 (catalog), §5
+(scenarios/, no ci_demo_prs), §6.3 (monitors→cases), §7. sentinel-infra §3.4/§3.5 (Event
+Grid two-signal + bridge classify). sentinel §3.1 (signal_type payload + two-case table),
+§3.4, §13.2 (eval runner = branches). Master §1/§2/§8/§10.
+
+### 2026-07-12: ci_destroy_infra — full teardown workflow ("everything, always")
+**Context:** No teardown path existed. Needed a one-shot "free everything from Azure" that
+also supports destroy→re-create.
+**Decision:** New manual `ci_destroy_infra.yml` (`workflow_dispatch`, typed `DESTROY`
+confirm + `destroy` environment protection). **Scope = "everything, always"** (user choice):
+two-stage — `terraform destroy` for all state-managed resources incl. the imported OIDC app
++ federated creds, then `az group delete` for `sentinel-rg` + `sentinel-state-rg` (the
+manually-bootstrapped state storage TF can't reach). Auth acquired at job start (ARM token
+valid ~1 h) so destroy completes after deleting its own identity. Accepted trade: restart
+requires re-running the manual bootstrap (§4.3/§10) since OIDC + state are gone.
+**Impact:** sentinel-infra §2 (workflow tree), §7 naming table + new §7.3 (full YAML).
+sentinel §9 workflow table. Master §1 diagram + §8 workflows table. STATE-IMPL blockers/tasks.
 
 ### 2026-07-11: GitHub owner/repo reconciliation — keshxvDev → Keshav0375, real repo casing
 **Context:** The architecture docs were written against a placeholder GitHub owner `keshxvDev`

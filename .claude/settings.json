@@ -39,7 +39,8 @@
       "Bash(python scripts/quality_gate.py --repo infra --path \"../Sentinel-development-project/Sentinel-infra\" --json)",
       "Bash(echo \"exit=$?\")",
       "Edit(/.claude/skills/sentinel-build/**)",
-      "Edit(/.claude/skills/phase-gate/**)"
+      "Edit(/.claude/skills/phase-gate/**)",
+      "Edit(/.claude/skills/sentinel-planner/**)"
     ],
     "deny": [
       "Bash(rm -rf /)*",

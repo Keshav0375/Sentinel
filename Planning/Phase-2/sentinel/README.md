@@ -5,7 +5,7 @@ The sentinel repo IS the backend. It contains the multi-agent incident response 
 ## What Lives Here
 
 - `src/sentinel/` — Backend code: agents, tools, memory, API, eval, providers — all reasoning
-- `azure/k8s/` — Deployment + Service manifests (Service created/deleted per run — dynamic URL)
+- `azure/k8s/` — Deployment + ServiceAccount (workload identity) + Service manifests (Service created/deleted per run — dynamic URL)
 - `.github/workflows/` — CI (PR gate), deploy-to-AKS, incident response, scale toggle
 - `.github/actions/` — Reusable composite actions: `backend-up`/`backend-down`, `get-kv-secrets`, `notify-teams`, `psql-exec`
 - `tests/` — Unit + integration tests
@@ -28,10 +28,15 @@ The sentinel repo IS the backend. It contains the multi-agent incident response 
 | CI pipeline (merge) | ci_backend_deployment.yml | Build+push to ACR (sha tag), scale up AKS, deploy, validate rollout, tests against live deployment, promote or `rollout undo`, scale to zero |
 | Incident pipeline | ci_incident_response.yml (repository_dispatch) | ensure-backend-up → parallel fetch → agent pipeline → branch → teardown-backend → summary; serialized via `sentinel-backend` concurrency group |
 | Notification | Microsoft Teams (from GHA jobs) | Incoming webhook, not backend |
-| PR content agent | `POST /generate/pr-content` | Rollback PR title + description only — sole consumer is ci_incident_response. Demo PRs are static templates (no backend). |
+| PR content agent | `POST /generate/pr-content` | Rollback PR title + description only — sole consumer is ci_incident_response. sentinel-deployment scenarios are real git branches (no backend). |
+| Inbound API auth | **Entra bearer** (`api://sentinel-backend` + `Incident.Write`), validated vs JWKS | Deletes the shared `sentinel-api-token`; `/health`+`/ready` stay open |
+| Backend → Azure auth | **AKS workload identity** (UAMI) | Pod reads Key Vault + gets a PostgreSQL Entra token with no stored secret (no K8s Secret sync) |
+| Database auth | **Entra-only** (short-lived token as password) | No `db-password` anywhere |
+| Two-case handling | `signal_type`: `deploy_failure` → rollback fast path, `runtime_error` → full pipeline | Stamped by the Event Grid bridge from the 30 scenario branches |
+| Eval dataset | 30 sentinel-deployment scenario branches (`branches.yaml`) | Replaces Phase-1 synthetic scenario JSON |
 | Tracing | LangFuse cloud (tracing + prompts + scoring) | Free 50K observations/month |
-| Event routing | Event Grid → Azure Functions → repository_dispatch | All Azure always-free tier |
-| Terraform | 7 modules in sentinel-infra (incl. AKS) | Reproducible, reviewable, provider-agnostic |
+| Event routing | Event Grid → Azure Functions → repository_dispatch (bridge stamps `signal_type`) | All Azure always-free tier |
+| Terraform | 7 modules + identity plane in sentinel-infra (incl. AKS) | Reproducible, reviewable, provider-agnostic |
 
 ## Database Tables
 
@@ -85,4 +90,8 @@ ensure-backend-up (scale-to-zero: node pool 0→1, replicas 0→1, wait /ready,
 
 ## Status
 
-Architecture finalized (rev 3 — 2026-07-05: AKS scale-to-zero, `ci_backend_scale.yml` safety net, `/generate/pr-content` scoped to rollback PRs only). Waiting on sentinel-infra to provision Azure resources before building.
+Architecture finalized (**rev 4 — 2026-07-12**): inbound Entra bearer auth (§3.6),
+workload identity for Key Vault + PostgreSQL (no K8s Secret), `signal_type` two-case
+handling, and eval driven by the 30 sentinel-deployment scenario branches. Prior rev-3
+model intact (AKS scale-to-zero, `ci_backend_scale.yml`, `/generate/pr-content` rollback
+only). Waiting on sentinel-infra to provision Azure resources before building.
