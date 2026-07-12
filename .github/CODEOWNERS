@@ -1,0 +1,8 @@
+# Code owners for Sentinel.
+# The repo owner must review every change. This backs the ruleset's
+# "Require review from Code Owners" rule on the protected branches.
+#
+# CODEOWNERS is read from the *base* branch of a PR, so this file must exist on
+# every protected branch (main, release-phase-2) for the rule to take effect.
+
+* @Keshav0375

@@ -1,0 +1,45 @@
+name: Guard main source
+
+# Enforces the allowed PR *source* branches for protected targets — something
+# GitHub branch protection / rulesets cannot do natively. The workflow lives on
+# the PROTECTED branches (main, release-phase-2); for a `pull_request` event
+# GitHub runs the copy from the PR's BASE branch, so it applies to every PR into
+# those targets regardless of what the head branch contains.
+#
+# Keep the job name `verify-source-branch` stable — it is referenced by name as a
+# required status check in the "Main Protection" ruleset.
+#
+# Policy:
+#   main            <- only  release-phase-2  or  planning/phase-2-e2e
+#   release-phase-2 <- only  planning/phase-2-e2e
+# (edit the ALLOWED lists below to change who may target each branch)
+
+on:
+  pull_request:
+    branches: [main, release-phase-2]
+
+jobs:
+  verify-source-branch:
+    name: verify-source-branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure the PR source branch is allowed for this target
+        run: |
+          BASE="${{ github.base_ref }}"
+          HEAD="${{ github.head_ref }}"
+          echo "PR: $HEAD -> $BASE"
+          case "$BASE" in
+            main)
+              ALLOWED="release-phase-2 planning/phase-2-e2e" ;;
+            release-phase-2)
+              ALLOWED="planning/phase-2-e2e" ;;
+            *)
+              echo "No source restriction configured for base '$BASE'."; exit 0 ;;
+          esac
+          for b in $ALLOWED; do
+            if [ "$HEAD" = "$b" ]; then
+              echo "✅ '$HEAD' -> '$BASE' is allowed."; exit 0
+            fi
+          done
+          echo "::error::'$BASE' only accepts merges from: $ALLOWED — this PR is from '$HEAD'."
+          exit 1
