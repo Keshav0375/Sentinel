@@ -35,12 +35,14 @@
       "PowerShell($gh = \"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\"; if \\(Test-Path $gh\\) { & $gh --version; \"----AUTH----\"; & $gh auth status } else { \"gh.exe not at default path\"; \\(Get-Command gh -ErrorAction SilentlyContinue\\).Source })",
       "Read(//c/Users/DELL/OneDrive - University of Windsor/Desktop/Agentic-Engineering/**)",
       "Bash(ls -la Sentinel-development-project)",
-      "Bash(cd \"c:/Users/DELL/OneDrive - University of Windsor/Desktop/Agentic-Engineering/Sentinel\" && mkdir -p .claude/skills/sentinel-build/instructions .claude/skills/phase-gate .claude/agents scripts && echo \"dirs ready\" && ls .claude/agents 2>/dev/null)",
       "Bash(python scripts/quality_gate.py --repo infra --path \"../Sentinel-development-project/Sentinel-infra\" --json)",
       "Bash(echo \"exit=$?\")",
-      "Edit(/.claude/skills/sentinel-build/**)",
-      "Edit(/.claude/skills/phase-gate/**)",
-      "Edit(/.claude/skills/sentinel-planner/**)"
+      "Edit(/.claude/skills/implement-phase/**)",
+      "Edit(/.claude/agents/**)",
+      "Bash(git log *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(ls -d \"../Sentinel-development-project\"/*/ 2>/dev/null || echo \"no sibling project dir\"; echo \"---backend\\(this repo\\)---\"; git rev-parse --show-toplevel)",
+      "Read(//c/Users/DELL/OneDrive - University of Windsor/Desktop/Agentic-Engineering/Sentinel-development-project/**)"
     ],
     "deny": [
       "Bash(rm -rf /)*",
@@ -49,7 +51,7 @@
       "Bash(sudo*)"
     ],
     "additionalDirectories": [
-      "c:\\Users\\DELL\\OneDrive - University of Windsor\\Desktop\\Agentic-Engineering\\Sentinel\\.claude\\skills\\sentinel-build"
+      "c:\\Users\\DELL\\OneDrive - University of Windsor\\Desktop\\Agentic-Engineering\\Sentinel-development-project"
     ]
   }
 }

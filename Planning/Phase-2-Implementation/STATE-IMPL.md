@@ -1,6 +1,6 @@
 # Sentinel Phase 2 — Implementation State
 
-> Live execution state. `/sentinel-build` reads this first and updates it after every task.
+> Live execution state. `/implement-phase` reads this first and updates it after every task.
 > Planning-side state (architecture decisions) stays in [../Phase-2/STATE.md](../Phase-2/STATE.md).
 >
 > Last updated: 2026-07-12
@@ -21,7 +21,7 @@
 
 Start **infra Phase 1**. Before task 1.1, clear the Phase-1 prerequisite blockers below —
 the Terraform *code* can be written without Azure, but nothing can `plan`/`apply` or be
-verified until the Azure account + bootstrap exist. `/sentinel-build` will write BLOCKED
+verified until the Azure account + bootstrap exist. `/implement-phase` will write BLOCKED
 reports for any task whose verification needs an unavailable resource.
 
 ## Phase Gate Ledger

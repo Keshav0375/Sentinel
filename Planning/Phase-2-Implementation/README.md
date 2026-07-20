@@ -4,8 +4,9 @@
 > [`../Phase-2/`](../Phase-2/) (architecture, STATE, decision log). Here we track *building* it:
 > what to build, in what order, whether it's done, and a per-task report of what shipped.
 >
-> Design-time agent: [`/sentinel-planner`](../../.claude/skills/sentinel-planner/SKILL.md).
-> Build-time agents: [`/sentinel-build`](../../.claude/skills/sentinel-build/SKILL.md) + [`/phase-gate`](../../.claude/skills/phase-gate/SKILL.md).
+> Build driver: [`/implement-phase`](../../.claude/skills/implement-phase/SKILL.md) — one orchestrator
+> that builds a whole phase and closes it with a human sign-off (replaces the former
+> `/sentinel-planner`, `/sentinel-build`, and `/phase-gate`). Planning docs in [`../Phase-2/`](../Phase-2/) are edited directly.
 
 ---
 
@@ -90,28 +91,31 @@ task's **Arch refs** name — the per-repo files are authoritative for detail.
 > infra [3.6 keyvault-rotation](category-1-sentinel-infra/phase-3-compute-modules/task-6-keyvault-rotation.md),
 > backend [5.6 entra-bearer-auth](category-3-sentinel-backend/phase-5-api/task-6-entra-bearer-auth.md).
 
-## 5. The build loop (per task)
+## 5. The build loop (per phase)
 
-Driven by `/sentinel-build` (see its SKILL for the authoritative steps):
+Driven by `/implement-phase` (see its SKILL for the authoritative steps). One run builds a
+whole phase; within it, each task moves through:
 
-1. **Pick** the next unblocked task honoring category order + phase-gate locks.
-2. **Header** — print a compact summary: category/phase/task, one-line goal, files, arch refs, deps.
-3. **Prereqs** — verify tools/accounts/keys/upstream tasks. Missing → write a **BLOCKED**
-   report into the task file + [STATE-IMPL.md](STATE-IMPL.md), and **halt**.
-4. **Branch** — if starting a phase, `git pull` main then create the phase branch (§6).
-5. **Implement** in the correct repo, per the task's Spec + the architecture section.
-6. **Test + gate** — add unit + integration tests, run `scripts/quality_gate.py --repo <name>`.
-7. **Review** — `architecture-conformance` + `safety-reviewer` subagents on the diff.
-8. **Commit** one task = one commit (conventional prefix, **no Claude attribution**).
-9. **Report** — fill the task file's Report/Tests/How-to-Verify; flip status; update TODO + STATE-IMPL.
-10. **Phase end** → hand to `/phase-gate` (§6).
+1. **Locate + context** — resolve the active phase (category order + phase-gate locks), rebuild
+   full context via the `phase-context-builder` subagent, and distill the architecture contract
+   via `architecture-warden` (distill mode).
+2. **Goal + branch** — one todo per task; branch fresh from `main` (§6).
+3. **Prereqs** — per task, verify tools/accounts/keys/upstream tasks. Missing → write a
+   **BLOCKED** report into the task file + [STATE-IMPL.md](STATE-IMPL.md), and **halt**.
+4. **Implement** in the correct repo, per the task's Spec + the architecture contract.
+5. **Test + gate** — add unit + integration tests, loop `scripts/quality_gate.py --repo <name>` to green.
+6. **Commit** one task = one commit (conventional prefix, **no Claude attribution**).
+7. **Report** — fill the task file's Report/Tests/How-to-Verify; flip status; update TODO + STATE-IMPL.
+8. **Phase review** — when all tasks are green, `architecture-warden` (review) + `code-reviewer` +
+   `safety-reviewer` (backend) run over the phase diff; resolve blockers.
+9. **Close** — open the PR, present the "see it working" checklist, and ask the user to sign off (§6).
 
 ## 6. Git model — one branch + one PR per phase
 
 - A phase branches **fresh from updated `main`**: `git checkout main && git pull && git checkout -b impl/<cat>-phase-<M>-<slug>`.
 - Each task in the phase is a **separate commit** on that branch (prefixes: `feat/fix/refactor/test/docs`).
 - **No Claude as contributor** — commits and the PR carry no `Co-Authored-By` / "generated with" attribution.
-- When every task in the phase is `done-pending-review` and green, `/phase-gate`:
+- When every task in the phase is `done-pending-review` and green, `/implement-phase` closes it:
   opens the **PR**, produces a **verification checklist** ("here's how to see it working"),
   and asks the user to confirm.
 - On **human sign-off**, the PR **merges to main**; the branch is deleted; the phase is
@@ -143,4 +147,4 @@ missing foundation.
 ## 9. Status legend
 
 `not-started` · `in-progress` · `blocked` · `done-pending-review` (built + green, awaiting
-phase gate) · `verified` (phase-gate signed off, merged).
+the end-of-phase gate) · `verified` (user signed off, merged).
