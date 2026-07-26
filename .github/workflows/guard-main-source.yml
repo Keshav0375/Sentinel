@@ -11,7 +11,14 @@ name: Guard main source
 #
 # Policy:
 #   main            <- only  release-phase-2  or  planning/phase-2-e2e
-#   release-phase-2 <- only  planning/phase-2-e2e
+#   release-phase-2 <- only  dev/*  or  planning/phase-2-e2e
+#
+# `dev/*` is the Phase-2 implementation prefix — one branch per phase, branched
+# from an up-to-date release-phase-2 and merged back into it at the phase gate
+# (e.g. dev/backend-phase-1-data-layer). planning/phase-2-e2e carries plans,
+# architecture, and the tracker only. release-phase-2 -> main is the final merge.
+#
+# Entries are shell glob patterns, so `dev/*` matches any phase branch.
 # (edit the ALLOWED lists below to change who may target each branch)
 
 on:
@@ -32,14 +39,16 @@ jobs:
             main)
               ALLOWED="release-phase-2 planning/phase-2-e2e" ;;
             release-phase-2)
-              ALLOWED="planning/phase-2-e2e" ;;
+              ALLOWED="dev/* planning/phase-2-e2e" ;;
             *)
               echo "No source restriction configured for base '$BASE'."; exit 0 ;;
           esac
-          for b in $ALLOWED; do
-            if [ "$HEAD" = "$b" ]; then
-              echo "✅ '$HEAD' -> '$BASE' is allowed."; exit 0
-            fi
+          for pattern in $ALLOWED; do
+            # $pattern is deliberately unquoted — `case` glob-matches it.
+            case "$HEAD" in
+              $pattern)
+                echo "✅ '$HEAD' -> '$BASE' is allowed (matched '$pattern')."; exit 0 ;;
+            esac
           done
           echo "::error::'$BASE' only accepts merges from: $ALLOWED — this PR is from '$HEAD'."
           exit 1
