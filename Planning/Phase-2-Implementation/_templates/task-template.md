@@ -9,7 +9,7 @@
 | **Status** | `not-started` \| `in-progress` \| `blocked` \| `done-pending-review` \| `verified` |
 | **Repo** | `Sentinel-infra` \| `Sentinel-deployment` \| `Sentinel` (backend) |
 | **Local path** | `Agentic-Engineering/Sentinel-development-project/<repo>` (backend = `Agentic-Engineering/Sentinel`) |
-| **Phase branch** | `impl/<cat>-phase-<M>-<slug>` (this task is a commit on the phase branch) |
+| **Phase branch** | `dev/<cat>-phase-<M>-<slug>` (this task is a commit on the phase branch) |
 | **Commit prefix** | `feat:` \| `fix:` \| `refactor:` \| `test:` \| `docs:` |
 | **Arch refs** | `Planning/Phase-2/<repo>/ARCHITECTURE.md §X.Y` |
 | **Depends on** | [[task-file]] … (must be `verified` or same-phase `done-pending-review`) |

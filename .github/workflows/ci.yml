@@ -46,7 +46,9 @@ jobs:
       - name: Validate branch name
         run: |
           BRANCH="${{ github.head_ref }}"
-          PATTERN="^(feat|fix|refactor|ci|docs|test|chore|planning|ai|hotfix)/[a-z0-9._-]+$"
+          # `dev/` is the Phase-2 implementation prefix: one branch per phase,
+          # e.g. dev/backend-phase-1-data-layer -> release-phase-2.
+          PATTERN="^(dev|feat|fix|refactor|ci|docs|test|chore|planning|ai|hotfix)/[a-z0-9._-]+$"
 
           # release-phase-2 is the Phase 2 integration branch that merges into main.
           if [[ "$BRANCH" == "release-phase-2" ]]; then

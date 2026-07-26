@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) + full system |
-| **Phase branch** | `impl/backend-phase-9-cleanup` |
+| **Phase branch** | `dev/backend-phase-9-cleanup` |
 | **Commit prefix** | `test:` |
 | **Arch refs** | master ARCHITECTURE.md §2 (end-to-end flow); sentinel §9.3; deployment §4 |
 | **Depends on** | ALL categories complete + infra/deployment verified |

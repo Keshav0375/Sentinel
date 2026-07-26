@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-5-api` |
+| **Phase branch** | `dev/backend-phase-5-api` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §3.5, §9.1 (FAKE_LLM skips live check), §8.1 (probes) |
 | **Depends on** | [[task-2-asyncpg-database-pool]] |

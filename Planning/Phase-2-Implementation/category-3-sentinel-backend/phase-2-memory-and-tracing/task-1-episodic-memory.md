@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-2-memory-and-tracing` |
+| **Phase branch** | `dev/backend-phase-2-memory-and-tracing` |
 | **Commit prefix** | `refactor:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §5.2, §5.3, §13.2 |
 | **Depends on** | [[task-2-asyncpg-database-pool]], [[task-3-embeddings]] |

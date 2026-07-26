@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-infra` |
-| **Phase branch** | `impl/infra-phase-4-wiring-and-ci` |
+| **Phase branch** | `dev/infra-phase-4-wiring-and-ci` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-infra/ARCHITECTURE.md §6 |
 | **Depends on** | [[task-1-acr-module]] |

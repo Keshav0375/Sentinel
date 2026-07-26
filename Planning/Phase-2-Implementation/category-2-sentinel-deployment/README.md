@@ -18,9 +18,9 @@ agents diagnose. **Implemented second** (needs infra: App Service, Key Vault, Po
 
 | Phase | Branch | Tasks | Arch §§ |
 |-------|--------|-------|---------|
-| **1 — The App** | `impl/deploy-phase-1-app` | FastAPI app · app tests | §2, §5 |
-| **2 — Deploy Pipeline** | `impl/deploy-phase-2-deploy-pipeline` | dd-report action · ci_app_deployment · Datadog monitors | §3, §6.3 |
-| **3 — Scenario Branches** | `impl/deploy-phase-3-scenario-branches` | 30 scenario branches (3 cases) + branches.yaml — replaces ci_demo_prs | §4 |
+| **1 — The App** | `dev/deploy-phase-1-app` | FastAPI app · app tests | §2, §5 |
+| **2 — Deploy Pipeline** | `dev/deploy-phase-2-deploy-pipeline` | dd-report action · ci_app_deployment · Datadog monitors | §3, §6.3 |
+| **3 — Scenario Branches** | `dev/deploy-phase-3-scenario-branches` | 30 scenario branches (3 cases) + branches.yaml — replaces ci_demo_prs | §4 |
 
 ## Tasks
 

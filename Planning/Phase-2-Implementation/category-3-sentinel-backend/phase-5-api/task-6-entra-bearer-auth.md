@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-5-api` |
+| **Phase branch** | `dev/backend-phase-5-api` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §3.6 (Entra bearer validation) + §3 auth note |
 | **Depends on** | [[task-1-phase2-dependencies]] (pyjwt), infra [[task-5-backend-entra-app]] (the app reg) |

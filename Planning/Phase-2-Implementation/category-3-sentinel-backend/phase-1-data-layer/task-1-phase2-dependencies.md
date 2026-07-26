@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-1-data-layer` |
+| **Phase branch** | `dev/backend-phase-1-data-layer` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §11, §13.5 step 1 |
 | **Depends on** | — |

@@ -16,10 +16,10 @@ downstream repo depends on the resources, secrets, and OIDC identity created her
 
 | Phase | Branch | Tasks | Arch §§ |
 |-------|--------|-------|---------|
-| **1 — Foundations & Bootstrap** | `impl/infra-phase-1-foundations` | repo skeleton · state bootstrap · OIDC federation | §2, §4, §8 |
-| **2 — Core Resource Modules** | `impl/infra-phase-2-core-modules` | ACR · PostgreSQL · Key Vault | §3.1–3.3 |
-| **3 — Compute & Networking** | `impl/infra-phase-3-compute-modules` | AKS (+ workload identity) · Event Grid · Function bridge · App Service · backend Entra app · KV rotation | §3.4–3.8, §4.4 |
-| **4 — Cross-Repo Wiring & CI** | `impl/infra-phase-4-wiring-and-ci` | secret distribution · runner image · workflows · root wiring | §5, §6, §7 |
+| **1 — Foundations & Bootstrap** | `dev/infra-phase-1-foundations` | repo skeleton · state bootstrap · OIDC federation | §2, §4, §8 |
+| **2 — Core Resource Modules** | `dev/infra-phase-2-core-modules` | ACR · PostgreSQL · Key Vault | §3.1–3.3 |
+| **3 — Compute & Networking** | `dev/infra-phase-3-compute-modules` | AKS (+ workload identity) · Event Grid · Function bridge · App Service · backend Entra app · KV rotation | §3.4–3.8, §4.4 |
+| **4 — Cross-Repo Wiring & CI** | `dev/infra-phase-4-wiring-and-ci` | secret distribution · runner image · workflows · root wiring | §5, §6, §7 |
 
 ## Tasks
 

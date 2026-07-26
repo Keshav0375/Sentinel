@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-infra` |
-| **Phase branch** | `impl/infra-phase-3-compute-modules` |
+| **Phase branch** | `dev/infra-phase-3-compute-modules` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-infra/ARCHITECTURE.md §3.6; sentinel-deployment §2.5, §8 |
 | **Depends on** | [[task-1-repo-skeleton-and-providers]] |

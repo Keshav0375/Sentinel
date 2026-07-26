@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-4-agents` |
+| **Phase branch** | `dev/backend-phase-4-agents` |
 | **Commit prefix** | `refactor:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §4.1–4.6, §3 (flow) |
 | **Depends on** | [[task-1-provider-routing]], [[task-3-reflexion-reverification-prompts]], all Phase-3 tools |

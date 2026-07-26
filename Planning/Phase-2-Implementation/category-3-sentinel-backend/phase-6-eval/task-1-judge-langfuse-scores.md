@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-6-eval` |
+| **Phase branch** | `dev/backend-phase-6-eval` |
 | **Commit prefix** | `refactor:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §3 (judge both paths), §6.4, §13.2 |
 | **Depends on** | [[task-4-langfuse-tracing]], [[task-2-orchestrator-loops]], [[task-1-provider-routing]] |

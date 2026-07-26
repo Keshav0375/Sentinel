@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-8-cicd` |
+| **Phase branch** | `dev/backend-phase-8-cicd` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §9.3 (full job DAG + YAML), §8.5, §13.6 |
 | **Depends on** | [[task-3-composite-actions]], [[task-1-webhook-receiver]], [[task-3-generate-pr-content-endpoint]]; infra Function bridge (3.3); deployment monitors (2.3) |

@@ -4,11 +4,11 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-infra` |
-| **Phase branch** | `impl/infra-phase-2-core-modules` |
+| **Phase branch** | `dev/infra-phase-2-core-modules` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-infra/ARCHITECTURE.md §3.2 |
 | **Depends on** | [[task-1-repo-skeleton-and-providers]] |
-| **Referenced by** | [[task-3-keyvault-module]] (db-password), [[task-3-alembic-initial-schema]] (backend), [[task-2-ci-app-deployment]] (record-deployment) |
+| **Referenced by** | [[task-3-keyvault-module]] (host/name outputs — **no** db-password), [[task-3-alembic-initial-schema]] (backend), [[task-2-ci-app-deployment]] (record-deployment, Entra DB token) |
 
 > ⚠ **rev-5 (2026-07-12):** **Entra-ONLY auth** — `password_auth_enabled=false`, no
 > `administrator_password`, no `db_password` variable. Add an Entra admin (the

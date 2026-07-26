@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-8-cicd` |
+| **Phase branch** | `dev/backend-phase-8-cicd` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §8.5 (safety net), §9.5 |
 | **Depends on** | [[task-3-composite-actions]] |

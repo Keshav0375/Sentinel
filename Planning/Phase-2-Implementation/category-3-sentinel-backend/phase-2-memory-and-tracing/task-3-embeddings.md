@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-2-memory-and-tracing` |
+| **Phase branch** | `dev/backend-phase-2-memory-and-tracing` |
 | **Commit prefix** | `refactor:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §13.2, §13.4 (numpy removal deferred) |
 | **Depends on** | [[task-1-phase2-dependencies]] |

@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-3-tools` |
+| **Phase branch** | `dev/backend-phase-3-tools` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §4.7, §13.2 (config), §8.2; env-examples/backend.env.example |
 | **Depends on** | [[task-1-phase2-dependencies]] |

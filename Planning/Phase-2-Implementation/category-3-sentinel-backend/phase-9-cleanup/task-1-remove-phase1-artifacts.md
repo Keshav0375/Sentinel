@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-9-cleanup` |
+| **Phase branch** | `dev/backend-phase-9-cleanup` |
 | **Commit prefix** | `refactor:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §13.1 (delete), §13.4 (deps), §13.5 step 8 |
 | **Depends on** | ALL prior backend phases `verified` (Phase 2 tools proven before deleting Phase 1) |

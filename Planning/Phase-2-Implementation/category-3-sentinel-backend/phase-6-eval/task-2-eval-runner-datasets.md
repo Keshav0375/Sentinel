@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-6-eval` |
+| **Phase branch** | `dev/backend-phase-6-eval` |
 | **Commit prefix** | `refactor:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §6.1 (datasets), §13.2 |
 | **Depends on** | [[task-1-judge-langfuse-scores]] |

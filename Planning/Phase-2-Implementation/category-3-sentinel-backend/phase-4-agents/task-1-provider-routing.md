@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-4-agents` |
+| **Phase branch** | `dev/backend-phase-4-agents` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §4.7 (models + fallback), §1.3 (providers/ bucket) |
 | **Depends on** | [[task-1-config-extensions]] |

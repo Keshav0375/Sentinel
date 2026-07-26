@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-5-api` |
+| **Phase branch** | `dev/backend-phase-5-api` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §3.4 |
 | **Depends on** | [[task-4-pr-content-generator]] |

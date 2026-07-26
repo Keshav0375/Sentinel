@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-3-tools` |
+| **Phase branch** | `dev/backend-phase-3-tools` |
 | **Commit prefix** | `refactor:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §3 Tools, §4.8, §5.5, §13.2 |
 | **Depends on** | [[task-1-episodic-memory]], [[task-3-embeddings]], [[task-1-config-extensions]] |

@@ -25,6 +25,11 @@ Order **infra → deployment → backend**; each phase = one branch + one PR, me
 user's end-of-phase sign-off. Repos: infra → `../Sentinel-development-project/Sentinel-infra`,
 deployment → `../Sentinel-development-project/Sentinel-deployment`, backend → this repo.
 
+**Branch model (binding):** `release-phase-2` → `dev/<cat>-phase-<M>-<slug>` → PR back to
+`release-phase-2`. Never branch from or PR to `main` — `release-phase-2` → `main` is one final
+merge at the end of Phase 2. `planning/phase-2-e2e` carries plans/architecture/tracker only.
+Enforced by `.github/workflows/guard-main-source.yml`.
+
 ## Non-negotiable rules
 
 - **No Claude attribution** — no `Co-Authored-By: Claude`, no "Generated with Claude Code" in any

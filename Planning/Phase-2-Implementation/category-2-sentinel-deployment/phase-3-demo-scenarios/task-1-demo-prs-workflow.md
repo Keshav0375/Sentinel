@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-deployment` |
-| **Phase branch** | `impl/deploy-phase-3-scenario-branches` |
+| **Phase branch** | `dev/deploy-phase-3-scenario-branches` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-deployment/ARCHITECTURE.md §4 (30 branches, 3 cases) + §4.1 (catalog) |
 | **Depends on** | [[task-1-fastapi-app]], [[task-2-ci-app-deployment]], [[task-3-datadog-monitors]] |

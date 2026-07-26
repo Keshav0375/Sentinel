@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-1-data-layer` |
+| **Phase branch** | `dev/backend-phase-1-data-layer` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §5.3 (schema), §5.5, §13.3, §13.5 step 3 |
 | **Depends on** | [[task-2-asyncpg-database-pool]] |

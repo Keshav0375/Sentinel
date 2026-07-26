@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-deployment` |
-| **Phase branch** | `impl/deploy-phase-1-app` |
+| **Phase branch** | `dev/deploy-phase-1-app` |
 | **Commit prefix** | `test:` |
 | **Arch refs** | sentinel-deployment/ARCHITECTURE.md §2.1, §5 |
 | **Depends on** | [[task-1-fastapi-app]] |

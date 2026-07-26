@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-infra` |
-| **Phase branch** | `impl/infra-phase-3-compute-modules` |
+| **Phase branch** | `dev/infra-phase-3-compute-modules` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-infra/ARCHITECTURE.md §3.8 (rotation Function) + §3.3 (KV roles) |
 | **Depends on** | [[task-3-keyvault-module]], [[task-3-functions-bridge-module]] (shares the Y1 plan) |

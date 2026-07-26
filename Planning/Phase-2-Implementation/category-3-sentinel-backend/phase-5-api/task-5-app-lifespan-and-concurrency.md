@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-5-api` |
+| **Phase branch** | `dev/backend-phase-5-api` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §1.1 (routes), §3 (auth), §4.5 (concurrency) |
 | **Depends on** | [[task-2-asyncpg-database-pool]], [[task-4-langfuse-tracing]], [[task-1-webhook-receiver]] |

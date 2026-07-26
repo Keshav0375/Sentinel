@@ -4,10 +4,10 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-5-api` |
+| **Phase branch** | `dev/backend-phase-5-api` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §3.1, §4.5 (concurrency), §2 (correlation) |
-| **Depends on** | [[task-2-orchestrator-loops]], [[task-1-episodic-memory]], [[task-5-app-lifespan-and-concurrency]] (token auth) |
+| **Depends on** | [[task-2-orchestrator-loops]], [[task-1-episodic-memory]], [[task-5-app-lifespan-and-concurrency]] (lifespan/pool), [[task-6-entra-bearer-auth]] (`require_incident_write`) |
 | **Referenced by** | [[task-3-ci-incident-response]] (caller), [[task-2-incident-query-endpoints]] (poll) |
 
 > ⚠ **rev-5 (2026-07-12):** (a) auth is Entra bearer via `require_incident_write` (task 5.6),
@@ -25,20 +25,29 @@ isolated asyncio task per incident, returns 202 immediately.
 - Store terminal incident to episodic memory on completion.
 
 ## Prerequisites
-- [ ] Phase-4 orchestrator, episodic memory, token auth (5.5). [ ] fake LLM for tests.
+- [ ] Phase-4 orchestrator, episodic memory, lifespan/pool (5.5), **Entra bearer dep (5.6)**.
+- [ ] fake LLM for tests; a way to mint/stub an `Incident.Write` token for the 401/200 cases.
 
 ## Acceptance Criteria
 - [ ] 202 with incident_id; pipeline runs as an independent task (concurrent incidents isolated).
-- [ ] 401 without a valid token; correlation_id echoed.
+- [ ] **401 without a valid Entra bearer** (missing, wrong audience, expired, or no `Incident.Write`
+      role); correlation_id echoed on success.
+- [ ] `signal_type` is required and drives the two-case branch (`deploy_failure` → rollback fast
+      path, `runtime_error` → full pipeline).
 - [ ] Terminal incident persisted with trajectory + resolution_type.
 
 ## Tests
-- **Integration (`tests/test_api/test_webhooks.py`, fake LLM):** POST canned payload → 202; poll shows stored incident; missing token → 401; two concurrent POSTs isolated.
-- **Quality gate:** `--repo backend`.
+- **Integration (`tests/test_api/test_webhooks.py`, fake LLM):** POST canned payload with a stubbed valid bearer → 202; poll shows stored incident; **no/invalid bearer → 401**; both `signal_type` values take their documented branch; two concurrent POSTs isolated.
+- **Quality gate:** `--repo backend` (this file runs under `pytest-integration`).
 
 ## How to Verify (phase gate)
 1. `pytest tests/test_api/test_webhooks.py -q` green.
-2. `curl -H "X-Sentinel-Token: …" -d @sample.json .../webhooks/incident` → 202 then a stored incident.
+2. ```bash
+   TOKEN=$(az account get-access-token --resource api://sentinel-backend --query accessToken -o tsv)
+   curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+        -d @sample.json "$BACKEND_URL/webhooks/incident"
+   ```
+   → 202 then a stored incident. Repeat without the header → 401.
 
 ## Report   ·   _filled on completion_
 _not yet implemented_

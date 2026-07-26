@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-7-container-and-k8s` |
+| **Phase branch** | `dev/backend-phase-7-container-and-k8s` |
 | **Commit prefix** | `refactor:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §7, §13.2 (Dockerfile), §13.5 step 9 |
 | **Depends on** | Phase-5 app boots |

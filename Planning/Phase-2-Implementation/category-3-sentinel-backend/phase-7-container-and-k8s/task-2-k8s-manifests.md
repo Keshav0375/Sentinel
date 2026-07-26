@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-7-container-and-k8s` |
+| **Phase branch** | `dev/backend-phase-7-container-and-k8s` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §8.1, §8.5, §13.3 |
 | **Depends on** | [[task-1-dockerfile-update]], [[task-4-health-ready-probes]]; infra [[task-1-aks-module]] |

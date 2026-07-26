@@ -18,15 +18,15 @@ prescribed migration order so Phase-1 keeps working until Phase-2 is proven.
 
 | Phase | Branch | Tasks | Arch §§ |
 |-------|--------|-------|---------|
-| **1 — Data Layer** | `impl/backend-phase-1-data-layer` | deps · asyncpg pool · alembic schema · seed | §5, §11, §13.3 |
-| **2 — Memory & Tracing** | `impl/backend-phase-2-memory-and-tracing` | episodic · semantic · embeddings · LangFuse | §5, §6, §13.2 |
-| **3 — Tools** | `impl/backend-phase-3-tools` | config · 5 tool rewrites · remove 2 tools | §3.4, §4.8, §13.2 |
-| **4 — Agents** | `impl/backend-phase-4-agents` | provider routing · orchestrator loops · prompts · pr-content agent | §4, §3.4 |
-| **5 — API** | `impl/backend-phase-5-api` | webhook (signal_type) · queries · generate · probes · lifespan · **Entra bearer auth** | §3, §3.6 |
-| **6 — Eval** | `impl/backend-phase-6-eval` | judge → LangFuse · runner → **30 scenario branches** | §6.4, §13.2 |
-| **7 — Container & K8s** | `impl/backend-phase-7-container-and-k8s` | Dockerfile · manifests · composite actions | §7, §8, §9 |
-| **8 — CI/CD** | `impl/backend-phase-8-cicd` | validation · deployment · incident · scale | §9 |
-| **9 — Cleanup & E2E** | `impl/backend-phase-9-cleanup` | delete Phase-1 · end-to-end smoke + eval | §13.1, §13.4 |
+| **1 — Data Layer** | `dev/backend-phase-1-data-layer` | deps · asyncpg pool · alembic schema · seed | §5, §11, §13.3 |
+| **2 — Memory & Tracing** | `dev/backend-phase-2-memory-and-tracing` | episodic · semantic · embeddings · LangFuse | §5, §6, §13.2 |
+| **3 — Tools** | `dev/backend-phase-3-tools` | config · 5 tool rewrites · remove 2 tools | §3.4, §4.8, §13.2 |
+| **4 — Agents** | `dev/backend-phase-4-agents` | provider routing · orchestrator loops · prompts · pr-content agent | §4, §3.4 |
+| **5 — API** | `dev/backend-phase-5-api` | webhook (signal_type) · queries · generate · probes · lifespan · **Entra bearer auth** | §3, §3.6 |
+| **6 — Eval** | `dev/backend-phase-6-eval` | judge → LangFuse · runner → **30 scenario branches** | §6.4, §13.2 |
+| **7 — Container & K8s** | `dev/backend-phase-7-container-and-k8s` | Dockerfile · manifests · composite actions | §7, §8, §9 |
+| **8 — CI/CD** | `dev/backend-phase-8-cicd` | validation · deployment · incident · scale | §9 |
+| **9 — Cleanup & E2E** | `dev/backend-phase-9-cleanup` | delete Phase-1 · end-to-end smoke + eval | §13.1, §13.4 |
 
 ## Tasks
 

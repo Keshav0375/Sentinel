@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-deployment` |
-| **Phase branch** | `impl/deploy-phase-2-deploy-pipeline` |
+| **Phase branch** | `dev/deploy-phase-2-deploy-pipeline` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-deployment/ARCHITECTURE.md §3.2 |
 | **Depends on** | — |

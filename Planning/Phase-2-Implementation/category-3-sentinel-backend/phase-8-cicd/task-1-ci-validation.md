@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-8-cicd` |
+| **Phase branch** | `dev/backend-phase-8-cicd` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §9.1, §9.5 |
 | **Depends on** | Phase-5 app boots, [[task-1-dockerfile-update]] |

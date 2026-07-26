@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-4-agents` |
+| **Phase branch** | `dev/backend-phase-4-agents` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §4.3, §4.4, §13.3; CLAUDE.md system-prompt rules |
 | **Depends on** | — (can precede the orchestrator; orchestrator loads them) |

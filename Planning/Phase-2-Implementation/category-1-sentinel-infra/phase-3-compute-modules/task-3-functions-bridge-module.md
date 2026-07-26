@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-infra` |
-| **Phase branch** | `impl/infra-phase-3-compute-modules` |
+| **Phase branch** | `dev/infra-phase-3-compute-modules` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-infra/ARCHITECTURE.md §3.5; sentinel §2 (correlation_id) |
 | **Depends on** | [[task-3-keyvault-module]] (github-pat ref), [[task-2-event-grid-module]] |

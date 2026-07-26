@@ -5,7 +5,7 @@
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-deployment` |
 | **Local path** | `Agentic-Engineering/Sentinel-development-project/Sentinel-deployment` |
-| **Phase branch** | `impl/deploy-phase-1-app` |
+| **Phase branch** | `dev/deploy-phase-1-app` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-deployment/ARCHITECTURE.md §2 (all), §5 |
 | **Depends on** | — (independent of infra to build; deploy target is infra 3.4) |

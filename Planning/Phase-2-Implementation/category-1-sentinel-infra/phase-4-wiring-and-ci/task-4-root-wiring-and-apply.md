@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-infra` |
-| **Phase branch** | `impl/infra-phase-4-wiring-and-ci` |
+| **Phase branch** | `dev/infra-phase-4-wiring-and-ci` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-infra/ARCHITECTURE.md §2, §4.3, §10 (full checklist) |
 | **Depends on** | ALL infra module tasks (2.1–3.4), [[task-1-cross-repo-secrets]] |

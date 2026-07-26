@@ -5,7 +5,7 @@
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-infra` |
 | **Local path** | `Agentic-Engineering/Sentinel-development-project/Sentinel-infra` |
-| **Phase branch** | `impl/infra-phase-1-foundations` |
+| **Phase branch** | `dev/infra-phase-1-foundations` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-infra/ARCHITECTURE.md §8.1, §8.2, §10 (bootstrap) |
 | **Depends on** | [[task-1-repo-skeleton-and-providers]] |

@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-infra` |
-| **Phase branch** | `impl/infra-phase-3-compute-modules` |
+| **Phase branch** | `dev/infra-phase-3-compute-modules` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-infra/ARCHITECTURE.md §3.7; sentinel §8 (consumer) |
 | **Depends on** | [[task-1-acr-module]], [[task-3-oidc-federation]] |

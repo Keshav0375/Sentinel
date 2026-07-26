@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-infra` |
-| **Phase branch** | `impl/infra-phase-2-core-modules` |
+| **Phase branch** | `dev/infra-phase-2-core-modules` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-infra/ARCHITECTURE.md §3.3 |
 | **Depends on** | [[task-2-postgresql-module]], [[task-3-oidc-federation]] (GHA SP object id) |
@@ -33,20 +33,27 @@ teams-webhook-url, langfuse-secret-key, langfuse-public-key, acr-password, githu
 **Removed:** ~~db-password~~ (Entra DB auth), ~~sentinel-api-token~~ (Entra bearer).
 
 ## Prerequisites
-- [ ] task 1.3 GHA SP object id available. [ ] task 2.2 db-password. [ ] ⛔ B1 to apply; ⛔ B4–B9 to populate runtime secrets.
+- [ ] task 1.3 GHA SP object id available. [ ] task 3.1 backend UAMI principal id, task 3.6 rotator MI
+  (both land in phase 3 — wire their role assignments then, or pass `null` and add in 3.1/3.6).
+- [ ] ⛔ B1 to apply; ⛔ B4–B9 to populate runtime secrets.
 
 ## Acceptance Criteria
-- [ ] Validates; RBAC (not access policies); two role assignments (Officer for TF, User for GHA SP).
-- [ ] `db-password` written by TF; the 8 runtime secrets documented for `az keyvault secret set`.
+- [ ] Validates; RBAC (not access policies); **four** role assignments — Secrets Officer for the
+      TF SP and the rotator Function MI, Secrets User for the GHA SP and the backend UAMI.
+- [ ] **No `db-password` and no `sentinel-api-token`** anywhere in the module (Entra-only DB auth,
+      Entra bearer API auth). Terraform writes **no secret values** — the 9 runtime secrets are
+      documented for `az keyvault secret set` (§10 step 6).
+- [ ] LLM keys (`anthropic-api-key`, `openai-api-key`) carry a ~90d expiry for task 3.6 rotation.
 - [ ] Outputs expose vault id/name/uri.
 
 ## Tests
 - **Validate:** validate, tflint, tfsec, gitleaks (ensure no literal secret values committed).
-- **Integration (⛔ B1):** apply; GHA SP can `az keyvault secret show db-password`; TF SP can set; GHA SP cannot set.
+- **Integration (⛔ B1):** apply; GHA SP can `az keyvault secret show anthropic-api-key`; TF SP can
+  set; GHA SP cannot set; `az keyvault secret list` contains **no** `db-password`/`sentinel-api-token`.
 - **Quality gate:** `--repo infra`.
 
 ## How to Verify (phase gate)
-1. `terraform plan -target=module.keyvault` → vault + 2 role assignments (+ db-password secret).
+1. `terraform plan -target=module.keyvault` → vault + 4 role assignments, **no secret resources**.
 2. (post-apply) `az keyvault secret list --vault-name sentinel-kv`; confirm GHA SP read-only via `az role assignment list`.
 
 ## Report   ·   _filled on completion_

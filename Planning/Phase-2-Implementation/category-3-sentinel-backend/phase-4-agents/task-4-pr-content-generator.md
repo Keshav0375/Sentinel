@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-4-agents` |
+| **Phase branch** | `dev/backend-phase-4-agents` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §3.4 (contract + prompt rules), §13.3 |
 | **Depends on** | [[task-1-provider-routing]] |

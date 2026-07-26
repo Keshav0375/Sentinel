@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-1-data-layer` |
+| **Phase branch** | `dev/backend-phase-1-data-layer` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §5.3 (services), §13.1 (replaces data/seed.py), §13.3 |
 | **Depends on** | [[task-3-alembic-initial-schema]], [[task-3-embeddings]] (for embedding values — see note) |

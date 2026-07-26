@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-deployment` |
-| **Phase branch** | `impl/deploy-phase-2-deploy-pipeline` |
+| **Phase branch** | `dev/deploy-phase-2-deploy-pipeline` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-deployment/ARCHITECTURE.md §3.1, §3.3, §3.4; §6.1/6.2 |
 | **Depends on** | [[task-1-fastapi-app]], [[task-1-dd-report-action]]; infra [[task-4-app-service-module]], [[task-2-postgresql-module]], [[task-3-keyvault-module]]; backend [[task-3-composite-actions]] (get-kv-secrets, psql-exec) |
@@ -19,7 +19,7 @@ writes the `deployments` row that backend correlation depends on.
 - **Stage 2** build zip (app/ + requirements.txt); on failure → `dd-report` `stage:build deploy_status:failed`.
 - **Stage 3** deploy: `azure/login@v2` (OIDC), `az webapp config appsettings set APP_VERSION`, `az webapp deploy --type zip`; on failure → dd-report `stage:deploy`.
 - **Stage 4** verify: sleep 30, retry `/health` ×3, `/version` == APP_VERSION; on failure → dd-report `stage:verify`.
-- **Stage 5** record (`if: always()`): reuse sentinel's cross-repo actions `get-kv-secrets` (db-password) + `psql-exec` INSERT into `deployments` (service, pr_number, commit_sha, author, deploy_status, gha_run_id, files_changed jsonb, metadata{failed_stage,version}). `incident_id` NULL.
+- **Stage 5** record (`if: always()`): reuse sentinel's cross-repo actions **`get-db-token`** (short-lived Entra token — **not** `get-kv-secrets`/`db-password`; Postgres is Entra-only) + `psql-exec` INSERT into `deployments` (service, pr_number, commit_sha, author, deploy_status, gha_run_id, files_changed jsonb, metadata{failed_stage,version}). `incident_id` NULL.
 - **Stage 6** summary (`if: always()`): dd-report final event + structured `deploy.completed` log (§3.1 payload).
 - Secrets (§3.4): AZURE_* (from infra), DD_API_KEY, DEPLOYED_APP_URL, AZURE_RG.
 

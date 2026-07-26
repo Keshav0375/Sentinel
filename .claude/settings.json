@@ -42,7 +42,14 @@
       "Bash(git log *)",
       "Bash(echo \"exit: $?\")",
       "Bash(ls -d \"../Sentinel-development-project\"/*/ 2>/dev/null || echo \"no sibling project dir\"; echo \"---backend\\(this repo\\)---\"; git rev-parse --show-toplevel)",
-      "Read(//c/Users/DELL/OneDrive - University of Windsor/Desktop/Agentic-Engineering/Sentinel-development-project/**)"
+      "Read(//c/Users/DELL/OneDrive - University of Windsor/Desktop/Agentic-Engineering/Sentinel-development-project/**)",
+      "PowerShell(claude --version)",
+      "PowerShell(npm view @anthropic-ai/claude-code version 2>$null; Write-Output \"---installed path---\"; \\(Get-Command claude -ErrorAction SilentlyContinue\\).Source)",
+      "Bash(ls \"c:/Users/DELL/OneDrive - University of Windsor/Desktop/Agentic-Engineering/graphify-out/graph.json\" 2>&1; echo \"---\"; ls \"c:/Users/DELL/OneDrive - University of Windsor/Desktop/Agentic-Engineering/Sentinel/graphify-out\" 2>&1)",
+      "Read(//c/Users/DELL/OneDrive - University of Windsor/Desktop/Agentic-Engineering/graphify-out/**)",
+      "Bash(ruff check *)",
+      "Bash(python scripts/quality_gate.py --repo infra --path \"../Sentinel-development-project/Sentinel-infra\")",
+      "Bash(python scripts/quality_gate.py --repo deployment --path \"../Sentinel-development-project/Sentinel-deployment\")"
     ],
     "deny": [
       "Bash(rm -rf /)*",

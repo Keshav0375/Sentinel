@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-infra` |
-| **Phase branch** | `impl/infra-phase-3-compute-modules` |
+| **Phase branch** | `dev/infra-phase-3-compute-modules` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-infra/ARCHITECTURE.md §4.4 (backend app reg) + §4.5 (token model) |
 | **Depends on** | [[task-3-oidc-federation]] (needs the `sentinel-gha` SP) |

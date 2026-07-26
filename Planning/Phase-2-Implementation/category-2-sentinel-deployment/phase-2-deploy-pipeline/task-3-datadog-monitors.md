@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel-deployment` |
-| **Phase branch** | `impl/deploy-phase-2-deploy-pipeline` |
+| **Phase branch** | `dev/deploy-phase-2-deploy-pipeline` |
 | **Commit prefix** | `feat:` |
 | **Arch refs** | sentinel-deployment/ARCHITECTURE.md §6.3, §4 (A/B/C); master §2 |
 | **Depends on** | [[task-2-ci-app-deployment]] (produces the events), infra [[task-2-event-grid-module]] + [[task-3-functions-bridge-module]] (webhook target) |

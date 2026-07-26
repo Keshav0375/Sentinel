@@ -4,7 +4,7 @@
 |-------|-------|
 | **Status** | `not-started` |
 | **Repo** | `Sentinel` (backend) |
-| **Phase branch** | `impl/backend-phase-2-memory-and-tracing` |
+| **Phase branch** | `dev/backend-phase-2-memory-and-tracing` |
 | **Commit prefix** | `refactor:` |
 | **Arch refs** | sentinel/ARCHITECTURE.md §6 (all), §13.2 |
 | **Depends on** | [[task-1-phase2-dependencies]], [[task-1-config-extensions]] (keys) — note: config is Phase 3; use env directly here or land config keys first |
