@@ -40,6 +40,7 @@ htmlcov/
 # ── Eval reports (generated artifacts) ───────────────────────────────────────
 reports/*.json
 reports/*.md
+reports/trajectories/
 
 # ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/

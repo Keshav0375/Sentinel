@@ -2,8 +2,8 @@
 """Category-aware quality gate for the Sentinel three-repo system.
 
 One entrypoint that runs the right toolchain per repo type. This is the exact body
-CI jobs invoke, so local checks and CI never drift (see
-Planning/Phase-2-Implementation/README.md §7).
+CI jobs invoke, so local checks and CI never drift (see the sentinel-brain repo,
+implementation/README.md §7).
 
 Usage (SIBLINGS=../Sentinel-development-project):
     python scripts/quality_gate.py --repo backend [--path .] [--fast] [--json]
@@ -18,7 +18,7 @@ has not created every directory), and a check whose paths have all been pruned i
 SKIPPED rather than failed.
 
 The pytest globs below must cover every `tests/` directory named by a task file in
-Planning/Phase-2-Implementation/. If a phase adds a new test package, add it here —
+the sentinel-brain repo's implementation/tasks/. If a phase adds a test package, add it here —
 otherwise the gate reports green without ever running that phase's tests.
 """
 from __future__ import annotations

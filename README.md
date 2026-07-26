@@ -139,8 +139,9 @@ flowchart TB
     style REVERTPR fill:#fff3cd,stroke:#d39e00,color:#1a1a1a
 ```
 
-_This is the architectural view of Phase 2._ Deep-dive docs live in
-[`Planning/Phase-2/ARCHITECTURE.md`](Planning/Phase-2/ARCHITECTURE.md) (the architecture index).
+_This is the architectural view of Phase 2._ Deep-dive docs live in the
+[**sentinel-brain**](https://github.com/Keshav0375/sentinel-brain) repo —
+`architecture/README.md` is the index, `architecture/backend.md` is authoritative for this repo.
 
 ---
 
