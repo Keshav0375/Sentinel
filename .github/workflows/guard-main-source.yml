@@ -11,12 +11,19 @@ name: Guard main source
 #
 # Policy:
 #   main            <- only  release-phase-2  or  planning/phase-2-e2e
-#   release-phase-2 <- only  dev/*  or  planning/phase-2-e2e
+#   release-phase-2 <- only  dev/*  or  fix/*  or  planning/phase-2-e2e
 #
 # `dev/*` is the Phase-2 implementation prefix — one branch per phase, branched
 # from an up-to-date release-phase-2 and merged back into it at the phase gate
 # (e.g. dev/backend-phase-1-data-layer). planning/phase-2-e2e carries plans,
 # architecture, and the tracker only. release-phase-2 -> main is the final merge.
+#
+# `fix/*` (added 2026-08-15) covers repairs that belong to no phase — tooling and
+# CI defects found mid-build, e.g. fix/quality-gate-implicit-paths. Without it the
+# only way to land such a fix was to disguise it as a phase branch, which would
+# have made the tracker lie about what a `dev/*` branch means. Note ci.yml's
+# branch-convention check already accepts fix/, so the guard was the narrower of
+# the two rules; this aligns them. `main` is unchanged and stays strict.
 #
 # Entries are shell glob patterns, so `dev/*` matches any phase branch.
 # (edit the ALLOWED lists below to change who may target each branch)
@@ -39,7 +46,7 @@ jobs:
             main)
               ALLOWED="release-phase-2 planning/phase-2-e2e" ;;
             release-phase-2)
-              ALLOWED="dev/* planning/phase-2-e2e" ;;
+              ALLOWED="dev/* fix/* planning/phase-2-e2e" ;;
             *)
               echo "No source restriction configured for base '$BASE'."; exit 0 ;;
           esac
