@@ -15,7 +15,8 @@ Checks whose tool is not installed are reported as SKIPPED (warning), not failur
 so the gate runs anywhere; CI images pin the full toolchain so nothing is skipped there.
 Path arguments that do not exist yet are pruned before the tool runs (a repo mid-build
 has not created every directory), and a check whose paths have all been pruned is
-SKIPPED rather than failed.
+SKIPPED rather than failed. Some tools take no path argument at all and discover their
+own inputs — those declare it in IMPLICIT_PATHS so they get the same treatment.
 
 The pytest globs below must cover every `tests/` directory named by a task file in
 the sentinel-brain repo's implementation/tasks/. If a phase adds a test package, add it here —
@@ -99,6 +100,14 @@ MATRIX: dict[str, list[Check]] = {
 # Checks skipped when --fast is set (slow / network / heavy).
 FAST_SKIP = {"pytest-integration", "pip-audit", "tfsec", "gitleaks"}
 
+# Checks whose input path is implicit: the tool discovers its own files instead of
+# taking them as argv, so resolve_argv() has nothing to prune. `actionlint` walks
+# .github/workflows/ itself and exits 3 when the directory is absent — which is the
+# normal state of a repo mid-build, since sentinel-infra ships workflows in task 4.3
+# and sentinel-deployment in task 2.2. Without this, infra phases 1-3 and deployment
+# phase 1 could never report green no matter what they contained.
+IMPLICIT_PATHS = {"actionlint": ".github/workflows"}
+
 
 @dataclass
 class Result:
@@ -170,6 +179,9 @@ def run_check(name: str, argv: list[str], required: bool, cwd: Path) -> Result:
     tool = argv[0]
     if shutil.which(tool) is None:
         return Result(name, "skipped", detail=f"{tool} not on PATH")
+    implicit = IMPLICIT_PATHS.get(name)
+    if implicit is not None and not (cwd / implicit).exists():
+        return Result(name, "skipped", detail=f"no such path yet: {implicit}")
     resolved = resolve_argv(argv, cwd)
     if resolved is None:
         paths = " ".join(a for a in argv if _is_path_arg(a))
