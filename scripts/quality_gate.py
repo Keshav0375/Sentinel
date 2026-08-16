@@ -89,6 +89,18 @@ MATRIX: dict[str, list[Check]] = {
         ("tf-validate", ["terraform", "validate", "-no-color"], True),
         ("tflint", ["tflint", "--recursive"], False),
         ("tfsec", ["tfsec", "."], False),
+        # The bootstrap scripts create the state account and the CI identity by running
+        # against a live subscription — the highest-risk files in sentinel-infra and, until
+        # now, the only ones no gate check ever read. Required, because a green gate that
+        # never lints them says nothing about them. It caught CRLF line endings on the first
+        # run, which would have failed every script on ubuntu-latest with
+        # "bad interpreter: /usr/bin/env bash^M". Path pruning skips this cleanly in repos
+        # that ship no scripts/ (see _is_path_arg, which now recognises .sh).
+        (
+            "shellcheck",
+            ["shellcheck", "scripts/bootstrap-state.sh", "scripts/bootstrap-oidc.sh"],
+            True,
+        ),
         # sentinel-infra ships 4 workflows (dry / apply / destroy / runners) — lint them here
         # rather than standalone, so infra task 4.3's gate is the same body CI runs.
         ("actionlint", ["actionlint"], True),
@@ -154,7 +166,7 @@ def _is_path_arg(arg: str) -> bool:
     """True for args that name a file or directory in the repo (not a flag)."""
     if arg.startswith("-"):
         return False
-    return arg.endswith((".py", "/")) or arg == "."
+    return arg.endswith((".py", ".sh", "/")) or arg == "."
 
 
 def resolve_argv(argv: list[str], cwd: Path) -> list[str] | None:
