@@ -101,6 +101,18 @@ MATRIX: dict[str, list[Check]] = {
             ["shellcheck", "scripts/bootstrap-state.sh", "scripts/bootstrap-oidc.sh"],
             True,
         ),
+        # Phase 3 put PYTHON in the infra repo: the Event Grid bridge and the KV
+        # rotator run unattended against live services, and until this entry the
+        # gate never imported them, let alone ran their tests — PASS said nothing
+        # about 149 lines of handler code (review blocker, 2026-08-23; same
+        # blindspot class as the shellcheck gap). Path-pruned in repos without
+        # the tests directory.
+        (
+            "py-unittest",
+            ["python", "-m", "unittest", "discover", "-s", "modules/functions/tests/"],
+            True,
+        ),
+        ("ruff-infra", ["ruff", "check", "modules/functions/src/"], False),
         # sentinel-infra ships 4 workflows (dry / apply / destroy / runners) — lint them here
         # rather than standalone, so infra task 4.3's gate is the same body CI runs.
         ("actionlint", ["actionlint"], True),
