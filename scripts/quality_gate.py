@@ -98,7 +98,7 @@ MATRIX: dict[str, list[Check]] = {
         # that ship no scripts/ (see _is_path_arg, which now recognises .sh).
         (
             "shellcheck",
-            ["shellcheck", "scripts/bootstrap-state.sh", "scripts/bootstrap-oidc.sh"],
+            ["shellcheck", "scripts/*.sh", "ci-images/*.sh"],
             True,
         ),
         # Phase 3 put PYTHON in the infra repo: the Event Grid bridge and the KV
@@ -113,6 +113,16 @@ MATRIX: dict[str, list[Check]] = {
             True,
         ),
         ("ruff-infra", ["ruff", "check", "modules/functions/src/"], False),
+        # The naming module decides every resource name in the estate, and it is
+        # the one part that can be tested properly — pure computation, no provider,
+        # no state. `terraform test` needs its own init because module dirs are not
+        # initialised by the root's. Path-pruned in repos without the module.
+        (
+            "tf-test-init",
+            ["terraform", "-chdir=modules/naming", "init", "-backend=false", "-input=false", "-no-color"],
+            False,
+        ),
+        ("tf-test", ["terraform", "-chdir=modules/naming", "test", "-no-color"], False),
         # sentinel-infra ships 4 workflows (dry / apply / destroy / runners) — lint them here
         # rather than standalone, so infra task 4.3's gate is the same body CI runs.
         ("actionlint", ["actionlint"], True),
@@ -178,7 +188,7 @@ def _is_path_arg(arg: str) -> bool:
     """True for args that name a file or directory in the repo (not a flag)."""
     if arg.startswith("-"):
         return False
-    return arg.endswith((".py", ".sh", "/")) or arg == "."
+    return arg.endswith((".py", ".sh", "/")) or arg == "." or "*" in arg
 
 
 def resolve_argv(argv: list[str], cwd: Path) -> list[str] | None:
@@ -189,6 +199,22 @@ def resolve_argv(argv: list[str], cwd: Path) -> list[str] | None:
     hard error, not a signal. Returns None when the check named paths and none of
     them survived — the caller reports SKIPPED.
     """
+    # Expand globs first. Without this a check must NAME every file, so adding a
+    # script leaves it silently unchecked while the gate still reports PASS. That
+    # happened three times: shellcheck did not cover the bootstrap scripts at all,
+    # then stopped covering bootstrap-identities.sh when it replaced
+    # bootstrap-oidc.sh. A glob makes coverage the default rather than something
+    # someone has to remember.
+    argv = [
+        m
+        for a in argv
+        for m in (
+            sorted(str(x.relative_to(cwd)).replace("\\", "/") for x in cwd.glob(a))
+            if (_is_path_arg(a) and "*" in a)
+            else [a]
+        )
+    ]
+
     path_args = [a for a in argv if _is_path_arg(a)]
     if not path_args:
         return argv
