@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from sentinel.config import Settings
 
@@ -158,11 +159,15 @@ def test_db_pool_settings_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.parametrize(
-    ("pool_min", "pool_max"),
-    [(-1, 10), (0, 0), (5, 2)],
+    ("pool_min", "pool_max", "message"),
+    [
+        (-1, 10, "sentinel_db_pool_min must be >= 0"),
+        (0, 0, "sentinel_db_pool_max must be >= 1"),
+        (5, 2, "sentinel_db_pool_min must be <= sentinel_db_pool_max"),
+    ],
 )
-def test_db_pool_invalid_bounds_raise(pool_min: int, pool_max: int) -> None:
-    with pytest.raises(Exception):
+def test_db_pool_invalid_bounds_raise(pool_min: int, pool_max: int, message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
         Settings(
             groq_api_key="gsk_test",
             sentinel_db_pool_min=pool_min,
