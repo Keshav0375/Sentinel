@@ -60,6 +60,11 @@ _CLOSE_TIMEOUT_S = 10.0
 _pool: asyncpg.Pool | None = None
 
 
+def _err(exc: BaseException) -> str:
+    """Exception text that is never blank — TimeoutError() has an empty str()."""
+    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+
+
 def is_postgres_dsn(url: str) -> bool:
     """True when *url* is a DSN asyncpg accepts (``postgres://`` or ``postgresql://``)."""
     return urlsplit(url.strip()).scheme.lower() in _POSTGRES_SCHEMES
@@ -114,8 +119,8 @@ async def create_pool(
         )
     except (*_DRIVER_ERRORS, ValueError) as exc:
         # ValueError: invalid bounds, or register_vector's "unknown type: public.vector".
-        logger.error("db_pool_create_failed", error=str(exc), **_describe(dsn))
-        raise SentinelMemoryError(f"could not create database pool: {exc}") from exc
+        logger.error("db_pool_create_failed", error=_err(exc), **_describe(dsn))
+        raise SentinelMemoryError(f"could not create database pool: {_err(exc)}") from exc
     logger.info("db_pool_created", min_size=min_size, max_size=max_size, **_describe(dsn))
     return pool
 
@@ -216,16 +221,16 @@ async def acquire(
     try:
         conn = await target.acquire(timeout=timeout)
     except _DRIVER_ERRORS as exc:
-        logger.error("db_acquire_failed", error=str(exc))
-        raise SentinelMemoryError(f"could not acquire a database connection: {exc}") from exc
+        logger.error("db_acquire_failed", error=_err(exc))
+        raise SentinelMemoryError(f"could not acquire a database connection: {_err(exc)}") from exc
     try:
         yield conn
     except _QUERY_ERRORS as exc:
-        raise SentinelMemoryError(f"database operation failed: {exc}") from exc
+        raise SentinelMemoryError(f"database operation failed: {_err(exc)}") from exc
     finally:
         try:
             await target.release(conn)
         except _DRIVER_ERRORS as exc:
             # asyncpg terminates a connection it cannot reset, so nothing leaks;
             # surfacing this would mask the block's own outcome.
-            logger.warning("db_release_failed", error=str(exc))
+            logger.warning("db_release_failed", error=_err(exc))

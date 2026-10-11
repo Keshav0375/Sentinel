@@ -127,6 +127,19 @@ async def test_acquire_without_pool_raises_memory_error() -> None:
             pass
 
 
+async def test_acquire_timeout_wrapped_with_readable_message() -> None:
+    """TimeoutError() has an empty str() — the wrapped message must still name it."""
+
+    class _TimingOutPool:
+        async def acquire(self, *, timeout: float | None = None) -> None:
+            raise TimeoutError
+
+    with pytest.raises(SentinelMemoryError, match="TimeoutError") as excinfo:
+        async with acquire(_TimingOutPool()):  # type: ignore[arg-type]
+            pass
+    assert isinstance(excinfo.value.__cause__, TimeoutError)
+
+
 async def test_close_pool_without_pool_is_noop() -> None:
     await close_pool()
     await close_pool()
