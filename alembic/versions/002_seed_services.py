@@ -29,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import sqlalchemy as sa
 from alembic import context, op
+from dotenv import dotenv_values
 
 from sentinel.config import Settings
 from sentinel.memory.embeddings import EmbeddingClient
@@ -71,13 +72,17 @@ def embedding_text() -> str:
 
 
 def _embedding_model_name() -> str:
-    """``Settings.sentinel_embedding_model`` (env / ``.env`` / default).
+    """``SENTINEL_EMBEDDING_MODEL`` from the environment, then ``./.env``, else the default.
 
-    Migrations need no LLM provider, so a missing GROQ_API_KEY must not stop them; the
-    placeholder only satisfies Settings' required field and is never used.
+    Read on its own, never through ``Settings()``: a migration needs no LLM keys, and an
+    unrelated invalid field in ``.env`` must not stop it. The lookup order mirrors
+    env.py's ``DATABASE_URL``; the default is ``Settings``' own.
     """
-    groq_key = os.environ.get("GROQ_API_KEY", "").strip() or "unused-by-migrations"
-    return Settings(groq_api_key=groq_key).sentinel_embedding_model
+    name = os.environ.get("SENTINEL_EMBEDDING_MODEL")
+    if name is None:
+        name = dotenv_values(".env").get("SENTINEL_EMBEDDING_MODEL")
+    default: str = Settings.model_fields["sentinel_embedding_model"].default
+    return (name or "").strip() or default
 
 
 def _embed(text: str) -> list[float]:

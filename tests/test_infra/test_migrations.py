@@ -667,6 +667,41 @@ def _assert_seed_row(
     assert row["embedding"] == pytest.approx(expected_embedding, abs=1e-6)
 
 
+@pytest.mark.parametrize(
+    ("env_value", "dotenv_line", "expected"),
+    [
+        (
+            "paraphrase-MiniLM-L3-v2",
+            "SENTINEL_EMBEDDING_MODEL=other-model",
+            "paraphrase-MiniLM-L3-v2",
+        ),
+        (None, "SENTINEL_EMBEDDING_MODEL=paraphrase-MiniLM-L3-v2", "paraphrase-MiniLM-L3-v2"),
+        (None, "", "all-MiniLM-L6-v2"),
+        ("  ", "", "all-MiniLM-L6-v2"),
+    ],
+)
+def test_seed_embedding_model_name_resolution(
+    env_value: str | None,
+    dotenv_line: str,
+    expected: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Env, then ./.env, then the Settings default — and never through Settings().
+
+    The .env also carries fields Settings would reject (no GROQ_API_KEY anywhere, a
+    non-integer pool bound): the migration must not care.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("SENTINEL_EMBEDDING_MODEL", raising=False)
+    if env_value is not None:
+        monkeypatch.setenv("SENTINEL_EMBEDDING_MODEL", env_value)
+    (tmp_path / ".env").write_text(f"SENTINEL_DB_POOL_MIN=not-an-int\n{dotenv_line}\n")
+
+    assert _seed_module()._embedding_model_name() == expected  # pyright: ignore[reportPrivateUsage]
+
+
 def test_seed_inserts_exactly_sentinel_watchtower(
     fresh_db: str, cfg: Config, seed_embedding_client: EmbeddingClient
 ) -> None:
