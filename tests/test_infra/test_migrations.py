@@ -686,18 +686,23 @@ def test_seed_runbook_is_the_revert_pr_rollback(fresh_db: str, cfg: Config) -> N
     for phrase in (
         "`deployments` table",
         "`pr-<N>-<sha>`",
-        "Open a revert PR on Keshav0375/Sentinel-deployment",
-        "A human reviews and merges the revert PR",
-        "redeploys the previous code",
+        "Sentinel drafts a rollback spec (prepare_rollback_spec)",
+        "GitHub Actions opens the\n   revert PR on Keshav0375/Sentinel-deployment",
+        "A human reviews and merges the revert PR, which redeploys the previous version.",
+        "Never deploy, merge or roll back directly: the revert PR is the approval gate.",
         "`Sentinel-deployment/scenarios/README.md`",
     ):
         assert phrase in runbook, phrase
-    # The steps run in rollback order: culprit → revert PR → human merge.
+    # The steps run in rollback order: culprit → drafted spec / GHA revert PR → human merge.
     assert (
         runbook.index("culprit merge")
-        < runbook.index("Open a revert PR")
+        < runbook.index("Sentinel drafts a rollback spec")
         < runbook.index("A human reviews")
     )
+    # Sentinel never acts on the world itself: no instruction to the agent to wait on,
+    # watch or drive the deploy.
+    assert "wait for" not in runbook.lower()
+    assert "Open a revert PR" not in runbook
 
 
 def test_seed_embedding_covers_name_team_tier_runbook(

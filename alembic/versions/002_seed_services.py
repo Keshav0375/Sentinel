@@ -54,9 +54,9 @@ The app deployed from Keshav0375/Sentinel-deployment to Azure App Service. Every
 
 1. Identify the culprit merge: the `deployments` row for `sentinel-watchtower` deployed
    just before the alert, version `pr-<N>-<sha>` (PR number and commit sha).
-2. Open a revert PR on Keshav0375/Sentinel-deployment that reverts that merge.
-3. A human reviews and merges the revert PR. The merge redeploys the previous code;
-   wait for the deploy run to go green and the health check to recover.
+2. Sentinel drafts a rollback spec (prepare_rollback_spec); GitHub Actions opens the
+   revert PR on Keshav0375/Sentinel-deployment.
+3. A human reviews and merges the revert PR, which redeploys the previous version.
 
 Never deploy, merge or roll back directly: the revert PR is the approval gate.
 
