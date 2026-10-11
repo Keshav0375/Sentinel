@@ -2,8 +2,8 @@
 (backend.md §5.3).
 
 Tests taking ``fresh_db`` create a throwaway database on the pgvector container named by
-DATABASE_URL (see tests/conftest.py), so ``upgrade head`` is proven from empty, and drop
-it afterwards. They skip with a reason when DATABASE_URL is not set.
+TEST_DATABASE_URL (see tests/conftest.py), so ``upgrade head`` is proven from empty, and
+drop it afterwards. They skip with a reason when TEST_DATABASE_URL is not set.
 
 Migrations run through ``alembic.command`` (sync; env.py owns its own event loop), so
 these tests are sync and query the database with ``asyncio.run``. ``002`` embeds its row

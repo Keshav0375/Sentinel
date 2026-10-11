@@ -1,4 +1,10 @@
-"""Shared test fixtures — mock memory, mock scenario, test config."""
+"""Shared test fixtures — mock memory, mock scenario, test config.
+
+The suite is independent of the caller's shell and of the developer's ``.env``:
+``Settings`` never reads ``.env`` here, ``DATABASE_URL`` is unset for the whole session
+(a test that needs it sets it to the test database), and ``GROQ_API_KEY`` gets a dummy
+default. The only database the suite touches is ``TEST_DATABASE_URL``.
+"""
 
 from __future__ import annotations
 
@@ -16,18 +22,25 @@ from sentinel.infra.database import is_postgres_dsn
 from sentinel.memory.embeddings import EmbeddingClient
 
 # ── PostgreSQL + pgvector ─────────────────────────────────────────────────────
-# Integration tests that need Postgres read DATABASE_URL, e.g. against
+# Integration tests that need Postgres read TEST_DATABASE_URL — never DATABASE_URL, so
+# the app's own database can never be migrated, or have databases created and dropped
+# on its server, by a test run. Locally:
 #   docker run -d --name sentinel-pg-test -e POSTGRES_PASSWORD=test \
 #     -e POSTGRES_DB=sentinel -p 55432:5432 pgvector/pgvector:pg16
-#   DATABASE_URL=postgresql://postgres:test@localhost:55432/sentinel
-# Without it they skip with a reason; everything else runs as before.
+#   TEST_DATABASE_URL=postgresql://postgres:test@localhost:55432/sentinel
+# Without it they skip with a reason.
 
-_DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+_TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
 _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Before collection: a dummy GROQ_API_KEY (Settings requires one), never a real one."""
+    os.environ.setdefault("GROQ_API_KEY", "fake-key-for-tests")
+
+
 def _postgres_dsn() -> str | None:
-    return _DATABASE_URL if is_postgres_dsn(_DATABASE_URL) else None
+    return _TEST_DATABASE_URL if is_postgres_dsn(_TEST_DATABASE_URL) else None
 
 
 @cache
@@ -58,8 +71,17 @@ def make_alembic_config(dsn: str, embedding_client: EmbeddingClient | None = Non
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _migrated_schema() -> Iterator[None]:
-    """Run ``alembic upgrade head`` on the test database when DATABASE_URL is Postgres.
+def _isolated_environment() -> Iterator[None]:
+    """No ``.env`` for Settings and no ``DATABASE_URL`` for the whole session."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(Settings.model_config, "env_file", None)
+        mp.delenv("DATABASE_URL", raising=False)
+        yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _migrated_schema(_isolated_environment: None) -> Iterator[None]:
+    """Run ``alembic upgrade head`` on the test database when TEST_DATABASE_URL is set.
 
     Every pooled connection registers the pgvector codec (needs the extension), and the
     app lifespan exercised by tests/test_api runs against the real §5.3 schema. A no-op
@@ -85,8 +107,8 @@ def seed_embedding_client() -> EmbeddingClient:
 
 @pytest.fixture
 def pg_dsn() -> str:
-    """The Postgres DSN under test; skips the test when none is configured."""
+    """The Postgres DSN under test (TEST_DATABASE_URL); skips the test when none is set."""
     dsn = _postgres_dsn()
     if dsn is None:
-        pytest.skip("DATABASE_URL is not a postgres:// DSN — start pgvector/pgvector:pg16")
+        pytest.skip("TEST_DATABASE_URL is not a postgres:// DSN — start pgvector/pgvector:pg16")
     return dsn
