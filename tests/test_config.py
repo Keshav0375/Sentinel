@@ -135,3 +135,36 @@ def test_groq_model_always_valid() -> None:
         sentinel_judge_model="groq/llama-3.1-8b-instant",
     )
     assert s.sentinel_triage_model == "groq/llama-3.1-8b-instant"
+
+
+# ── PostgreSQL pool settings ──────────────────────────────────────────────────
+
+
+def test_db_pool_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in ("DATABASE_URL", "SENTINEL_DB_POOL_MIN", "SENTINEL_DB_POOL_MAX"):
+        monkeypatch.delenv(var, raising=False)
+    s = Settings(groq_api_key="gsk_test", _env_file=None)  # type: ignore[call-arg]
+    assert s.database_url == ""
+    assert (s.sentinel_db_pool_min, s.sentinel_db_pool_max) == (2, 10)
+
+
+def test_db_pool_settings_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost:5432/sentinel")
+    monkeypatch.setenv("SENTINEL_DB_POOL_MIN", "1")
+    monkeypatch.setenv("SENTINEL_DB_POOL_MAX", "4")
+    s = Settings(groq_api_key="gsk_test")
+    assert s.database_url == "postgresql://u:p@localhost:5432/sentinel"
+    assert (s.sentinel_db_pool_min, s.sentinel_db_pool_max) == (1, 4)
+
+
+@pytest.mark.parametrize(
+    ("pool_min", "pool_max"),
+    [(-1, 10), (0, 0), (5, 2)],
+)
+def test_db_pool_invalid_bounds_raise(pool_min: int, pool_max: int) -> None:
+    with pytest.raises(Exception):
+        Settings(
+            groq_api_key="gsk_test",
+            sentinel_db_pool_min=pool_min,
+            sentinel_db_pool_max=pool_max,
+        )

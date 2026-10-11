@@ -297,7 +297,7 @@ version = "0.32.0"
 description = "An asyncio PostgreSQL driver"
 optional = false
 python-versions = ">=3.9.0"
-groups = ["main"]
+groups = ["main", "dev"]
 files = [
     {file = "asyncpg-0.32.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:fd5adfb01cea16908d617af55b00a84c9e581964b77d4301c29fd735bb7850c3"},
     {file = "asyncpg-0.32.0-cp310-cp310-macosx_11_0_x86_64.whl", hash = "sha256:23638de661ac9a7975278a4fafb1f4c8613e7aae04562675f604dd20ec10e8d8"},
@@ -385,6 +385,22 @@ files = [
 
 [package.extras]
 gssauth = ["gssapi ; platform_system != \"Windows\"", "sspilib ; platform_system == \"Windows\""]
+
+[[package]]
+name = "asyncpg-stubs"
+version = "0.32.0"
+description = "asyncpg stubs"
+optional = false
+python-versions = "<4.0,>=3.9"
+groups = ["dev"]
+files = [
+    {file = "asyncpg_stubs-0.32.0-py3-none-any.whl", hash = "sha256:a7fb5e07caeb5c4e8c53306525190cc48b64a09fba19d4b7db0d95baa19691ea"},
+    {file = "asyncpg_stubs-0.32.0.tar.gz", hash = "sha256:0c6644e41e2756b49ba0ce95eba289450e3a3a6ee54cc4faf20d218705734630"},
+]
+
+[package.dependencies]
+asyncpg = ">=0.32,<0.33"
+typing-extensions = ">=4.16.0,<5.0.0"
 
 [[package]]
 name = "attrs"
@@ -1523,7 +1539,7 @@ description = "Fast transfer of large files with the Hugging Face Hub."
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
-markers = "python_full_version >= \"3.14.0\" and (platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"aarch64\" or platform_machine == \"ARM64\") or platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"aarch64\""
+markers = "platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"aarch64\" or (platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"ARM64\" or platform_machine == \"aarch64\") and python_full_version >= \"3.14.0\""
 files = [
     {file = "hf_xet-1.7.0-cp314-cp314t-macosx_10_12_x86_64.whl", hash = "sha256:fa029678be1ba7f953c409b0b27bf15cc69cd1c9b3a674fbd78856ebefca1052"},
     {file = "hf_xet-1.7.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:57bc157b8b7fe3bee9dcb9af7f3da8de41801c3b31a9ef68a77a33c6a6be382f"},
@@ -5947,4 +5963,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "6f052cf7f3ccac5d8bdf6c41bb9b82ba20ca32ca47126d75cb74210068162f61"
+content-hash = "d5b8808f797289eb7d408eecb0eaafd915050a57e4f1af67571cc11577de5179"

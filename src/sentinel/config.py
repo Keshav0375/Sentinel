@@ -75,6 +75,15 @@ class Settings(BaseSettings):
     # ── Infrastructure ────────────────────────────────────────────────────────
     sentinel_db_path: Path = Path("./data/sentinel.db")
 
+    # ── PostgreSQL + pgvector (Phase 2) ───────────────────────────────────────
+    # asyncpg DSN (postgresql://…). Empty → no Postgres pool is created and the
+    # Phase-1 SQLite store above stays the only database.
+    database_url: str = ""
+
+    # asyncpg pool bounds — one connection per concurrent incident (backend.md §4.5).
+    sentinel_db_pool_min: int = 2
+    sentinel_db_pool_max: int = 10
+
     sentinel_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     # Hard cap on tool calls per incident to prevent runaway loops.
@@ -87,6 +96,16 @@ class Settings(BaseSettings):
         if v < 1:
             raise ValueError("sentinel_max_tool_calls must be >= 1")
         return v
+
+    @model_validator(mode="after")
+    def db_pool_bounds_valid(self) -> Settings:
+        if self.sentinel_db_pool_min < 0:
+            raise ValueError("sentinel_db_pool_min must be >= 0")
+        if self.sentinel_db_pool_max < 1:
+            raise ValueError("sentinel_db_pool_max must be >= 1")
+        if self.sentinel_db_pool_min > self.sentinel_db_pool_max:
+            raise ValueError("sentinel_db_pool_min must be <= sentinel_db_pool_max")
+        return self
 
     @field_validator("groq_api_key")
     @classmethod

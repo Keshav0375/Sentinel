@@ -44,6 +44,7 @@ from sentinel.config import Settings, get_settings
 from sentinel.generator.alert_gen import load_scenario
 from sentinel.generator.scenarios import Scenario
 from sentinel.infra.dashboard_emitter import DashboardEventEmitter
+from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.db import create_tables
 from sentinel.infra.event_bus import EventBus
 from sentinel.infra.logging import configure_logging, get_logger
@@ -218,7 +219,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     Startup order:
     1. Load config and configure structured logging.
-    2. Create SQLite tables (idempotent).
+    2. Create SQLite tables (idempotent); open the asyncpg pool if DATABASE_URL
+       is a Postgres DSN (closed again at shutdown).
     3. Seed service map and runbooks (idempotent INSERT OR REPLACE).
     4. Build memory clients (SemanticMemory, EpisodicMemory, ShortTermMemory).
     5. Create Groq AsyncOpenAI client; set as SDK default.
@@ -239,6 +241,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await seed(settings.sentinel_db_path, verbose=False)
     except ImportError:
         logger.warning("seed_skipped", reason="data package not on Python path")
+
+    # Phase-2 Postgres pool — runs beside SQLite until db.py is retired (§13.5).
+    await init_pool_from_settings(settings)
 
     # ── Memory clients ────────────────────────────────────────────────────────
     embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
@@ -290,9 +295,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.include_router(make_trajectories_router(trajectories_dir))
 
     logger.info("sentinel_ready")
-    yield
-
-    logger.info("sentinel_shutdown")
+    try:
+        yield
+    finally:
+        await close_pool()
+        logger.info("sentinel_shutdown")
 
 
 def create_app() -> FastAPI:

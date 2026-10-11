@@ -37,7 +37,9 @@ Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](
 - **Tools are pure functions** — `@function_tool`, typed I/O, side effects only through injected deps
 
 ### Error handling
-- Custom hierarchy: `SentinelError` → `ToolError`, `MemoryError`, `AgentError`, `EvalError`
+- Custom hierarchy in `src/sentinel/exceptions.py`: `SentinelError` → `ToolError`,
+  `SentinelMemoryError`, `AgentError`, `EvalError` (never `MemoryError` — that is the builtin)
+- Driver/library errors are wrapped at the owning boundary (`raise SentinelMemoryError(...) from exc`)
 - Tools never raise raw exceptions — catch and return structured error responses
 - `structlog` context binding for `incident_id` correlation across all logs
 - Retry with exponential backoff for LLM API calls (3 attempts, 1s/2s/4s)
