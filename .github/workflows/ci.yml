@@ -44,8 +44,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate branch name
+        # Passed through env, never inlined: a branch name is attacker-controlled text.
+        env:
+          BRANCH: ${{ github.head_ref }}
         run: |
-          BRANCH="${{ github.head_ref }}"
           # `dev/` is the Phase-2 implementation prefix: one branch per phase,
           # e.g. dev/backend-phase-1-data-layer -> release-phase-2.
           PATTERN="^(dev|feat|fix|refactor|ci|docs|test|chore|planning|ai|hotfix)/[a-z0-9._-]+$"
@@ -172,9 +174,11 @@ jobs:
           TESTS="${{ needs.unit-tests.result }}"
           PASS=true
 
-          echo "setup=$SETUP" >> "$GITHUB_OUTPUT"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "tests=$TESTS" >> "$GITHUB_OUTPUT"
+          {
+            echo "setup=$SETUP"
+            echo "branch=$BRANCH"
+            echo "tests=$TESTS"
+          } >> "$GITHUB_OUTPUT"
 
           if [[ "$SETUP" != "success" ]]; then PASS=false; fi
           if [[ "$BRANCH" != "success" ]]; then PASS=false; fi
