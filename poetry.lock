@@ -297,7 +297,7 @@ version = "0.32.0"
 description = "An asyncio PostgreSQL driver"
 optional = false
 python-versions = ">=3.9.0"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "asyncpg-0.32.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:fd5adfb01cea16908d617af55b00a84c9e581964b77d4301c29fd735bb7850c3"},
     {file = "asyncpg-0.32.0-cp310-cp310-macosx_11_0_x86_64.whl", hash = "sha256:23638de661ac9a7975278a4fafb1f4c8613e7aae04562675f604dd20ec10e8d8"},
@@ -385,22 +385,6 @@ files = [
 
 [package.extras]
 gssauth = ["gssapi ; platform_system != \"Windows\"", "sspilib ; platform_system == \"Windows\""]
-
-[[package]]
-name = "asyncpg-stubs"
-version = "0.32.0"
-description = "asyncpg stubs"
-optional = false
-python-versions = "<4.0,>=3.9"
-groups = ["dev"]
-files = [
-    {file = "asyncpg_stubs-0.32.0-py3-none-any.whl", hash = "sha256:a7fb5e07caeb5c4e8c53306525190cc48b64a09fba19d4b7db0d95baa19691ea"},
-    {file = "asyncpg_stubs-0.32.0.tar.gz", hash = "sha256:0c6644e41e2756b49ba0ce95eba289450e3a3a6ee54cc4faf20d218705734630"},
-]
-
-[package.dependencies]
-asyncpg = ">=0.32,<0.33"
-typing-extensions = ">=4.16.0,<5.0.0"
 
 [[package]]
 name = "attrs"
@@ -5781,4 +5765,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "a56f56b904ddfa510f58594e7a5d67ee87ef8c6361a9771244078cc8cbb4c2f8"
+content-hash = "620de63b36b47939008db90fcd2e22e1ce95e720fd1ebb59ac0dfe9bad8e76e6"

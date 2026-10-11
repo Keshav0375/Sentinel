@@ -15,17 +15,20 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
-import asyncpg
+# asyncpg ships no type stubs and only partial inline annotations. Pyright runs against
+# the runtime package alone, locally and in CI (no asyncpg-stubs), so the few untyped
+# calls are pinned to declared types here rather than leaking Unknown to callers.
+import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from pgvector.asyncpg import register_vector
 
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra.logging import get_logger
 
 if TYPE_CHECKING:
-    from asyncpg.pool import PoolConnectionProxy
+    from asyncpg.pool import PoolConnectionProxy  # pyright: ignore[reportMissingTypeStubs]
 
     from sentinel.config import Settings
 
@@ -110,7 +113,7 @@ async def create_pool(
             unreachable server, auth failure, missing ``vector`` extension).
     """
     try:
-        pool = await asyncpg.create_pool(
+        pool: asyncpg.Pool = await asyncpg.create_pool(  # pyright: ignore[reportUnknownMemberType]
             dsn,
             min_size=min_size,
             max_size=max_size,
@@ -203,7 +206,7 @@ def get_pool() -> asyncpg.Pool:
 @asynccontextmanager
 async def acquire(
     pool: asyncpg.Pool | None = None, *, timeout: float | None = None
-) -> AsyncGenerator[PoolConnectionProxy[asyncpg.Record]]:
+) -> AsyncGenerator[PoolConnectionProxy]:
     """Borrow a connection; it goes back to the pool when the block exits.
 
     Uses the process-wide pool unless *pool* is given (tests, explicit injection).
@@ -219,7 +222,10 @@ async def acquire(
     """
     target = pool if pool is not None else get_pool()
     try:
-        conn = await target.acquire(timeout=timeout)
+        conn = cast(
+            "PoolConnectionProxy",
+            await target.acquire(timeout=timeout),  # pyright: ignore[reportUnknownMemberType]
+        )
     except _DRIVER_ERRORS as exc:
         logger.error("db_acquire_failed", error=_err(exc))
         raise SentinelMemoryError(f"could not acquire a database connection: {_err(exc)}") from exc
@@ -229,7 +235,7 @@ async def acquire(
         raise SentinelMemoryError(f"database operation failed: {_err(exc)}") from exc
     finally:
         try:
-            await target.release(conn)
+            await target.release(conn)  # pyright: ignore[reportUnknownMemberType]
         except _DRIVER_ERRORS as exc:
             # asyncpg terminates a connection it cannot reset, so nothing leaks;
             # surfacing this would mask the block's own outcome.
