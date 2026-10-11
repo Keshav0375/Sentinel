@@ -9,9 +9,10 @@ description = "Autonomous DevOps incident response agent"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "openai-agents[litellm]>=0.0.14",
+    "litellm>=1.105.0",
     "openai>=1.0.0",
     "google-genai>=1.0.0",
-    "fastapi>=0.110.0",
+    "fastapi>=0.143.0",
     "uvicorn[standard]>=0.29.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.14.2",
