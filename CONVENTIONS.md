@@ -93,6 +93,7 @@ result = await Runner.run(orchestrator, input="<alert payload>")
 ```bash
 poetry run sentinel serve            # run the app (Poetry)
 uvicorn sentinel.main:app --reload   # run the app (direct)
+poetry run alembic upgrade head      # create/upgrade the Postgres schema (reads DATABASE_URL)
 pytest -xvs                          # run tests
 ruff check src/ tests/               # lint
 pyright src/                         # type check

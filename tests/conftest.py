@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from pathlib import Path
 
-import asyncpg
 import pytest
+from alembic import command
+from alembic.config import Config
 
 from sentinel.infra.database import is_postgres_dsn
 
@@ -19,32 +20,43 @@ from sentinel.infra.database import is_postgres_dsn
 # Without it they skip with a reason; everything else runs as before.
 
 _DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+_ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
 
 def _postgres_dsn() -> str | None:
     return _DATABASE_URL if is_postgres_dsn(_DATABASE_URL) else None
 
 
-async def _create_vector_extension(dsn: str) -> None:
-    conn = await asyncpg.connect(dsn)
-    try:
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    finally:
-        await conn.close()
+def make_alembic_config(dsn: str) -> Config:
+    """Alembic config for the repo's migrations, pointed at *dsn*.
+
+    Leaves pytest's logging alone (``configure_logger``) and passes the DSN through
+    ``attributes`` so the environment's DATABASE_URL never leaks into the target.
+    """
+    cfg = Config(str(_ALEMBIC_INI))
+    cfg.attributes["database_url"] = dsn
+    cfg.attributes["configure_logger"] = False
+    return cfg
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _pgvector_extension() -> Iterator[None]:
-    """Ensure the ``vector`` extension exists when a Postgres DATABASE_URL is set.
+def _migrated_schema() -> Iterator[None]:
+    """Run ``alembic upgrade head`` on the test database when DATABASE_URL is Postgres.
 
-    Every pooled connection registers the pgvector codec, which needs the extension —
-    including the app lifespan exercised by tests/test_api. Stands in for alembic
-    migration 001 until it lands; a no-op without a Postgres DSN.
+    Every pooled connection registers the pgvector codec (needs the extension), and the
+    app lifespan exercised by tests/test_api runs against the real §5.3 schema. A no-op
+    without a Postgres DSN.
     """
     dsn = _postgres_dsn()
     if dsn is not None:
-        asyncio.run(_create_vector_extension(dsn))
+        command.upgrade(make_alembic_config(dsn), "head")
     yield
+
+
+@pytest.fixture
+def alembic_config() -> Callable[[str], Config]:
+    """Factory: an alembic :class:`Config` targeting the given DSN."""
+    return make_alembic_config
 
 
 @pytest.fixture

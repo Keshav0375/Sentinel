@@ -52,6 +52,10 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 
+[tool.ruff.lint.isort]
+# The repo-root alembic/ migrations dir would otherwise make `alembic` look first-party.
+known-third-party = ["alembic"]
+
 [tool.pyright]
 pythonVersion = "3.12"
 include = ["src"]
