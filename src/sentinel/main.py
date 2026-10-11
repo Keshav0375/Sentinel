@@ -243,8 +243,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("seed_skipped", reason="data package not on Python path")
 
     # Phase-2 Postgres pool — runs beside SQLite until db.py is retired (§13.5).
-    await init_pool_from_settings(settings)
+    # Opened inside the try: a failure anywhere later in startup still closes it, so a
+    # failed startup leaves no open connections and no stale module-level pool.
+    try:
+        await init_pool_from_settings(settings)
+        _wire_app(app, settings)
+        logger.info("sentinel_ready")
+        yield
+    finally:
+        await close_pool()
+        logger.info("sentinel_shutdown")
 
+
+def _wire_app(app: FastAPI, settings: Settings) -> None:
+    """Build the memory clients, SDK defaults, tracing and routers, and mount them."""
     # ── Memory clients ────────────────────────────────────────────────────────
     embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
     semantic_memory = SemanticMemory(settings.sentinel_db_path)
@@ -293,13 +305,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.include_router(make_eval_report_router())
     app.include_router(make_config_router(runtime_config))
     app.include_router(make_trajectories_router(trajectories_dir))
-
-    logger.info("sentinel_ready")
-    try:
-        yield
-    finally:
-        await close_pool()
-        logger.info("sentinel_shutdown")
 
 
 def create_app() -> FastAPI:

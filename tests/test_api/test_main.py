@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncpg
 import pytest
 from fastapi import FastAPI
 
+from sentinel import main
 from sentinel.config import Settings
+from sentinel.infra import database
 from sentinel.main import create_app, make_pipeline_fn
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
@@ -74,6 +78,61 @@ def test_module_level_app_is_fastapi() -> None:
     from sentinel.main import app
 
     assert isinstance(app, FastAPI)
+
+
+# ── lifespan: the Postgres pool never outlives a failed startup ──────────────
+
+
+@pytest.fixture
+def lifespan_env(pg_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point the real lifespan at the test database and a throwaway SQLite file.
+
+    Global side effects of a full startup (SDK default client, trace processors) are
+    stubbed so they cannot leak into other tests.
+    """
+    monkeypatch.setenv("DATABASE_URL", pg_dsn)
+    monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
+    monkeypatch.setenv("SENTINEL_DB_POOL_MIN", "1")
+    monkeypatch.setenv("SENTINEL_DB_POOL_MAX", "2")
+    monkeypatch.setattr(main, "apply_sdk_defaults", MagicMock())
+    monkeypatch.setattr(main, "add_trace_processor", MagicMock())
+    return pg_dsn
+
+
+async def test_lifespan_startup_failure_closes_pool(
+    lifespan_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[asyncpg.Pool | None] = []
+    real_init = main.init_pool_from_settings
+
+    async def _spy_init(settings: Settings) -> asyncpg.Pool | None:
+        pool = await real_init(settings)
+        opened.append(pool)
+        return pool
+
+    monkeypatch.setattr(main, "init_pool_from_settings", _spy_init)
+    failing = MagicMock()
+    failing.from_model_name.side_effect = RuntimeError("model load failed")
+    monkeypatch.setattr(main, "EmbeddingClient", failing)
+
+    # Startup fails after the pool is open.
+    with pytest.raises(RuntimeError, match="model load failed"):
+        async with main.lifespan(FastAPI()):
+            pytest.fail("startup should not have completed")
+
+    assert len(opened) == 1 and opened[0] is not None
+    assert opened[0].is_closing()
+    assert database._pool is None  # pyright: ignore[reportPrivateUsage]
+
+    # The same process can start again: a fresh pool, usable, closed at shutdown.
+    monkeypatch.setattr(main, "EmbeddingClient", MagicMock())
+    async with main.lifespan(FastAPI()):
+        pool = database.get_pool()
+        assert pool is not opened[0]
+        async with database.acquire() as conn:
+            assert await conn.fetchval("SELECT 1") == 1
+    assert pool.is_closing()
+    assert database._pool is None  # pyright: ignore[reportPrivateUsage]
 
 
 # ── make_pipeline_fn ──────────────────────────────────────────────────────────
