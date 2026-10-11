@@ -48,6 +48,15 @@ _DRIVER_ERRORS: tuple[type[BaseException], ...] = (
     TimeoutError,
 )
 
+# Errors from parsing the DSN or validating connection arguments. Their text can quote
+# the DSN — asyncpg reports a password containing "@" as "invalid literal for int():
+# '<password tail>@host'" — so only their type name is ever reported or logged, and they
+# are never chained (a traceback would print them).
+_CONFIG_ERRORS: tuple[type[BaseException], ...] = (
+    ValueError,
+    asyncpg.ClientConfigurationError,
+)
+
 # Errors raised *inside* an acquire() block that belong to the database. Narrower than
 # _DRIVER_ERRORS so a caller's own OSError/TimeoutError is not mislabelled.
 _QUERY_ERRORS: tuple[type[BaseException], ...] = (
@@ -73,7 +82,12 @@ class _ConnectSetupError(Exception):
 
 
 def _err(exc: BaseException) -> str:
-    """Exception text that is never blank — TimeoutError() has an empty str()."""
+    """Exception text that is never blank — TimeoutError() has an empty str().
+
+    DSN-parsing and configuration errors report their type and a fixed message only.
+    """
+    if isinstance(exc, _CONFIG_ERRORS):
+        return f"{type(exc).__name__}: invalid DSN or connection parameters"
     return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
@@ -83,9 +97,21 @@ def is_postgres_dsn(url: str) -> bool:
 
 
 def _describe(dsn: str) -> dict[str, Any]:
-    """Loggable DSN parts — host and database only, never credentials."""
-    parts = urlsplit(dsn)
-    return {"db_host": parts.hostname, "db_port": parts.port, "db_name": parts.path.lstrip("/")}
+    """Loggable DSN parts — host and database only, never credentials.
+
+    A DSN that does not split cleanly (a bad port, an ``@`` or ``/`` left in the path
+    because the password holds a reserved character) is not described at all: its
+    pieces could be fragments of the password.
+    """
+    try:
+        parts = urlsplit(dsn)
+        port = parts.port
+    except ValueError:
+        return {"db_dsn": "unparseable"}
+    name = parts.path.lstrip("/")
+    if "@" in name or "/" in name:
+        return {"db_dsn": "unparseable"}
+    return {"db_host": parts.hostname, "db_port": port, "db_name": name}
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
@@ -152,6 +178,10 @@ async def create_pool(
             unreachable server, auth failure, a failing *password* callable,
             missing ``vector`` extension).
     """
+    if min_size < 0 or max_size < 1 or min_size > max_size:
+        raise SentinelMemoryError(
+            f"invalid database pool bounds: min_size={min_size}, max_size={max_size}"
+        )
     try:
         pool: asyncpg.Pool = await asyncpg.create_pool(  # pyright: ignore[reportUnknownMemberType]
             dsn,
@@ -163,8 +193,10 @@ async def create_pool(
     except _ConnectSetupError as exc:
         logger.error("db_pool_create_failed", error=str(exc), **_describe(dsn))
         raise SentinelMemoryError(f"could not create database pool: {exc}") from exc.__cause__
-    except (*_DRIVER_ERRORS, ValueError) as exc:
-        # ValueError: invalid bounds.
+    except _CONFIG_ERRORS as exc:
+        logger.error("db_pool_create_failed", error=_err(exc), **_describe(dsn))
+        raise SentinelMemoryError(f"could not create database pool: {_err(exc)}") from None
+    except _DRIVER_ERRORS as exc:
         logger.error("db_pool_create_failed", error=_err(exc), **_describe(dsn))
         raise SentinelMemoryError(f"could not create database pool: {_err(exc)}") from exc
     logger.info("db_pool_created", min_size=min_size, max_size=max_size, **_describe(dsn))
@@ -275,6 +307,9 @@ async def acquire(
         raise SentinelMemoryError(f"could not acquire a database connection: {exc}") from (
             exc.__cause__
         )
+    except _CONFIG_ERRORS as exc:
+        logger.error("db_acquire_failed", error=_err(exc))
+        raise SentinelMemoryError(f"could not acquire a database connection: {_err(exc)}") from None
     except _DRIVER_ERRORS as exc:
         logger.error("db_acquire_failed", error=_err(exc))
         raise SentinelMemoryError(f"could not acquire a database connection: {_err(exc)}") from exc

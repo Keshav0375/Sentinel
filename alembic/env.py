@@ -79,7 +79,17 @@ async def run_async_migrations() -> None:
     dsn = _database_url()
 
     async def _connect() -> asyncpg.Connection:
-        return await asyncpg.connect(dsn)
+        try:
+            return await asyncpg.connect(dsn)
+        except (ValueError, asyncpg.ClientConfigurationError) as exc:
+            # Their text can quote the DSN, password included: type name only, unchained.
+            raise CommandError(
+                f"DATABASE_URL could not be used ({type(exc).__name__}): "
+                "invalid DSN or connection parameters"
+            ) from None
+        except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError) as exc:
+            detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            raise CommandError(f"could not connect to the database: {detail}") from exc
 
     engine = create_async_engine(
         "postgresql+asyncpg://", async_creator=_connect, poolclass=pool.NullPool

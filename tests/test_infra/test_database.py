@@ -7,6 +7,7 @@ and skip with a reason when DATABASE_URL is not set.
 from __future__ import annotations
 
 import asyncio
+import traceback
 import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -350,6 +351,53 @@ async def test_unreachable_server_wrapped(pg_dsn: str) -> None:
     with pytest.raises(SentinelMemoryError) as excinfo:
         await create_pool(dead, min_size=1, max_size=1)
     assert isinstance(excinfo.value.__cause__, OSError)
+
+
+# ── DSN text never reaches errors, logs or tracebacks ─────────────────────────
+
+_SECRET = "S3cretTail"
+
+# Each password holds a reserved character, so the DSN does not split where a reader
+# expects: asyncpg's own error then quotes the password tail ("invalid literal for
+# int(): 'S3cretTail@localhost:1'"), and urlsplit's .port raises on it.
+_LEAKY_DSNS = [
+    f"postgresql://user:pa@ss:{_SECRET}@localhost:1/db",
+    f"postgresql://user:{_SECRET}@localhost:notaport/db",
+    f"postgresql://user:pa/ss{_SECRET}@localhost:1/db",
+]
+
+
+def _assert_no_secret(exc: BaseException, captured: str) -> None:
+    assert _SECRET not in str(exc)
+    assert _SECRET not in "".join(traceback.format_exception(exc))
+    assert _SECRET not in captured
+
+
+@pytest.mark.parametrize("dsn", _LEAKY_DSNS)
+async def test_unparseable_dsn_never_leaks_from_create_pool(
+    dsn: str, capfd: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    with pytest.raises(SentinelMemoryError, match="could not create database pool") as excinfo:
+        await create_pool(dsn, min_size=1, max_size=1)
+    out, err = capfd.readouterr()
+    assert "db_pool_create_failed" in out + err  # the failure is logged…
+    _assert_no_secret(excinfo.value, out + err + caplog.text)  # …without the password
+
+
+async def test_unparseable_dsn_never_leaks_from_lazy_acquire(
+    capfd: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """min_size=0 defers DSN parsing to the first acquire()."""
+    p = await create_pool(_LEAKY_DSNS[0], min_size=0, max_size=1)
+    try:
+        with pytest.raises(SentinelMemoryError, match="could not acquire") as excinfo:
+            async with acquire(p):
+                pytest.fail("acquire should have failed")
+    finally:
+        await p.close()
+    out, err = capfd.readouterr()
+    assert "db_acquire_failed" in out + err
+    _assert_no_secret(excinfo.value, out + err + caplog.text)
 
 
 async def test_invalid_bounds_wrapped(pg_dsn: str) -> None:

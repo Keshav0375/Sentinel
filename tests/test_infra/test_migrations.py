@@ -18,6 +18,7 @@ import asyncio
 import importlib.util
 import json
 import re
+import traceback
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -834,6 +835,34 @@ def test_missing_database_url_is_a_clear_error(alembic_config: Callable[..., Con
 def test_non_postgres_database_url_rejected(alembic_config: Callable[..., Config]) -> None:
     with pytest.raises(CommandError, match="not a postgres"):
         command.upgrade(alembic_config("sqlite:///./data/sentinel.db"), "head")
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql://user:pa@ss:S3cretTail@localhost:1/db",
+        "postgresql://user:S3cretTail@localhost:notaport/db",
+    ],
+)
+def test_unparseable_database_url_never_leaks(
+    dsn: str,
+    alembic_config: Callable[..., Config],
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """asyncpg's parse error quotes the password tail; env.py reports the type only."""
+    with pytest.raises(CommandError, match=r"DATABASE_URL could not be used \(ValueError\)") as exc:
+        command.upgrade(alembic_config(dsn), "head")
+    out, err = capfd.readouterr()
+    assert "S3cretTail" not in str(exc.value)
+    assert "S3cretTail" not in "".join(traceback.format_exception(exc.value))
+    assert "S3cretTail" not in out + err + caplog.text
+
+
+def test_unreachable_database_is_a_command_error(alembic_config: Callable[..., Config]) -> None:
+    with pytest.raises(CommandError, match="could not connect to the database: ") as exc:
+        command.upgrade(alembic_config("postgresql://user:pw@127.0.0.1:1/db"), "head")
+    assert isinstance(exc.value.__cause__, OSError)
 
 
 def test_offline_sql_contains_schema_and_guarded_grant(
