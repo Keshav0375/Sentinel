@@ -7,7 +7,9 @@ and skip with a reason when DATABASE_URL is not set.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Callable
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -249,6 +251,78 @@ async def test_password_callable_is_used(pg_dsn: str) -> None:
     finally:
         await p.close()
     assert calls == 2  # once per connection
+
+
+async def test_sync_password_callable_is_used(pg_dsn: str) -> None:
+    """A plain (sync) callable works too — asyncpg accepts both."""
+    bare_dsn, secret = _without_password(pg_dsn)
+    calls: list[int] = []
+
+    def token() -> str:
+        calls.append(1)
+        return secret
+
+    p = await create_pool(bare_dsn, min_size=1, max_size=1, password=token)
+    try:
+        async with acquire(p) as conn:
+            assert await conn.fetchval("SELECT 1") == 1
+    finally:
+        await p.close()
+    assert len(calls) == 1
+
+
+class _TokenError(Exception):
+    """Stands in for an Entra token failure (azure-identity's own exception types)."""
+
+
+def _raising_provider(kind: str) -> Callable[[], Any]:
+    if kind == "sync":
+
+        def sync_token() -> str:
+            raise _TokenError("token endpoint unreachable")
+
+        return sync_token
+
+    async def async_token() -> str:
+        raise _TokenError("token endpoint unreachable")
+
+    return async_token
+
+
+@pytest.mark.parametrize("kind", ["sync", "async"])
+async def test_password_callable_error_wrapped_in_create_pool(pg_dsn: str, kind: str) -> None:
+    bare_dsn, _ = _without_password(pg_dsn)
+    with pytest.raises(SentinelMemoryError, match=r"password provider failed \(_TokenError\)"):
+        await create_pool(bare_dsn, min_size=1, max_size=1, password=_raising_provider(kind))
+
+
+@pytest.mark.parametrize("kind", ["sync", "async"])
+async def test_password_callable_error_wrapped_on_lazy_acquire(pg_dsn: str, kind: str) -> None:
+    """min_size=0: no connection at creation, so the provider first runs inside acquire()."""
+    bare_dsn, _ = _without_password(pg_dsn)
+    p = await create_pool(bare_dsn, min_size=0, max_size=1, password=_raising_provider(kind))
+    try:
+        with pytest.raises(SentinelMemoryError, match="password provider failed") as excinfo:
+            async with acquire(p):
+                pytest.fail("acquire should have failed")
+        assert isinstance(excinfo.value.__cause__, _TokenError)
+    finally:
+        await p.close()
+
+
+async def test_missing_vector_extension_is_a_clear_error(pg_dsn: str) -> None:
+    name = f"sentinel_novec_{uuid.uuid4().hex[:12]}"
+    admin = await asyncpg.connect(pg_dsn)
+    try:
+        await admin.execute(f'CREATE DATABASE "{name}"')
+        try:
+            dsn = urlunsplit(urlsplit(pg_dsn)._replace(path=f"/{name}"))
+            with pytest.raises(SentinelMemoryError, match="vector extension is missing"):
+                await create_pool(dsn, min_size=1, max_size=1)
+        finally:
+            await admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    finally:
+        await admin.close()
 
 
 # ── Driver errors surface as SentinelMemoryError ──────────────────────────────

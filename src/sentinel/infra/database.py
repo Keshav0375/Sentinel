@@ -13,6 +13,7 @@ Driver failures never leave this module under their own names — they surface a
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
@@ -63,6 +64,14 @@ _CLOSE_TIMEOUT_S = 10.0
 _pool: asyncpg.Pool | None = None
 
 
+class _ConnectSetupError(Exception):
+    """Raised by this module's own connect hooks (password provider, codec setup).
+
+    asyncpg propagates it unchanged out of ``create_pool`` and ``acquire``; its message
+    is fixed text, safe to report, and the original error is its ``__cause__``.
+    """
+
+
 def _err(exc: BaseException) -> str:
     """Exception text that is never blank — TimeoutError() has an empty str()."""
     return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
@@ -84,7 +93,37 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
 
     Requires the ``vector`` extension to exist in the database (alembic migration 001).
     """
-    await register_vector(conn)
+    try:
+        await register_vector(conn)
+    except ValueError as exc:  # "unknown type: public.vector"
+        raise _ConnectSetupError(
+            "the vector extension is missing (run alembic upgrade head)"
+        ) from exc
+
+
+def _guarded_password(
+    password: PasswordProvider | None,
+) -> str | Callable[[], Awaitable[str]] | None:
+    """Wrap a password callable so whatever it raises surfaces as :class:`_ConnectSetupError`.
+
+    asyncpg invokes the callable on every new connection — eagerly in ``create_pool``
+    and lazily in ``acquire`` — and would otherwise let an arbitrary exception (an
+    Entra token failure, say) escape this module under its own name.
+    """
+    if password is None or isinstance(password, str):
+        return password
+    provider = password
+
+    async def _call() -> str:
+        try:
+            result = provider()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            raise _ConnectSetupError(f"password provider failed ({type(exc).__name__})") from exc
+        return result
+
+    return _call
 
 
 async def create_pool(
@@ -110,18 +149,22 @@ async def create_pool(
 
     Raises:
         SentinelMemoryError: the pool could not be created (bad DSN or bounds,
-            unreachable server, auth failure, missing ``vector`` extension).
+            unreachable server, auth failure, a failing *password* callable,
+            missing ``vector`` extension).
     """
     try:
         pool: asyncpg.Pool = await asyncpg.create_pool(  # pyright: ignore[reportUnknownMemberType]
             dsn,
             min_size=min_size,
             max_size=max_size,
-            password=password,
+            password=_guarded_password(password),
             init=_init_connection,
         )
+    except _ConnectSetupError as exc:
+        logger.error("db_pool_create_failed", error=str(exc), **_describe(dsn))
+        raise SentinelMemoryError(f"could not create database pool: {exc}") from exc.__cause__
     except (*_DRIVER_ERRORS, ValueError) as exc:
-        # ValueError: invalid bounds, or register_vector's "unknown type: public.vector".
+        # ValueError: invalid bounds.
         logger.error("db_pool_create_failed", error=_err(exc), **_describe(dsn))
         raise SentinelMemoryError(f"could not create database pool: {_err(exc)}") from exc
     logger.info("db_pool_created", min_size=min_size, max_size=max_size, **_describe(dsn))
@@ -217,14 +260,20 @@ async def acquire(
             row = await conn.fetchrow("SELECT ...")
 
     Raises:
-        SentinelMemoryError: no pool, acquire failed or timed out, or a database
-            error was raised inside the block.
+        SentinelMemoryError: no pool, acquire failed or timed out (a new connection's
+            *password* callable failing included), or a database error was raised
+            inside the block.
     """
     target = pool if pool is not None else get_pool()
     try:
         conn = cast(
             "PoolConnectionProxy",
             await target.acquire(timeout=timeout),  # pyright: ignore[reportUnknownMemberType]
+        )
+    except _ConnectSetupError as exc:
+        logger.error("db_acquire_failed", error=str(exc))
+        raise SentinelMemoryError(f"could not acquire a database connection: {exc}") from (
+            exc.__cause__
         )
     except _DRIVER_ERRORS as exc:
         logger.error("db_acquire_failed", error=_err(exc))
