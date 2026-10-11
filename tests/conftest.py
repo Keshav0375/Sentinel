@@ -28,9 +28,10 @@ from sentinel.memory.embeddings import EmbeddingClient
 #   docker run -d --name sentinel-pg-test -e POSTGRES_PASSWORD=test \
 #     -e POSTGRES_DB=sentinel -p 55432:5432 pgvector/pgvector:pg16
 #   TEST_DATABASE_URL=postgresql://postgres:test@localhost:55432/sentinel
-# Without it they skip with a reason.
+# Without it they skip with a reason — except in CI (CI=true), where they fail.
 
 _TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
+_IN_CI = os.environ.get("CI", "").strip().lower() == "true"
 _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
 
@@ -107,8 +108,15 @@ def seed_embedding_client() -> EmbeddingClient:
 
 @pytest.fixture
 def pg_dsn() -> str:
-    """The Postgres DSN under test (TEST_DATABASE_URL); skips the test when none is set."""
+    """The Postgres DSN under test (TEST_DATABASE_URL).
+
+    Skips the test when none is configured; in CI a missing test database is a failure,
+    so the database tests can never silently not run there.
+    """
     dsn = _postgres_dsn()
     if dsn is None:
-        pytest.skip("TEST_DATABASE_URL is not a postgres:// DSN — start pgvector/pgvector:pg16")
+        reason = "TEST_DATABASE_URL is not a postgres:// DSN — start pgvector/pgvector:pg16"
+        if _IN_CI:
+            pytest.fail(f"{reason} (CI=true: the database tests must run)", pytrace=False)
+        pytest.skip(reason)
     return dsn

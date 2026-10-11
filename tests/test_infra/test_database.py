@@ -1,7 +1,7 @@
 """Tests for sentinel.infra.database — the asyncpg + pgvector pool.
 
 Tests taking ``pg_dsn`` run against a real pgvector container (see tests/conftest.py)
-and skip with a reason when TEST_DATABASE_URL is not set .
+and skip with a reason when TEST_DATABASE_URL is not set (fail in CI).
 """
 
 from __future__ import annotations

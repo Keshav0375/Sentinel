@@ -52,7 +52,7 @@ Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](
   for `Settings`, unsets `DATABASE_URL` for the session and defaults `GROQ_API_KEY` to a dummy.
   A test that needs `DATABASE_URL` sets it itself (`monkeypatch.setenv`) to the test database.
 - Database tests use `TEST_DATABASE_URL` only — never `DATABASE_URL` — and create/drop throwaway
-  databases on that server. Without it they skip with a reason.
+  databases on that server. Without it they skip locally; with `CI=true` they fail.
 
 ## Agent System Prompt Rules
 
