@@ -1,28 +1,38 @@
-"""Tests for the alembic migrations — ``001_initial_schema`` (backend.md §5.3).
+"""Tests for the alembic migrations — ``001_initial_schema`` and ``002_seed_services``
+(backend.md §5.3).
 
 Tests taking ``fresh_db`` create a throwaway database on the pgvector container named by
 DATABASE_URL (see tests/conftest.py), so ``upgrade head`` is proven from empty, and drop
 it afterwards. They skip with a reason when DATABASE_URL is not set.
 
 Migrations run through ``alembic.command`` (sync; env.py owns its own event loop), so
-these tests are sync and query the database with ``asyncio.run``.
+these tests are sync and query the database with ``asyncio.run``. ``002`` embeds its row
+with the real sentence-transformers model, loaded once per session
+(``seed_embedding_client``); only the offline ``--sql`` test, which needs no database,
+injects a fake.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import re
 import uuid
 from collections.abc import Callable, Iterator
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
+import numpy as np
 import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.util import CommandError
+
+from sentinel.memory.embeddings import EmbeddingClient
 
 # ── Expected schema (§5.3, verbatim) ──────────────────────────────────────────
 # column → (format_type, NOT NULL, default expression or None), in declaration order.
@@ -126,6 +136,8 @@ VALUES
 
 _GHA_ROLE = "gha-app"
 
+_HEAD = "002"
+
 
 # ── Helpers / fixtures ────────────────────────────────────────────────────────
 
@@ -176,8 +188,12 @@ def fresh_db(pg_dsn: str) -> Iterator[str]:
 
 
 @pytest.fixture
-def cfg(fresh_db: str, alembic_config: Callable[[str], Config]) -> Config:
-    return alembic_config(fresh_db)
+def cfg(
+    fresh_db: str,
+    alembic_config: Callable[..., Config],
+    seed_embedding_client: EmbeddingClient,
+) -> Config:
+    return alembic_config(fresh_db, seed_embedding_client)
 
 
 def _drop_gha_role(dsn: str) -> None:
@@ -362,7 +378,7 @@ def test_upgrade_from_empty_creates_full_schema(fresh_db: str, cfg: Config) -> N
 
     command.upgrade(cfg, "head")
 
-    assert _current_revision(fresh_db) == "001"
+    assert _current_revision(fresh_db) == _HEAD
     _assert_full_schema(fresh_db)
 
 
@@ -379,7 +395,7 @@ def test_upgrade_creates_vector_extension(fresh_db: str, cfg: Config) -> None:
 def test_upgrade_head_is_idempotent(fresh_db: str, cfg: Config) -> None:
     command.upgrade(cfg, "head")
     command.upgrade(cfg, "head")
-    assert _current_revision(fresh_db) == "001"
+    assert _current_revision(fresh_db) == _HEAD
     _assert_full_schema(fresh_db)
 
 
@@ -448,9 +464,9 @@ def test_column_defaults_apply(fresh_db: str, cfg: Config) -> None:
 
 def test_services_name_is_unique(fresh_db: str, cfg: Config) -> None:
     command.upgrade(cfg, "head")
-    _execute(fresh_db, "INSERT INTO services (name) VALUES ('sentinel-watchtower')")
+    _execute(fresh_db, "INSERT INTO services (name) VALUES ('uniqueness-probe')")
     with pytest.raises(asyncpg.UniqueViolationError):
-        _execute(fresh_db, "INSERT INTO services (name) VALUES ('sentinel-watchtower')")
+        _execute(fresh_db, "INSERT INTO services (name) VALUES ('uniqueness-probe')")
 
 
 def test_deployments_incident_fk_enforced(fresh_db: str, cfg: Config) -> None:
@@ -535,33 +551,296 @@ def test_upgrade_without_gha_app_role_succeeds(
     _writer_insert(fresh_db, "failed")
 
 
+# ── 002_seed_services ─────────────────────────────────────────────────────────
+
+_SEED_MIGRATION = (
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "002_seed_services.py"
+)
+
+_SEED_NAME = "sentinel-watchtower"
+
+_SYMPTOM = "sentinel-watchtower health check failing after deploy, rollback"
+
+# Test-only decoys (never seeded): unrelated services the symptom must not rank above.
+_DECOYS = {
+    "payments-api": "payments-api\nteam: billing\ntier: critical\n\nCard authorization and "
+    "refunds. On a rising decline rate, inspect the card-network webhook queue.",
+    "search-indexer": "search-indexer\nteam: discovery\ntier: best-effort\n\nRebuilds the "
+    "product search index nightly. On indexing lag, restart the queue consumer.",
+}
+
+
+class _ConstantModel:
+    """A stand-in sentence-transformers model: every text embeds to ``[value] * 384``."""
+
+    def __init__(self, value: float) -> None:
+        self._value = value
+
+    def encode(self, texts: list[str], **_: Any) -> list[np.ndarray]:
+        return [np.full(384, self._value, dtype=np.float32) for _ in texts]
+
+
+def _seed_module() -> ModuleType:
+    """The 002 migration module, for its seed constants (its file name is not importable)."""
+    spec = importlib.util.spec_from_file_location("seed_services_002", _SEED_MIGRATION)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _embed(client: EmbeddingClient, text: str) -> list[float]:
+    return asyncio.run(client.embed(text))
+
+
+def _vector_literal(vector: list[float]) -> str:
+    return "[" + ",".join(repr(float(x)) for x in vector) + "]"
+
+
+def _services(dsn: str) -> list[dict[str, Any]]:
+    """Every services row, ordered by name; JSONB and vector columns decoded."""
+
+    async def _do(conn: asyncpg.Connection) -> list[asyncpg.Record]:
+        return await conn.fetch(
+            "SELECT id, name, team, tier, dependencies, runbook, metadata, "
+            "embedding::text AS embedding, vector_dims(embedding) AS dims "
+            "FROM services ORDER BY name"
+        )
+
+    rows = []
+    for r in _run(_do, dsn):
+        row = dict(r)
+        for col in ("dependencies", "metadata", "embedding"):
+            row[col] = None if row[col] is None else json.loads(row[col])
+        rows.append(row)
+    return rows
+
+
+def _insert_service(dsn: str, name: str, embedding: list[float] | None = None) -> None:
+    async def _do(conn: asyncpg.Connection) -> None:
+        await conn.execute(
+            "INSERT INTO services (name, team, tier, dependencies, runbook, metadata, embedding) "
+            "VALUES ($1, 'other', 'critical', '[\"db\"]', 'old runbook', '{}', "
+            "CAST($2::text AS vector))",
+            name,
+            None if embedding is None else _vector_literal(embedding),
+        )
+
+    _run(_do, dsn)
+
+
+def _ivfflat_ranking(dsn: str, query: list[float], *, probes: int | None = None) -> list[str]:
+    """Service names nearest *query* by cosine, read through ``idx_services_embedding``.
+
+    Sequential scans are disabled so the planner must use the IVFFlat index even on a
+    tiny table; the plan is asserted, not assumed. *probes* None keeps pgvector's default.
+    """
+
+    async def _do(conn: asyncpg.Connection) -> list[str]:
+        sql = "SELECT name FROM services ORDER BY embedding <=> CAST($1::text AS vector) LIMIT 10"
+        literal = _vector_literal(query)
+        async with conn.transaction():
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            if probes is not None:
+                await conn.execute(f"SET LOCAL ivfflat.probes = {probes}")
+            plan = "\n".join(r[0] for r in await conn.fetch(f"EXPLAIN {sql}", literal))
+            assert "Index Scan using idx_services_embedding on services" in plan, plan
+            return [r["name"] for r in await conn.fetch(sql, literal)]
+
+    return _run(_do, dsn)
+
+
+def _assert_seed_row(
+    row: dict[str, Any], seed: ModuleType, expected_embedding: list[float]
+) -> None:
+    assert row["name"] == _SEED_NAME
+    assert row["team"] == "sentinel"
+    assert row["tier"] == "standard"
+    assert row["dependencies"] == []
+    assert row["metadata"] == {
+        "repo": "Keshav0375/Sentinel-deployment",
+        "platform": "azure-app-service-f1",
+    }
+    assert row["runbook"] == seed.RUNBOOK
+    assert row["dims"] == 384
+    assert row["embedding"] == pytest.approx(expected_embedding, abs=1e-6)
+
+
+def test_seed_inserts_exactly_sentinel_watchtower(
+    fresh_db: str, cfg: Config, seed_embedding_client: EmbeddingClient
+) -> None:
+    command.upgrade(cfg, "head")
+
+    rows = _services(fresh_db)
+    assert [r["name"] for r in rows] == [_SEED_NAME]
+    seed = _seed_module()
+    _assert_seed_row(rows[0], seed, _embed(seed_embedding_client, seed.embedding_text()))
+
+
+def test_seed_runbook_is_the_revert_pr_rollback(fresh_db: str, cfg: Config) -> None:
+    command.upgrade(cfg, "head")
+
+    runbook = _services(fresh_db)[0]["runbook"]
+    assert runbook.startswith("# sentinel-watchtower")
+    for phrase in (
+        "`deployments` table",
+        "`pr-<N>-<sha>`",
+        "Open a revert PR on Keshav0375/Sentinel-deployment",
+        "A human reviews and merges the revert PR",
+        "redeploys the previous code",
+        "`Sentinel-deployment/scenarios/README.md`",
+    ):
+        assert phrase in runbook, phrase
+    # The steps run in rollback order: culprit → revert PR → human merge.
+    assert (
+        runbook.index("culprit merge")
+        < runbook.index("Open a revert PR")
+        < runbook.index("A human reviews")
+    )
+
+
+def test_seed_embedding_covers_name_team_tier_runbook(
+    fresh_db: str, cfg: Config, seed_embedding_client: EmbeddingClient
+) -> None:
+    command.upgrade(cfg, "head")
+    seed = _seed_module()
+
+    text = seed.embedding_text()
+    for part in (_SEED_NAME, "team: sentinel", "tier: standard", seed.RUNBOOK):
+        assert part in text
+    row = _services(fresh_db)[0]
+    assert row["embedding"] is not None
+    assert row["dims"] == 384
+    # Not the embedding of the runbook (or name) alone.
+    assert row["embedding"] != pytest.approx(_embed(seed_embedding_client, seed.RUNBOOK), abs=1e-6)
+    assert row["embedding"] != pytest.approx(_embed(seed_embedding_client, _SEED_NAME), abs=1e-6)
+
+
+def test_symptom_query_ranks_watchtower_first_via_ivfflat(
+    fresh_db: str, cfg: Config, seed_embedding_client: EmbeddingClient
+) -> None:
+    command.upgrade(cfg, "head")
+    symptom = _embed(seed_embedding_client, _SYMPTOM)
+
+    # Seeded table, default probes: the index rebuilt by 002 finds the row.
+    assert _ivfflat_ranking(fresh_db, symptom) == [_SEED_NAME]
+
+    for name, text in _DECOYS.items():
+        _insert_service(fresh_db, name, _embed(seed_embedding_client, text))
+    # Every list probed, so the ranking is the exact cosine order — still via the index.
+    ranking = _ivfflat_ranking(fresh_db, symptom, probes=5)
+    assert ranking[0] == _SEED_NAME
+    assert sorted(ranking) == sorted([_SEED_NAME, *_DECOYS])
+
+
+def test_seed_upsert_overwrites_existing_row(
+    fresh_db: str, cfg: Config, seed_embedding_client: EmbeddingClient
+) -> None:
+    """ON CONFLICT (name) DO UPDATE: a pre-existing row is replaced, never duplicated."""
+    command.upgrade(cfg, "001")
+    _insert_service(fresh_db, _SEED_NAME)  # stale values, no embedding
+
+    command.upgrade(cfg, "head")
+
+    rows = _services(fresh_db)
+    assert len(rows) == 1
+    seed = _seed_module()
+    _assert_seed_row(rows[0], seed, _embed(seed_embedding_client, seed.embedding_text()))
+
+
+def test_seed_rerun_is_idempotent(fresh_db: str, cfg: Config) -> None:
+    command.upgrade(cfg, "head")
+    before = _services(fresh_db)
+
+    # Run 002 again over its own row (stamp back, then upgrade).
+    command.stamp(cfg, "001")
+    command.upgrade(cfg, "head")
+
+    assert _current_revision(fresh_db) == _HEAD
+    after = _services(fresh_db)
+    assert after == before  # same single row, same id, same values
+    _assert_full_schema(fresh_db)
+
+
+def test_downgrade_to_001_removes_only_the_seed(fresh_db: str, cfg: Config) -> None:
+    command.upgrade(cfg, "head")
+    _insert_service(fresh_db, "other-service")
+    _execute(
+        fresh_db,
+        """
+        WITH i AS (
+            INSERT INTO incidents (alert_id, severity, service)
+            VALUES ('a-1', 'P1', 'sentinel-watchtower') RETURNING id
+        )
+        INSERT INTO deployments (service, commit_sha, deploy_status, incident_id)
+        SELECT 'sentinel-watchtower', 'abc1234', 'failed', id FROM i
+        """,
+    )
+
+    command.downgrade(cfg, "001")
+
+    assert _current_revision(fresh_db) == "001"
+    assert [r["name"] for r in _services(fresh_db)] == ["other-service"]
+
+    async def _counts(conn: asyncpg.Connection) -> tuple[int, int]:
+        return (
+            await conn.fetchval("SELECT count(*) FROM incidents"),
+            await conn.fetchval("SELECT count(*) FROM deployments"),
+        )
+
+    assert _run(_counts, fresh_db) == (1, 1)
+    _assert_full_schema(fresh_db)
+
+
+def test_seed_round_trip(fresh_db: str, cfg: Config) -> None:
+    """base → head → 001 → head → base → head: the same row every time it is present."""
+    command.upgrade(cfg, "head")
+    (first,) = _services(fresh_db)
+
+    command.downgrade(cfg, "001")
+    assert _services(fresh_db) == []
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "base")
+    _assert_empty_schema(fresh_db)
+    command.upgrade(cfg, "head")
+
+    assert _current_revision(fresh_db) == _HEAD
+    _assert_full_schema(fresh_db)
+    (last,) = _services(fresh_db)
+    assert {k: v for k, v in last.items() if k != "id"} == {
+        k: v for k, v in first.items() if k != "id"
+    }
+
+
 # ── env.py ────────────────────────────────────────────────────────────────────
 
 
 def test_postgres_scheme_alias_accepted(
-    fresh_db: str, alembic_config: Callable[[str], Config]
+    fresh_db: str,
+    alembic_config: Callable[..., Config],
+    seed_embedding_client: EmbeddingClient,
 ) -> None:
     """``postgres://`` works too — env.py hands the DSN to asyncpg unchanged."""
     dsn = urlunsplit(urlsplit(fresh_db)._replace(scheme="postgres"))
-    command.upgrade(alembic_config(dsn), "head")
-    assert _current_revision(fresh_db) == "001"
+    command.upgrade(alembic_config(dsn, seed_embedding_client), "head")
+    assert _current_revision(fresh_db) == _HEAD
 
 
-def test_missing_database_url_is_a_clear_error(alembic_config: Callable[[str], Config]) -> None:
+def test_missing_database_url_is_a_clear_error(alembic_config: Callable[..., Config]) -> None:
     with pytest.raises(CommandError, match="DATABASE_URL is not set"):
         command.upgrade(alembic_config(""), "head")
 
 
-def test_non_postgres_database_url_rejected(alembic_config: Callable[[str], Config]) -> None:
+def test_non_postgres_database_url_rejected(alembic_config: Callable[..., Config]) -> None:
     with pytest.raises(CommandError, match="not a postgres"):
         command.upgrade(alembic_config("sqlite:///./data/sentinel.db"), "head")
 
 
 def test_offline_sql_contains_schema_and_guarded_grant(
-    alembic_config: Callable[[str], Config], capsys: pytest.CaptureFixture[str]
+    alembic_config: Callable[..., Config], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``alembic upgrade head --sql`` renders the DDL without a database."""
-    command.upgrade(alembic_config(""), "head", sql=True)
+    """``alembic upgrade head --sql`` renders the DDL and the seed without a database."""
+    command.upgrade(alembic_config("", EmbeddingClient(_ConstantModel(0.25))), "head", sql=True)
     out = capsys.readouterr().out
 
     assert "CREATE EXTENSION IF NOT EXISTS vector" in out
@@ -571,3 +850,13 @@ def test_offline_sql_contains_schema_and_guarded_grant(
         assert f"CREATE INDEX {name} ON" in out
     assert "IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gha-app') THEN" in out
     assert 'GRANT INSERT, SELECT ON deployments TO "gha-app";' in out
+
+    # 002: the seed upsert with its embedding rendered as a literal, then the reindex.
+    assert (
+        "INSERT INTO services (name, team, tier, dependencies, runbook, metadata, embedding)" in out
+    )
+    assert "VALUES ('sentinel-watchtower', 'sentinel', 'standard', CAST('[]' AS jsonb)" in out
+    assert "CAST('[" + ",".join(["0.25"] * 384) + "]' AS vector)" in out
+    assert "ON CONFLICT (name) DO UPDATE SET" in out
+    assert out.index("ON CONFLICT (name)") < out.index("REINDEX INDEX idx_services_embedding;")
+    assert "UPDATE alembic_version SET version_num='002'" in out
