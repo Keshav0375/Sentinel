@@ -1,9 +1,38 @@
-"""Embedding client — wraps sentence-transformers for local inference."""
+"""Embedding client — wraps sentence-transformers for local inference.
+
+This module only produces embeddings. Similarity is computed in PostgreSQL with the
+pgvector ``<=>`` (cosine distance) operator by the memory modules — never in Python.
+
+Vectors are returned exactly as sentence-transformers gives them. The default
+all-MiniLM-L6-v2 ends in a ``Normalize`` layer, so its 384-float vectors are already
+unit length; nothing here re-normalizes, and pgvector's cosine distance does not need it.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
+
+# One model instance per name per process: loading costs seconds and ~90 MB, and every
+# caller (app lifespan, eval runner, migration 002) asks for the same configured model.
+_MODEL_CACHE: dict[str, Any] = {}
+_MODEL_LOCK = threading.Lock()
+
+
+def _load_model(model_name: str) -> Any:
+    """Return the process-wide SentenceTransformer for *model_name*, loading it once.
+
+    The lock is held across the load so concurrent first calls never load it twice.
+    """
+    with _MODEL_LOCK:
+        model: Any = _MODEL_CACHE.get(model_name)
+        if model is None:
+            from sentence_transformers import SentenceTransformer  # lazy — avoids torch at import
+
+            model = SentenceTransformer(model_name)
+            _MODEL_CACHE[model_name] = model
+        return model
 
 
 class EmbeddingClient:
@@ -15,7 +44,8 @@ class EmbeddingClient:
 
     Cache semantics: each unique text string is embedded at most once per
     EmbeddingClient lifetime. Calling embed("same text") twice costs one
-    model inference call, not two.
+    model inference call, not two. The model itself is shared process-wide
+    (see from_model_name); the text cache is per client.
     """
 
     def __init__(self, model: Any) -> None:
@@ -24,19 +54,18 @@ class EmbeddingClient:
 
     @classmethod
     def from_model_name(cls, model_name: str = "all-MiniLM-L6-v2") -> EmbeddingClient:
-        """Load a SentenceTransformer model by name and return a ready client.
+        """Return a ready client backed by the process-wide model for *model_name*.
 
-        The model is loaded synchronously on first call (may download from
-        HuggingFace Hub on first use). Subsequent calls to embed/embed_batch
-        are async.
+        The model is loaded synchronously on the first call for a given name
+        (may download from HuggingFace Hub on first use) and reused by every
+        later call, thread-safely. Calls to embed/embed_batch are async.
 
         Args:
-            model_name: sentence-transformers model identifier. Defaults to
+            model_name: sentence-transformers model identifier. Callers pass
+                ``settings.sentinel_embedding_model``; the default is
                 all-MiniLM-L6-v2 (384 dims, ~22MB, zero cost, runs on CPU).
         """
-        from sentence_transformers import SentenceTransformer  # lazy — avoids torch at import time
-
-        return cls(SentenceTransformer(model_name))
+        return cls(_load_model(model_name))
 
     async def embed(self, text: str) -> list[float]:
         """Embed a single text string.
@@ -74,6 +103,8 @@ class EmbeddingClient:
         if uncached:
             # Deduplicate while preserving first-seen order
             unique_uncached = list(dict.fromkeys(uncached))
+            # encode() is sync and CPU-bound: run it off the event loop. to_thread (not
+            # run_in_executor) copies contextvars, so the active trace span survives.
             raw: Any = await asyncio.to_thread(
                 lambda: self._model.encode(
                     unique_uncached,
