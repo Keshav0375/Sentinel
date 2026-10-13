@@ -10,7 +10,10 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.12"
-  PIP_EXTRA_INDEX_URL: "https://download.pytorch.org/whl/cpu"
+  # Poetry exports poetry.lock for scripts/install_locked.py; pinned so the export is
+  # reproducible.
+  POETRY_VERSION: "2.5.1"
+  POETRY_PLUGIN_EXPORT_VERSION: "1.10.1"
 
 jobs:
   # ── 1. Setup: Python + deps + cache ─────────────────────────────────────
@@ -28,14 +31,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
+          key: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('poetry.lock') }}
           restore-keys: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
 
-      - name: Install project dependencies (CPU-only torch)
-        run: pip install -e .
+      - name: Install Poetry + export plugin
+        run: |
+          pipx install "poetry==${POETRY_VERSION}"
+          pipx inject poetry "poetry-plugin-export==${POETRY_PLUGIN_EXPORT_VERSION}"
 
-      - name: Install dev tools
-        run: pip install pytest pytest-asyncio pyright ruff
+      # Exactly the poetry.lock set (main + dev: pytest, ruff, pyright, pip-audit), hash
+      # checked, with the CPU-only torch wheel. `pip install .` would re-resolve the
+      # pyproject ranges and test a different dependency set from the one audited.
+      - name: Install locked dependencies (CPU-only torch)
+        run: python scripts/install_locked.py
 
   # ── 2. Branch Convention ─────────────────────────────────────────────────
   branch-convention:
@@ -44,8 +52,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate branch name
+        # Passed through env, never inlined: a branch name is attacker-controlled text.
+        env:
+          BRANCH: ${{ github.head_ref }}
         run: |
-          BRANCH="${{ github.head_ref }}"
           # `dev/` is the Phase-2 implementation prefix: one branch per phase,
           # e.g. dev/backend-phase-1-data-layer -> release-phase-2.
           PATTERN="^(dev|feat|fix|refactor|ci|docs|test|chore|planning|ai|hotfix)/[a-z0-9._-]+$"
@@ -71,6 +81,22 @@ jobs:
     name: Unit Tests
     needs: [branch-convention]
     runs-on: ubuntu-latest
+    # The database tests (pool, migrations, seed, lifespan) run against a real pgvector
+    # server. tests/conftest.py fails them, rather than skipping, when CI=true and
+    # TEST_DATABASE_URL is missing.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: sentinel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sentinel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,11 +110,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
+          key: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('poetry.lock') }}
           restore-keys: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
 
-      - name: Install dependencies (CPU-only torch)
-        run: pip install -e . && pip install pytest pytest-asyncio pyright ruff
+      - name: Install Poetry + export plugin
+        run: |
+          pipx install "poetry==${POETRY_VERSION}"
+          pipx inject poetry "poetry-plugin-export==${POETRY_PLUGIN_EXPORT_VERSION}"
+
+      # Exactly the poetry.lock set (main + dev: pytest, ruff, pyright, pip-audit), hash
+      # checked, with the CPU-only torch wheel. `pip install .` would re-resolve the
+      # pyproject ranges and test a different dependency set from the one audited.
+      - name: Install locked dependencies (CPU-only torch)
+        run: python scripts/install_locked.py
 
       - name: Secret leak check
         run: |
@@ -151,11 +185,19 @@ jobs:
       - name: Pyright type check
         run: pyright src/
 
+      # 002_seed_services embeds its row with the real all-MiniLM-L6-v2 model.
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-MiniLM-L6-v2
+
       - name: Pytest
         run: python -m pytest tests/ -x --tb=short -q
         env:
           GROQ_API_KEY: "fake-key-for-ci"
           SENTINEL_DB_PATH: ":memory:"
+          TEST_DATABASE_URL: "postgresql://postgres:test@localhost:5432/sentinel"
 
   # ── 4. Summary: collect results and post table ───────────────────────────
   summary:
@@ -172,9 +214,11 @@ jobs:
           TESTS="${{ needs.unit-tests.result }}"
           PASS=true
 
-          echo "setup=$SETUP" >> "$GITHUB_OUTPUT"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "tests=$TESTS" >> "$GITHUB_OUTPUT"
+          {
+            echo "setup=$SETUP"
+            echo "branch=$BRANCH"
+            echo "tests=$TESTS"
+          } >> "$GITHUB_OUTPUT"
 
           if [[ "$SETUP" != "success" ]]; then PASS=false; fi
           if [[ "$BRANCH" != "success" ]]; then PASS=false; fi

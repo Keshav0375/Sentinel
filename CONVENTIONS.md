@@ -37,7 +37,9 @@ Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](
 - **Tools are pure functions** — `@function_tool`, typed I/O, side effects only through injected deps
 
 ### Error handling
-- Custom hierarchy: `SentinelError` → `ToolError`, `MemoryError`, `AgentError`, `EvalError`
+- Custom hierarchy in `src/sentinel/exceptions.py`: `SentinelError` → `ToolError`,
+  `SentinelMemoryError`, `AgentError`, `EvalError` (never `MemoryError` — that is the builtin)
+- Driver/library errors are wrapped at the owning boundary (`raise SentinelMemoryError(...) from exc`)
 - Tools never raise raw exceptions — catch and return structured error responses
 - `structlog` context binding for `incident_id` correlation across all logs
 - Retry with exponential backoff for LLM API calls (3 attempts, 1s/2s/4s)
@@ -46,6 +48,11 @@ Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](
 - Every tool gets a unit test with mock data; every agent an integration test with a canned scenario
 - Fixtures in `conftest.py`: mock memory, mock scenario, test config
 - Test file mirrors source: `src/sentinel/tools/log_fetcher.py` → `tests/test_tools/test_log_fetcher.py`
+- The suite never depends on the caller's shell or `.env`: `tests/conftest.py` disables `.env`
+  for `Settings`, unsets `DATABASE_URL` for the session and defaults `GROQ_API_KEY` to a dummy.
+  A test that needs `DATABASE_URL` sets it itself (`monkeypatch.setenv`) to the test database.
+- Database tests use `TEST_DATABASE_URL` only — never `DATABASE_URL` — and create/drop throwaway
+  databases on that server. Without it they skip locally; with `CI=true` they fail.
 
 ## Agent System Prompt Rules
 
@@ -91,7 +98,9 @@ result = await Runner.run(orchestrator, input="<alert payload>")
 ```bash
 poetry run sentinel serve            # run the app (Poetry)
 uvicorn sentinel.main:app --reload   # run the app (direct)
-pytest -xvs                          # run tests
+poetry run alembic upgrade head      # create/upgrade the Postgres schema (reads DATABASE_URL)
+pytest -xvs                          # run tests (DB tests skip without TEST_DATABASE_URL)
+TEST_DATABASE_URL=postgresql://postgres:test@localhost:55432/sentinel pytest  # + DB tests
 ruff check src/ tests/               # lint
 pyright src/                         # type check
 python scripts/run_eval.py           # run eval suite
