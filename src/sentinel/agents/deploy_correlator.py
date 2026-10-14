@@ -29,6 +29,9 @@ def build_deploy_correlator_agent(
     them by suspicion (timing proximity, change scope, module overlap with
     log evidence), and returns a ``DeployCorrelation`` identifying the most
     likely culprit deploy along with a confidence score and evidence summary.
+    Each deploy in it is a ``CorrelatedDeploy`` copied from a ``get_deploy_details``
+    record, so ``suspect_deploy`` carries the real pr_number, commit_sha and
+    deployed_at that ``prepare_rollback_spec`` takes as ``target_deploy``.
 
     Args:
         pool: asyncpg pool holding the ``deployments`` table. ``None`` (no

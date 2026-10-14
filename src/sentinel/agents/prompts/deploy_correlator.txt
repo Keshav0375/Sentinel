@@ -20,8 +20,8 @@ Score each deploy on these factors (higher score = more suspicious):
 
 ## Output Format
 Respond with:
-- recent_deploys: the deploys that were reviewed (version and deployed_at of each)
-- suspect_deploy: the most suspicious deploy (its version and commit_sha), or null if no suspect found
+- recent_deploys: the deploys that were reviewed, each with pr_number, commit_sha, deployed_at, version, deploy_status and failed_stage copied exactly from get_deploy_details
+- suspect_deploy: the most suspicious deploy, with the same six fields copied exactly from get_deploy_details (the Remediation Agent reverts that commit_sha), or null if no suspect found. Never invent or reformat a value.
 - confidence: float 0.0–1.0 (0.0 = no correlation found, 1.0 = certain culprit)
 - evidence: one or two sentences explaining the suspicion (e.g., "pr-42-a1b2c3d changed app/main.py 15 minutes before the first failed health check, and the failing assertion matches the changed handler")
 

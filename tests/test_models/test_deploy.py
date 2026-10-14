@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from sentinel.models.deploy import Deploy, DeployCorrelation
+from sentinel.models.deploy import CorrelatedDeploy, Deploy, DeployCorrelation
 
 
 def _deploy(deploy_id: str = "deploy-abc123", ts: datetime | None = None) -> Deploy:
@@ -73,6 +73,17 @@ def test_deploy_json_round_trip() -> None:
 # ── DeployCorrelation ─────────────────────────────────────────────────────────
 
 
+def _correlated(sha: str = "a1b2c3d", ts: datetime | None = None) -> CorrelatedDeploy:
+    return CorrelatedDeploy(
+        pr_number=42,
+        commit_sha=sha,
+        deployed_at=ts or datetime(2026, 5, 10, 2, 45, 0, tzinfo=UTC),
+        version=f"pr-42-{sha}",
+        deploy_status="succeeded",
+        failed_stage="none",
+    )
+
+
 def test_deploy_correlation_defaults() -> None:
     corr = DeployCorrelation(evidence="no recent deploys found")
     assert corr.recent_deploys == []
@@ -81,22 +92,22 @@ def test_deploy_correlation_defaults() -> None:
 
 
 def test_deploy_correlation_with_suspect() -> None:
-    culprit = _deploy("deploy-abc123")
-    distractor = _deploy("deploy-xyz789", datetime(2026, 5, 9, 14, 0, 0, tzinfo=UTC))
+    culprit = _correlated("a1b2c3d")
+    distractor = _correlated("f7e8d9a", datetime(2026, 5, 9, 14, 0, 0, tzinfo=UTC))
     corr = DeployCorrelation(
         recent_deploys=[culprit, distractor],
         suspect_deploy=culprit,
         confidence=0.92,
-        evidence="deploy-abc123 landed 15 min before error spike; 3 files changed in auth path",
+        evidence="pr-42 landed 15 min before the first failed check",
     )
     assert len(corr.recent_deploys) == 2
     assert corr.suspect_deploy is not None
-    assert corr.suspect_deploy.id == "deploy-abc123"
+    assert corr.suspect_deploy.commit_sha == "a1b2c3d"
     assert corr.confidence == 0.92
 
 
 def test_deploy_correlation_json_round_trip() -> None:
-    culprit = _deploy()
+    culprit = _correlated()
     corr = DeployCorrelation(
         recent_deploys=[culprit],
         suspect_deploy=culprit,
@@ -104,6 +115,20 @@ def test_deploy_correlation_json_round_trip() -> None:
         evidence="timing correlation",
     )
     reloaded = DeployCorrelation.model_validate_json(corr.model_dump_json())
-    assert reloaded.confidence == corr.confidence
-    assert reloaded.suspect_deploy is not None
-    assert reloaded.suspect_deploy.id == culprit.id
+    assert reloaded == corr
+
+
+def test_correlated_deploy_requires_the_record_fields() -> None:
+    with pytest.raises(ValidationError):
+        CorrelatedDeploy.model_validate({"commit_sha": "a1b2c3d"})
+
+
+def test_correlated_deploy_direct_push_has_no_pr() -> None:
+    deploy = CorrelatedDeploy(
+        pr_number=None,
+        commit_sha="a1b2c3d",
+        deployed_at=datetime(2026, 5, 10, tzinfo=UTC),
+        deploy_status="succeeded",
+    )
+    assert deploy.pr_number is None
+    assert deploy.version is None
