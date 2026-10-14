@@ -5,6 +5,7 @@ Public API:
     call_with_fallback(agent, input, *, role, settings, run_kwargs) → RoutedRun
     role_capabilities(role, settings) → ProviderCapabilities
     judge_model_string(primary) → str
+    FakeModel / FakeScript / fake_script() — SENTINEL_FAKE_LLM=1, no network
     apply_sdk_defaults(settings) → None
     coerce_output(text, schema) → BaseModel | None
 """
@@ -15,6 +16,7 @@ from agents import set_default_openai_api, set_tracing_export_api_key
 
 from sentinel.config import Settings
 from sentinel.providers.capabilities import ProviderCapabilities, get_capabilities
+from sentinel.providers.fake import FakeModel, FakeScript, FakeToolCall, FakeTurn, fake_script
 from sentinel.providers.output_coercion import coerce_output
 from sentinel.providers.router import (
     Role,
@@ -26,12 +28,17 @@ from sentinel.providers.router import (
 )
 
 __all__ = [
+    "FakeModel",
+    "FakeScript",
+    "FakeToolCall",
+    "FakeTurn",
     "ProviderCapabilities",
     "Role",
     "RoutedRun",
     "apply_sdk_defaults",
     "call_with_fallback",
     "coerce_output",
+    "fake_script",
     "get_capabilities",
     "judge_model_string",
     "model_for",

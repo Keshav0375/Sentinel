@@ -30,6 +30,7 @@ from sentinel.config import Settings
 from sentinel.exceptions import ProviderUnavailableError
 from sentinel.infra.logging import get_logger
 from sentinel.providers.capabilities import ProviderCapabilities, common_capabilities
+from sentinel.providers.fake import FakeModel
 
 __all__ = [
     "JUDGE_MODELS",
@@ -178,10 +179,14 @@ def provider_credential(provider: Provider, settings: Settings) -> str | None:
 def build_model(model_string: str, settings: Settings) -> Model:
     """A ready-to-run :class:`Model` for *model_string*, with its credential read now.
 
+    With ``sentinel_fake_llm`` it is a :class:`FakeModel` (no key, no network).
+
     Raises:
         ProviderUnavailableError: The provider's credential is not configured.
     """
     provider = provider_of(model_string)
+    if settings.sentinel_fake_llm:
+        return FakeModel(model_string)
     credential = provider_credential(provider, settings)
     if credential is None:
         raise ProviderUnavailableError(
@@ -199,7 +204,8 @@ def model_name(model: Model) -> str:
 def model_for(role: Role, settings: Settings) -> tuple[Model, Model | None]:
     """``(primary_model, fallback_model)`` for *role*, credentials read now.
 
-    A missing primary-provider credential makes the fallback the model to run (logged as
+    With ``sentinel_fake_llm`` both are :class:`FakeModel` and no key is read. A missing
+    primary-provider credential makes the fallback the model to run (logged as
     ``primary_provider_failed``), with no second fallback.
 
     Raises:
@@ -207,6 +213,8 @@ def model_for(role: Role, settings: Settings) -> tuple[Model, Model | None]:
             turns this into an escalation.
     """
     primary_s, fallback_s = role_models(role, settings.sentinel_primary_provider)
+    if settings.sentinel_fake_llm:
+        return build_model(primary_s, settings), build_model(fallback_s, settings)
     primary_ok = provider_credential(provider_of(primary_s), settings) is not None
     fallback_ok = provider_credential(provider_of(fallback_s), settings) is not None
 

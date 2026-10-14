@@ -71,7 +71,8 @@ class Settings(BaseSettings):
     # Hard cap on tool calls per incident to prevent runaway loops (§4.6).
     sentinel_max_tool_calls: int = 20
 
-    # Stub provider calls in tests/CI (§9.1); /ready skips the live-provider check.
+    # Every role runs on the deterministic, no-network FakeModel (providers/fake.py) in
+    # tests/CI (§9.1); no LLM key is read. /ready skips the live-provider check.
     sentinel_fake_llm: bool = False
 
     # ── LangFuse (§6) ─────────────────────────────────────────────────────────

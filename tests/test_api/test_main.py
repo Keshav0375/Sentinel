@@ -290,3 +290,17 @@ async def test_pipeline_fn_escalates_when_provider_key_missing() -> None:
 
     run.assert_not_awaited()
     assert stm.get_context("inc-test0001")["status"] == IncidentStatus.ESCALATED
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runs_end_to_end_on_the_fake_llm_without_keys() -> None:
+    """SENTINEL_FAKE_LLM=1: the real agents run on FakeModel, no key, no provider."""
+    stm = _populated_stm()
+
+    def fake_settings() -> Settings:
+        return Settings(_env_file=None, sentinel_fake_llm=True)  # type: ignore[call-arg]
+
+    fn = make_pipeline_fn(fake_settings, MagicMock(), MagicMock(), stm)
+    await fn("inc-test0001", _make_alert())
+
+    assert stm.get_context("inc-test0001")["status"] == IncidentStatus.RESOLVED
