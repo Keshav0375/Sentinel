@@ -8,22 +8,26 @@ class for code that does raise.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 ToolFailureKind = Literal["not_found", "unavailable", "upstream_error", "bad_input"]
 
 # How a recalled agent conclusion is labelled wherever the agent can read it.
 UNVERIFIED_LABEL = "model-generated, unverified"
+RECALL_NOTE = (
+    f"root_cause and resolution are {UNVERIFIED_LABEL}: hypotheses from an earlier "
+    "agent run, not facts"
+)
 
 
 class ToolFailure(BaseModel):
     """A tool call that could not produce its result.
 
-    ``kind`` tells the agent how to read the failure:
+    ``error`` (always true) tells a failure apart from a result in the JSON the model
+    reads. ``kind`` tells the agent how to read the failure:
 
     - ``not_found``: the thing asked about does not exist (an unknown service).
     - ``unavailable``: the backing store or a credential is missing or down — no finding
@@ -32,6 +36,9 @@ class ToolFailure(BaseModel):
     - ``bad_input``: the call's arguments were unusable.
     """
 
+    error: Literal[True] = Field(
+        default=True, description="Always true: marks the tool output as a failed call."
+    )
     tool: str = Field(description="LLM-visible name of the tool that failed.")
     kind: ToolFailureKind = Field(description="Failure class: how the agent should read it.")
     message: str = Field(description="What went wrong, for the agent and the logs.")
@@ -58,9 +65,9 @@ class SimilarIncident(BaseModel):
 
     ``root_cause`` and ``resolution`` were written by earlier agent runs and are
     model-generated, unverified: hypotheses to check, never ground truth (decision 2026-10-14,
-    memory provenance). ``model_generated`` says so in the data; the field descriptions
-    say so in the schema; and every string rendering (``str``/``repr`` — the SDK hands the
-    model ``str(result)``) labels the two fields.
+    memory provenance). ``model_generated`` says so in the data, the field descriptions
+    say so in the schema, and every serialised incident — the JSON the model reads —
+    starts with a ``_note`` saying so.
     """
 
     id: str = Field(description="Incident id (UUID).")
@@ -82,16 +89,10 @@ class SimilarIncident(BaseModel):
         description=f"Always true: root_cause and resolution are {UNVERIFIED_LABEL}.",
     )
 
-    def __repr_args__(self) -> Iterator[tuple[str | None, Any]]:
-        """Label the recalled conclusions in ``str()`` and ``repr()``."""
-        for name, value in super().__repr_args__():
-            if name in _RECALLED_FIELDS:
-                yield f"{name} ({UNVERIFIED_LABEL})", value
-            else:
-                yield name, value
-
-
-_RECALLED_FIELDS = frozenset({"root_cause", "resolution"})
+    @model_serializer(mode="wrap")
+    def _label_recall(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Put the unverified label first in every dump, JSON included."""
+        return {"_note": RECALL_NOTE, **handler(self)}
 
 
 # ── fetch_logs ────────────────────────────────────────────────────────────────

@@ -31,6 +31,7 @@ from sentinel.models.tools import (
     TargetDeploy,
     ToolFailure,
 )
+from sentinel.tools.output import tool_json
 
 _ROLLBACK_TOOL = "prepare_rollback_spec"
 _ESCALATION_TOOL = "format_escalation"
@@ -47,35 +48,36 @@ def make_remediation_tools() -> list[FunctionTool]:
     """
 
     @function_tool(strict_mode=False)
-    async def prepare_rollback_spec(request: RollbackSpecInput) -> RollbackSpec | ToolFailure:
+    async def prepare_rollback_spec(request: RollbackSpecInput) -> str:
         """Draft the rollback of one deploy: the spec the incident workflow turns into a revert PR.
 
         Output only — this opens no PR and changes nothing. GitHub Actions creates the
         revert PR from the spec (reverting target_deploy.commit_sha), and a human merges
         or closes it on GitHub. Use it when one deploy is the cause; target_deploy is
-        that deploy's record from get_deploy_details. A structured failure (kind
-        "bad_input") names the argument to fix: commit_sha must be 7-40 hex characters,
-        confidence between 0 and 1, and no text field may be empty.
+        that deploy's record from get_deploy_details. Returns the spec as JSON; a
+        failure ("error": true, kind "bad_input") names the argument to fix: commit_sha
+        must be 7-40 hex characters, confidence between 0 and 1, and no text field may
+        be empty.
 
         Args:
             request: The incident, root cause, evidence, confidence, justification and
                 the deploy to revert.
         """
-        return _prepare_rollback_spec(request)
+        return tool_json(_prepare_rollback_spec(request))
 
     @function_tool(strict_mode=False)
-    async def format_escalation(request: EscalationInput) -> EscalationContext | ToolFailure:
+    async def format_escalation(request: EscalationInput) -> str:
         """Package the incident for a human when no rollback is drafted.
 
         Output only — this notifies no one. Gives the hypothesis, the evidence found,
         the confidence, and what is still missing (what a human should check first).
-        A structured failure (kind "bad_input") names the argument to fix: the
-        hypothesis must not be empty and confidence must be between 0 and 1.
+        Returns JSON; a failure ("error": true, kind "bad_input") names the argument
+        to fix: the hypothesis must not be empty and confidence must be between 0 and 1.
 
         Args:
             request: Hypothesis, evidence items, confidence and missing items.
         """
-        return _format_escalation(request)
+        return tool_json(_format_escalation(request))
 
     return [prepare_rollback_spec, format_escalation]
 

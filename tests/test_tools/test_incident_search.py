@@ -22,8 +22,9 @@ from sentinel.exceptions import SentinelMemoryError
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.models.memory import EpisodicRecord, MemoryQueryResult
-from sentinel.models.tools import IncidentSearchInput, SimilarIncident, ToolFailure
+from sentinel.models.tools import RECALL_NOTE, IncidentSearchInput, SimilarIncident, ToolFailure
 from sentinel.tools.incident_search import _search_past_incidents, make_incident_search_tool
+from sentinel.tools.output import tool_json
 
 DIMS = 4
 _UNVERIFIED = "model-generated, unverified"
@@ -105,11 +106,16 @@ def _search(symptoms: str, k: int = 5) -> IncidentSearchInput:
     return IncidentSearchInput(symptom_text=symptoms, k=k)
 
 
-async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> Any:
-    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool."""
+async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> str:
+    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool.
+
+    Returns the text the model reads back — compact JSON, never a Python repr.
+    """
     raw = json.dumps(arguments)
     ctx = ToolContext(context=None, tool_name=tool.name, tool_call_id="call-1", tool_arguments=raw)
-    return await tool.on_invoke_tool(ctx, raw)
+    text = await tool.on_invoke_tool(ctx, raw)
+    assert isinstance(text, str), text
+    return text
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -214,23 +220,24 @@ def test_similar_incident_docstring_marks_unverified() -> None:
     assert _UNVERIFIED in " ".join((SimilarIncident.__doc__ or "").split())
 
 
-@pytest.mark.parametrize("render", [str, repr])
-def test_similar_incident_rendering_labels_recalled_fields(render: Any) -> None:
-    text = render(_similar(root_cause="pool leak", resolution="restart"))
-    assert f"root_cause ({_UNVERIFIED})='pool leak'" in text
-    assert f"resolution ({_UNVERIFIED})='restart'" in text
-    # No unlabelled root cause / resolution anywhere.
-    assert "root_cause=" not in text
-    assert "resolution=" not in text
-    assert "model_generated=True" in text
+def test_similar_incident_json_labels_recalled_fields() -> None:
+    """The JSON the model reads opens with the unverified label and keeps the flag."""
+    data = json.loads(tool_json(_similar(root_cause="pool leak", resolution="restart")))
+    assert next(iter(data)) == "_note"
+    assert _UNVERIFIED in data["_note"]
+    assert "root_cause" in data["_note"] and "resolution" in data["_note"]
+    assert (data["root_cause"], data["resolution"]) == ("pool leak", "restart")
+    assert data["model_generated"] is True
+    assert "resolution_type" not in data  # None fields are left out
 
 
-def test_similar_incident_list_rendering_labels_every_item() -> None:
-    """The SDK hands the model str(list): every recalled conclusion stays labelled."""
-    text = str([_similar(id="a", root_cause="leak #1"), _similar(id="b", root_cause="leak #2")])
-    assert f"root_cause ({_UNVERIFIED})='leak #1'" in text
-    assert f"root_cause ({_UNVERIFIED})='leak #2'" in text
-    assert text.count(f"resolution ({_UNVERIFIED})=") == 2
+def test_similar_incident_list_json_labels_every_item() -> None:
+    """Every recalled incident in the array carries its own label."""
+    text = tool_json([_similar(id="a", root_cause="leak #1"), _similar(id="b")])
+    items = json.loads(text)
+    assert [item["id"] for item in items] == ["a", "b"]
+    assert all(_UNVERIFIED in item["_note"] and item["model_generated"] for item in items)
+    assert text.count(_UNVERIFIED) == 2
 
 
 # ── _search_past_incidents — failures ────────────────────────────────────────
@@ -314,6 +321,7 @@ async def test_result_maps_every_field(seeded_mem: EpisodicMemory) -> None:
         "resolution": "resolution of inc-db",
         "resolution_type": "config_change",
         "model_generated": True,
+        "_note": RECALL_NOTE,
     }
     assert result[0].similarity == pytest.approx(1.0)
 
@@ -329,10 +337,12 @@ async def test_symptoms_are_stripped(seeded_mem: _InMemoryEpisodic) -> None:
 async def test_invoked_tool_returns_labelled_incidents(seeded_mem: EpisodicMemory) -> None:
     tool = make_incident_search_tool(seeded_mem)
     result = await _invoke(tool, {"request": {"symptom_text": "memory leak oom", "k": 2}})
-    assert isinstance(result, list)
-    assert len(result) == 2
-    assert result[0].id == "inc-mem"
-    assert f"root_cause ({_UNVERIFIED})='root cause of inc-mem'" in str(result)
+    items = json.loads(result)
+    assert isinstance(items, list) and len(items) == 2
+    assert items[0]["id"] == "inc-mem"
+    assert items[0]["root_cause"] == "root cause of inc-mem"
+    assert _UNVERIFIED in items[0]["_note"]
+    assert [SimilarIncident.model_validate(item).id for item in items] == ["inc-mem", "inc-db"]
 
 
 async def test_invoked_tool_uses_default_k(seeded_mem: _InMemoryEpisodic) -> None:

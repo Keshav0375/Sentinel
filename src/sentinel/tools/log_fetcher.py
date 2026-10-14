@@ -39,6 +39,7 @@ from sentinel.models.tools import (
     ToolFailure,
     ToolFailureKind,
 )
+from sentinel.tools.output import tool_json
 
 logger = get_logger("sentinel.tools.log_fetcher")
 
@@ -111,7 +112,7 @@ def make_log_fetcher_tool(
     """
 
     @function_tool(strict_mode=False)
-    async def fetch_logs(request: LogFetchInput) -> LogFetchResult | ToolFailure:
+    async def fetch_logs(request: LogFetchInput) -> str:
         """Fetch a service's Datadog evidence for the last window_minutes, newest first.
 
         The service sends no application logs. The evidence is (1) its Datadog
@@ -119,15 +120,16 @@ def make_log_fetcher_tool(
         the failure message, the response content type, a body snippet and what the
         test asserts — and (2) the CI pipeline's deploy.completed logs (version,
         deploy_status, failed_stage, PR number). An empty list for a source in
-        ``sources`` means nothing was recorded in the window. A structured failure means
-        Datadog could not be read (kind "unavailable": not configured; "upstream_error":
-        Datadog answered with an error) — no finding either way.
+        ``sources`` means nothing was recorded in the window. Returns JSON; a failure
+        carries "error": true and means Datadog could not be read (kind "unavailable":
+        not configured; "upstream_error": Datadog answered with an error) — no finding
+        either way.
 
         Args:
             request: The service, the window in minutes, and which sources to read.
         """
-        return await _fetch_logs(
-            settings, request, http_client=http_client, sleep=sleep, clock=clock
+        return tool_json(
+            await _fetch_logs(settings, request, http_client=http_client, sleep=sleep, clock=clock)
         )
 
     return fetch_logs

@@ -77,11 +77,16 @@ def _lookup(name: str) -> ServiceLookupInput:
     return ServiceLookupInput(service_name=name)
 
 
-async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> Any:
-    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool."""
+async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> str:
+    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool.
+
+    Returns the text the model reads back — compact JSON, never a Python repr.
+    """
     raw = json.dumps(arguments)
     ctx = ToolContext(context=None, tool_name=tool.name, tool_call_id="call-1", tool_arguments=raw)
-    return await tool.on_invoke_tool(ctx, raw)
+    text = await tool.on_invoke_tool(ctx, raw)
+    assert isinstance(text, str), text
+    return text
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -190,13 +195,15 @@ async def test_database_failure_reports_unavailable() -> None:
 async def test_invoked_tool_returns_the_record(mem: SemanticMemory) -> None:
     tool = make_service_lookup_tool(mem)
     result = await _invoke(tool, {"request": {"service_name": "api-gateway"}})
-    assert result == _GATEWAY
+    assert SemanticRecord.model_validate_json(result) == _GATEWAY
+    assert result == _GATEWAY.model_dump_json(exclude_none=True)
 
 
 async def test_invoked_tool_returns_failure_for_unknown_service(mem: SemanticMemory) -> None:
     tool = make_service_lookup_tool(mem)
     result = await _invoke(tool, {"request": {"service_name": "ghost"}})
-    assert isinstance(result, ToolFailure)
-    assert result.kind == "not_found"
-    # The SDK hands the model str(result): the failure kind must survive that.
-    assert "kind='not_found'" in str(result)
+    data = json.loads(result)
+    # The model reads this JSON: "error" marks it a failure, kind says how to read it.
+    assert data["error"] is True
+    assert (data["tool"], data["kind"]) == ("get_service_metadata", "not_found")
+    assert ToolFailure.model_validate(data).message == data["message"]

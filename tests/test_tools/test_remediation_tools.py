@@ -83,11 +83,23 @@ def _bad_input(result: object, tool: str) -> ToolFailure:
     return result
 
 
-async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> Any:
-    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool."""
+async def _invoke(
+    tool: FunctionTool, arguments: dict[str, Any]
+) -> RollbackSpec | EscalationContext | ToolFailure:
+    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool.
+
+    The model reads compact JSON back; it is decoded here into the typed result.
+    """
     raw = json.dumps(arguments)
     ctx = ToolContext(context=None, tool_name=tool.name, tool_call_id="call-1", tool_arguments=raw)
-    return await tool.on_invoke_tool(ctx, raw)
+    text = await tool.on_invoke_tool(ctx, raw)
+    assert isinstance(text, str), text
+    data = json.loads(text)
+    if data.get("error") is True:
+        return ToolFailure.model_validate(data)
+    if tool.name == "prepare_rollback_spec":
+        return RollbackSpec.model_validate(data)
+    return EscalationContext.model_validate(data)
 
 
 @pytest.fixture()
@@ -362,4 +374,5 @@ def test_module_imports_no_io_library() -> None:
         "datetime",
         "agents",
         "sentinel.models.tools",
+        "sentinel.tools.output",
     }

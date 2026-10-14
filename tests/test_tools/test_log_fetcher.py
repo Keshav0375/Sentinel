@@ -337,11 +337,16 @@ async def _fetch(
         )
 
 
-async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> Any:
-    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool."""
+async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> str:
+    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool.
+
+    Returns the text the model reads back — compact JSON, never a Python repr.
+    """
     raw = json.dumps(arguments)
     ctx = ToolContext(context=None, tool_name=tool.name, tool_call_id="call-1", tool_arguments=raw)
-    return await tool.on_invoke_tool(ctx, raw)
+    text = await tool.on_invoke_tool(ctx, raw)
+    assert isinstance(text, str), text
+    return text
 
 
 @pytest.fixture()
@@ -385,12 +390,12 @@ async def test_invoked_with_json_args_returns_the_typed_result(dd: FakeDatadog) 
             tool,
             {"request": {"service": SERVICE, "window_minutes": 30, "include": ["deploys"]}},
         )
-    assert isinstance(result, LogFetchResult)
+    assert "deploy.completed" in result
+    result = LogFetchResult.model_validate_json(result)
     assert result.sources == ["deploys"]
     assert result.window.start == NOW - timedelta(minutes=30)
     assert [e.version for e in result.deploy_logs] == ["pr-48-b1c2d3e", "pr-47-a3f9c2e"]
     assert dd.paths() == ["POST /api/v2/logs/events/search"]
-    assert "deploy.completed" in str(result)
 
 
 async def test_invoked_with_defaults_reads_both_sources(dd: FakeDatadog) -> None:
@@ -398,8 +403,8 @@ async def test_invoked_with_defaults_reads_both_sources(dd: FakeDatadog) -> None
         tool = make_log_fetcher_tool(
             _settings(), http_client=client, sleep=Sleeps(), clock=lambda: NOW
         )
-        result = await _invoke(tool, {"request": {"service": SERVICE}})
-    assert isinstance(result, LogFetchResult)
+        text = await _invoke(tool, {"request": {"service": SERVICE}})
+    result = LogFetchResult.model_validate_json(text)
     assert result.sources == ["synthetics", "deploys"]
     assert result.window.end - result.window.start == timedelta(minutes=60)
     assert len(result.synthetic_results) == 5

@@ -227,11 +227,16 @@ async def _details(
         )
 
 
-async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> Any:
-    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool."""
+async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> str:
+    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool.
+
+    Returns the text the model reads back — compact JSON, never a Python repr.
+    """
     raw = json.dumps(arguments)
     ctx = ToolContext(context=None, tool_name=tool.name, tool_call_id="call-1", tool_arguments=raw)
-    return await tool.on_invoke_tool(ctx, raw)
+    text = await tool.on_invoke_tool(ctx, raw)
+    assert isinstance(text, str), text
+    return text
 
 
 def _records(result: list[DeployRecord] | ToolFailure) -> list[DeployRecord]:
@@ -284,7 +289,9 @@ async def test_on_invoke_tool_with_json_args(pool: asyncpg.Pool, gh: FakeGitHub)
         result = await _invoke(
             tool, {"request": {"service": SERVICE, "window_hours": 2, "limit": 5}}
         )
-    records = _records(result)
+    items = json.loads(result)
+    assert "github_note" not in items[0]  # None fields are left out of the JSON
+    records = [DeployRecord.model_validate(item) for item in items]
     assert [r.version for r in records] == ["pr-48-b1c2d3e"]
     assert records[0].deploy_status == "failed"
     assert records[0].github is not None and records[0].github.title == "Change #48"
@@ -294,8 +301,9 @@ async def test_on_invoke_tool_defaults_without_a_pool() -> None:
     result = await _invoke(
         make_deploy_checker_tool(None, _settings()), {"request": {"service": SERVICE}}
     )
-    assert isinstance(result, ToolFailure)
-    assert result.kind == "unavailable"
+    data = json.loads(result)
+    assert data["error"] is True
+    assert (data["tool"], data["kind"]) == ("get_deploy_details", "unavailable")
 
 
 # ── Input bounds ──────────────────────────────────────────────────────────────

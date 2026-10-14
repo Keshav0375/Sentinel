@@ -9,6 +9,7 @@ from sentinel.infra.logging import get_logger
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.memory import SemanticRecord
 from sentinel.models.tools import ServiceLookupInput, ToolFailure
+from sentinel.tools.output import tool_json
 
 logger = get_logger("sentinel.tools.service_lookup")
 
@@ -26,19 +27,19 @@ def make_service_lookup_tool(memory: SemanticMemory) -> FunctionTool:
     """
 
     @function_tool(strict_mode=False)
-    async def get_service_metadata(request: ServiceLookupInput) -> SemanticRecord | ToolFailure:
+    async def get_service_metadata(request: ServiceLookupInput) -> str:
         """Get ownership, tier, on-call channel, dependencies, and runbook steps for a service.
 
         Use this before any analysis to understand the service topology, who
         owns the affected service, and what remediation runbook exists for it.
-        Returns a structured failure (kind "not_found") for a service that is not
-        in the service map, and (kind "unavailable") when memory cannot be read —
-        the latter is no finding about the service either way.
+        Returns JSON. A failure carries "error": true — kind "not_found" for a service
+        that is not in the service map, kind "unavailable" when memory cannot be read
+        (the latter is no finding about the service either way).
 
         Args:
             request: The service to look up, by exact name.
         """
-        return await _lookup_service(memory, request)
+        return tool_json(await _lookup_service(memory, request))
 
     return get_service_metadata
 

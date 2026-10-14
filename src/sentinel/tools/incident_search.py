@@ -8,6 +8,7 @@ from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra.logging import get_logger
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.models.tools import IncidentSearchInput, SimilarIncident, ToolFailure
+from sentinel.tools.output import tool_json
 
 logger = get_logger("sentinel.tools.incident_search")
 
@@ -29,22 +30,21 @@ def make_incident_search_tool(memory: EpisodicMemory) -> FunctionTool:
     """
 
     @function_tool(strict_mode=False)
-    async def search_past_incidents(
-        request: IncidentSearchInput,
-    ) -> list[SimilarIncident] | ToolFailure:
+    async def search_past_incidents(request: IncidentSearchInput) -> str:
         """Search past incidents by symptom similarity using vector embeddings.
 
-        Returns up to k past incidents, most similar first, each with its service,
-        creation time, root cause, resolution and similarity score. The root cause and
-        resolution were produced by earlier agent runs: they are model-generated,
-        unverified — treat them as hypotheses to check, not facts. An empty list means
-        no similar incident is on record; a structured failure (kind "unavailable")
-        means memory could not be searched, which is no finding either way.
+        Returns a JSON array of up to k past incidents, most similar first, each with
+        its service, creation time, root cause, resolution and similarity score. The
+        root cause and resolution were produced by earlier agent runs: they are
+        model-generated, unverified — treat them as hypotheses to check, not facts
+        (each incident's _note says so). An empty array means no similar incident is on
+        record; a failure ("error": true, kind "unavailable") means memory could not be
+        searched, which is no finding either way.
 
         Args:
             request: The current symptoms and how many past incidents to return.
         """
-        return await _search_past_incidents(memory, request)
+        return tool_json(await _search_past_incidents(memory, request))
 
     return search_past_incidents
 

@@ -9,10 +9,13 @@ are therefore injected at construction time via closure::
 
     def make_get_service_metadata(memory: SemanticMemory) -> FunctionTool:
         @function_tool
-        async def get_service_metadata(service_name: str) -> ServiceMetadata:
+        async def get_service_metadata(request: ServiceLookupInput) -> str:
             \"\"\"Get metadata for a named service from the service map.\"\"\"
-            return await memory.get_service(service_name)
+            return tool_json(await _lookup_service(memory, request))
         return get_service_metadata
+
+Every tool returns compact JSON via ``sentinel.tools.output.tool_json`` (the SDK
+would otherwise hand the model a Python repr); a failure carries ``"error": true``.
 
 The registry wires all tools together in ``build_tools``. Agents receive a
 pre-built list of ``FunctionTool`` objects — they never import tool modules

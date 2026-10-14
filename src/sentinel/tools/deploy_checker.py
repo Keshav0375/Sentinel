@@ -39,6 +39,7 @@ from sentinel.models.tools import (
     ToolFailure,
     ToolFailureKind,
 )
+from sentinel.tools.output import tool_json
 
 logger = get_logger("sentinel.tools.deploy_checker")
 
@@ -97,7 +98,7 @@ def make_deploy_checker_tool(
     """
 
     @function_tool(strict_mode=False)
-    async def get_deploy_details(request: DeployQuery) -> list[DeployRecord] | ToolFailure:
+    async def get_deploy_details(request: DeployQuery) -> str:
         """List what deployed to a service in the last window_hours, newest first.
 
         One entry per deploy attempt the CI pipeline recorded, failed ones included:
@@ -106,14 +107,16 @@ def make_deploy_checker_tool(
         changed, version ("pr-<n>-<sha>") and the GitHub Actions run id. When GitHub is
         configured the newest few deploys also carry their PR (title, link, merge time,
         author) in ``github``; otherwise ``github`` is null and ``github_note`` says
-        why. An empty list means nothing was deployed in the window. A structured
-        failure (kind "unavailable") means the deploy history could not be read — no
-        finding either way.
+        why. Returns a JSON array; an empty array means nothing was deployed in the
+        window. A failure ("error": true, kind "unavailable") means the deploy history
+        could not be read — no finding either way.
 
         Args:
             request: The service, the window in hours, and how many deploys to return.
         """
-        return await _get_deploy_details(pool, settings, request, http_client=http_client)
+        return tool_json(
+            await _get_deploy_details(pool, settings, request, http_client=http_client)
+        )
 
     return get_deploy_details
 
