@@ -36,9 +36,10 @@ from sentinel.agents.remediation import build_remediation_agent  # noqa: E402
 from sentinel.agents.triage import build_triage_agent  # noqa: E402
 from sentinel.config import get_settings  # noqa: E402
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario  # noqa: E402
+from sentinel.infra.database import close_pool, init_pool_from_settings  # noqa: E402
 from sentinel.infra.db import create_tables  # noqa: E402
 from sentinel.infra.logging import configure_logging  # noqa: E402
-from sentinel.infra.tracing import SentinelTracer  # noqa: E402
+from sentinel.infra.tracing import SentinelTracer, flush_traces  # noqa: E402
 from sentinel.memory.embeddings import EmbeddingClient  # noqa: E402
 from sentinel.memory.episodic import EpisodicMemory  # noqa: E402
 from sentinel.memory.semantic import SemanticMemory  # noqa: E402
@@ -150,111 +151,116 @@ async def run_scenario(
 
     # ── Memory clients ─────────────────────────────────────────────────────────
     embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
-    semantic_memory = SemanticMemory(resolved_db)
-    episodic_memory = EpisodicMemory(resolved_db, embedding_client)
-    short_term_memory = ShortTermMemory()
-    print(f"  [OK] embedding model: {settings.sentinel_embedding_model}")
-
-    # ── SDK defaults + provider layer ─────────────────────────────────────────
-    apply_sdk_defaults(settings)
-    print(f"  [OK] provider: {settings.sentinel_analysis_model.split('/')[0]}")
-
-    # ── Build agents with scenario injected ───────────────────────────────────
-    # Inject the scenario into log and deploy tools so they return
-    # synthetic data specific to this scenario rather than error messages.
-    triage_agent = build_triage_agent(
-        semantic_memory,
-        episodic_memory,
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    log_analyst_agent = build_log_analyst_agent(
-        semantic_memory,
-        scenario,  # synthetic logs from this scenario
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-    deploy_correlator_agent = build_deploy_correlator_agent(
-        scenario,  # synthetic deploys from this scenario
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    approval_fn = _auto_approval if auto_approve else None
-    remediation_agent = build_remediation_agent(
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-        approval_fn=approval_fn,
-    )
-    comms_agent = build_comms_agent(
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    orchestrator = build_orchestrator_agent(
-        triage_agent,
-        log_analyst_agent,
-        deploy_correlator_agent,
-        remediation_agent,
-        comms_agent,
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-
-    # Wire handoff-back so specialists return control to the orchestrator.
-    caps = get_capabilities(settings.sentinel_analysis_model)
-    back = handoff(orchestrator)
-    back.strict_json_schema = caps.strict_schemas
-    for specialist in [
-        triage_agent,
-        log_analyst_agent,
-        deploy_correlator_agent,
-        remediation_agent,
-        comms_agent,
-    ]:
-        specialist.handoffs = [back]
-
-    print("  [OK] agents built (scenario injected into log/deploy tools)")
-
-    # ── Incident setup ─────────────────────────────────────────────────────────
-    incident_id = f"smoke-{alert.alert_id[:8]}"
-    tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
-    add_trace_processor(tracer)
-    short_term_memory.create(incident_id, alert)
-    print(f"  [OK] incident: {incident_id}")
-
-    # ── Run pipeline ───────────────────────────────────────────────────────────
-    _print_header(f"Running pipeline  [{incident_id}]")
-    if auto_approve:
-        print("  HITL gates will be AUTO-APPROVED (--auto-approve flag).\n")
-    else:
-        print("  HITL approval prompts will appear when the Remediation Agent runs.")
-        print("  Type 'approve' or 'reject' and press Enter.\n")
-
-    input_text = (
-        f"New incident ID: {incident_id}\n"
-        f"Alert payload: {alert.model_dump_json()}"
-    )
-    start = datetime.now(UTC)
-
+    # Postgres pool for semantic and episodic memory; None without DATABASE_URL (memory
+    # unavailable).
+    # Opened inside try/finally: a failure while building the agents or running the
+    # pipeline still closes it (close_pool is a no-op when no pool was opened).
     try:
-        with agent_trace("incident_pipeline", metadata={"incident_id": incident_id}):
-            await Runner.run(
-                orchestrator,
-                input_text,
-                max_turns=settings.sentinel_max_tool_calls + 5,
-            )
-        elapsed = (datetime.now(UTC) - start).total_seconds()
-        print(f"\n  [OK] pipeline completed in {elapsed:.1f}s")
+        pool = await init_pool_from_settings(settings)
+        semantic_memory = SemanticMemory(pool)
+        episodic_memory = EpisodicMemory(pool, embedding_client)
+        short_term_memory = ShortTermMemory()
+        print(f"  [OK] embedding model: {settings.sentinel_embedding_model}")
+
+        # ── SDK defaults + provider layer ─────────────────────────────────────────
+        apply_sdk_defaults(settings)
+        print(f"  [OK] provider: {settings.sentinel_analysis_model.split('/')[0]}")
+
+        # ── Build agents with scenario injected ───────────────────────────────────
+        # Inject the scenario into log and deploy tools so they return
+        # synthetic data specific to this scenario rather than error messages.
+        triage_agent = build_triage_agent(
+            semantic_memory,
+            episodic_memory,
+            model_string=settings.sentinel_triage_model,
+            settings=settings,
+        )
+        log_analyst_agent = build_log_analyst_agent(
+            semantic_memory,
+            scenario,  # synthetic logs from this scenario
+            model_string=settings.sentinel_analysis_model,
+            settings=settings,
+        )
+        deploy_correlator_agent = build_deploy_correlator_agent(
+            scenario,  # synthetic deploys from this scenario
+            model_string=settings.sentinel_triage_model,
+            settings=settings,
+        )
+        approval_fn = _auto_approval if auto_approve else None
+        remediation_agent = build_remediation_agent(
+            model_string=settings.sentinel_analysis_model,
+            settings=settings,
+            approval_fn=approval_fn,
+        )
+        comms_agent = build_comms_agent(
+            model_string=settings.sentinel_triage_model,
+            settings=settings,
+        )
+        orchestrator = build_orchestrator_agent(
+            triage_agent,
+            log_analyst_agent,
+            deploy_correlator_agent,
+            remediation_agent,
+            comms_agent,
+            model_string=settings.sentinel_analysis_model,
+            settings=settings,
+        )
+
+        # Wire handoff-back so specialists return control to the orchestrator.
+        caps = get_capabilities(settings.sentinel_analysis_model)
+        back = handoff(orchestrator)
+        back.strict_json_schema = caps.strict_schemas
+        for specialist in [
+            triage_agent,
+            log_analyst_agent,
+            deploy_correlator_agent,
+            remediation_agent,
+            comms_agent,
+        ]:
+            specialist.handoffs = [back]
+
+        print("  [OK] agents built (scenario injected into log/deploy tools)")
+
+        # ── Incident setup ─────────────────────────────────────────────────────────
+        incident_id = f"smoke-{alert.alert_id[:8]}"
+        tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
+        add_trace_processor(tracer)
+        short_term_memory.create(incident_id, alert)
+        print(f"  [OK] incident: {incident_id}")
+
+        # ── Run pipeline ───────────────────────────────────────────────────────────
+        _print_header(f"Running pipeline  [{incident_id}]")
+        if auto_approve:
+            print("  HITL gates will be AUTO-APPROVED (--auto-approve flag).\n")
+        else:
+            print("  HITL approval prompts will appear when the Remediation Agent runs.")
+            print("  Type 'approve' or 'reject' and press Enter.\n")
+
+        input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
+        start = datetime.now(UTC)
+
         try:
-            short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
-        except KeyError:
-            pass
-    except Exception as exc:
-        elapsed = (datetime.now(UTC) - start).total_seconds()
-        print(f"\n  [ERROR] pipeline failed after {elapsed:.1f}s: {exc}")
-        try:
-            short_term_memory.update_context(incident_id, status=IncidentStatus.ESCALATED)
-        except KeyError:
-            pass
+            with agent_trace("incident_pipeline", metadata={"incident_id": incident_id}):
+                await Runner.run(
+                    orchestrator,
+                    input_text,
+                    max_turns=settings.sentinel_max_tool_calls + 5,
+                )
+            elapsed = (datetime.now(UTC) - start).total_seconds()
+            print(f"\n  [OK] pipeline completed in {elapsed:.1f}s")
+            try:
+                short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
+            except KeyError:
+                pass
+        except Exception as exc:
+            elapsed = (datetime.now(UTC) - start).total_seconds()
+            print(f"\n  [ERROR] pipeline failed after {elapsed:.1f}s: {exc}")
+            try:
+                short_term_memory.update_context(incident_id, status=IncidentStatus.ESCALATED)
+            except KeyError:
+                pass
+    finally:
+        await close_pool()
 
     # ── Print timeline ─────────────────────────────────────────────────────────
     _print_header("Incident Timeline")
@@ -321,6 +327,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nAborted.")
         sys.exit(0)
+    finally:
+        flush_traces()
 
 
 if __name__ == "__main__":

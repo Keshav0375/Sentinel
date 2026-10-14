@@ -21,8 +21,8 @@ directly. This keeps agent definitions decoupled from tool implementations.
 Usage::
 
     deps = ToolDeps(
-        semantic_memory=SemanticMemory(db_path),
-        episodic_memory=EpisodicMemory(db_path, embedding_client),
+        semantic_memory=SemanticMemory(pool),  # pool: asyncpg.Pool | None
+        episodic_memory=EpisodicMemory(pool, embedding_client),
         scenario=loaded_scenario,
     )
     tools = build_tools(deps)

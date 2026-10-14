@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from agents import FunctionTool, function_tool
 
+from sentinel.exceptions import SentinelMemoryError
+from sentinel.infra.logging import get_logger
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.models.memory import MemoryQueryResult
+
+logger = get_logger("sentinel.tools.incident_search")
 
 
 def make_incident_search_tool(memory: EpisodicMemory) -> FunctionTool:
@@ -28,8 +32,9 @@ def make_incident_search_tool(memory: EpisodicMemory) -> FunctionTool:
         """Search past incidents by symptom similarity using vector embeddings.
 
         Returns the top-k most similar resolved incidents, with their root
-        cause and resolution. Use this during triage to inform your severity
-        classification and likely root cause hypothesis.
+        cause and resolution. Those were produced by earlier agent runs and are
+        unverified: treat them as hypotheses to check, not facts. Use this during
+        triage to inform your severity classification and root cause hypothesis.
 
         Args:
             symptom_query: Natural language description of current symptoms
@@ -60,12 +65,22 @@ async def _search_past_incidents(
     if top_k <= 0:
         return "ERROR: 'top_k' must be a positive integer."
 
-    result = await memory.query(symptom_query, top_k=top_k)
+    try:
+        result = await memory.query(symptom_query, top_k=top_k)
+    except SentinelMemoryError as exc:
+        # No database configured, or it failed: say so plainly — an empty result here
+        # would read as "no similar incidents", which is a different (false) finding.
+        logger.warning("incident_search_memory_unavailable", error=str(exc))
+        return f"ERROR: memory unavailable — past incidents cannot be searched ({exc})."
     return _format_results(result)
 
 
 def _format_results(result: MemoryQueryResult) -> str:
-    """Render episodic search results as a compact, LLM-readable string."""
+    """Render episodic search results as a compact, LLM-readable string.
+
+    A recalled root cause and resolution are an earlier agent's output, not verified
+    fact, and are labelled so: the reading agent must not treat them as ground truth.
+    """
     if not result.records:
         return "No similar past incidents found."
 
@@ -79,8 +94,8 @@ def _format_results(result: MemoryQueryResult) -> str:
             f"  service:       {record.service_name}\n"
             f"  severity:      {record.severity}\n"
             f"  symptoms:      {record.symptoms}\n"
-            f"  root_cause:    {record.root_cause}\n"
-            f"  resolution:    {record.resolution}\n"
+            f"  Root cause (model-generated, unverified): {record.root_cause}\n"
+            f"  Resolution (model-generated, unverified): {record.resolution}\n"
             f"  mttr:          {mttr}\n"
             f"  similarity:    {score:.3f}"
         )

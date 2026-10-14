@@ -10,11 +10,14 @@ The app must be launched from the project root so that the ``data`` package
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+# asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
+import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from agents import Runner, add_trace_processor, handoff
 from agents import trace as agent_trace
 from fastapi import FastAPI
@@ -48,7 +51,7 @@ from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.db import create_tables
 from sentinel.infra.event_bus import EventBus
 from sentinel.infra.logging import configure_logging, get_logger
-from sentinel.infra.tracing import SentinelTracer
+from sentinel.infra.tracing import SentinelTracer, configure_langfuse, shutdown_traces
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
@@ -227,10 +230,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     6. Build specialist agents and orchestrator.
     7. Wire alert deduplicator and pipeline callback.
     8. Mount all API routers.
+
+    On exit (or a failed startup) the LangFuse client is shut down (flushing pending
+    spans) and the asyncpg pool is closed.
     """
     settings = get_settings()
     configure_logging(settings.sentinel_log_level)
-    logger.info("sentinel_startup", db_path=str(settings.sentinel_db_path))
+    logger.info(
+        "sentinel_startup",
+        db_path=str(settings.sentinel_db_path),
+        langfuse_enabled=configure_langfuse(),
+    )
 
     # ── Database ──────────────────────────────────────────────────────────────
     await create_tables(settings.sentinel_db_path)
@@ -246,21 +256,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Opened inside the try: a failure anywhere later in startup still closes it, so a
     # failed startup leaves no open connections and no stale module-level pool.
     try:
-        await init_pool_from_settings(settings)
-        _wire_app(app, settings)
+        pool = await init_pool_from_settings(settings)
+        _wire_app(app, settings, pool)
         logger.info("sentinel_ready")
         yield
     finally:
-        await close_pool()
-        logger.info("sentinel_shutdown")
+        # Flushing can block on network I/O, so it runs off the loop. shutdown_traces
+        # never raises, but the await can still be cancelled (e.g. a second SIGTERM):
+        # the nested finally closes the pool regardless.
+        try:
+            await asyncio.to_thread(shutdown_traces)
+        finally:
+            await close_pool()
+            logger.info("sentinel_shutdown")
 
 
-def _wire_app(app: FastAPI, settings: Settings) -> None:
-    """Build the memory clients, SDK defaults, tracing and routers, and mount them."""
+def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> None:
+    """Build the memory clients, SDK defaults, tracing and routers, and mount them.
+
+    *pool* is None when no ``DATABASE_URL`` is configured: semantic and episodic memory
+    are still built, and every call to them raises ``SentinelMemoryError`` ("memory
+    unavailable").
+    """
     # ── Memory clients ────────────────────────────────────────────────────────
     embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
-    semantic_memory = SemanticMemory(settings.sentinel_db_path)
-    episodic_memory = EpisodicMemory(settings.sentinel_db_path, embedding_client)
+    semantic_memory = SemanticMemory(pool)
+    episodic_memory = EpisodicMemory(pool, embedding_client)
     short_term_memory = ShortTermMemory()
 
     # ── LLM + SDK defaults ────────────────────────────────────────────────────

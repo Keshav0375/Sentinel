@@ -40,7 +40,7 @@ class ShortTermMemory:
         existing record for the same incident_id — callers should not reuse IDs.
 
         Args:
-            incident_id: Unique identifier (e.g. "inc-a1b2c3d4").
+            incident_id: Unique identifier (a UUID string, as ``Incident.id``).
             alert: The incoming alert that triggered this incident.
         """
         self._incidents[incident_id] = {

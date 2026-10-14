@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from agents import Agent
 from agents.extensions.models.litellm_model import LitellmModel
 
-from data.seed import seed
 from sentinel.agents.log_analyst import LOG_ANALYST_AGENT_NAME, build_log_analyst_agent
 from sentinel.config import Settings
 from sentinel.generator.alert_gen import load_scenario
@@ -21,15 +19,9 @@ from sentinel.models.log_entry import LogAnalysis, LogEntry, LogLevel
 
 
 @pytest.fixture()
-async def db_path(tmp_path: Path) -> Path:
-    path = tmp_path / "test_log_analyst.db"
-    await seed(path, verbose=False)
-    return path
-
-
-@pytest.fixture()
-def semantic_memory(db_path: Path) -> SemanticMemory:
-    return SemanticMemory(db_path)
+def semantic_memory() -> SemanticMemory:
+    # No pool: the agent is only built here, never run, so memory is never called.
+    return SemanticMemory(None)
 
 
 @pytest.fixture()

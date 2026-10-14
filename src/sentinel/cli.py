@@ -71,7 +71,12 @@ def _run_scenario(scenario_id: str) -> None:
 
     from run_scenario import run_scenario  # type: ignore[import-not-found]
 
-    asyncio.run(run_scenario(scenario_id))  # pyright: ignore[reportUnknownArgumentType]
+    from sentinel.infra.tracing import flush_traces
+
+    try:
+        asyncio.run(run_scenario(scenario_id))  # pyright: ignore[reportUnknownArgumentType]
+    finally:
+        flush_traces()
 
 
 def _list_scenarios() -> None:

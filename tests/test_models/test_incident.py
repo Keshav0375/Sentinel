@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -78,8 +79,7 @@ def test_timeline_entry_missing_fields_raises() -> None:
 
 def test_incident_defaults() -> None:
     inc = Incident(alert=_alert())
-    assert inc.id.startswith("inc-")
-    assert len(inc.id) == len("inc-") + 8
+    assert str(uuid.UUID(inc.id)) == inc.id  # a canonical UUID string (§5.3 incidents.id)
     assert inc.status is IncidentStatus.TRIAGE
     assert inc.severity is None
     assert inc.affected_service is None

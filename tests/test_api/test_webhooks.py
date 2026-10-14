@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -144,8 +145,7 @@ def test_dedup_ttl_default() -> None:
 
 def test_new_incident_id_format() -> None:
     inc_id = _new_incident_id()
-    assert inc_id.startswith("inc-")
-    assert len(inc_id) == len("inc-") + 8
+    assert str(uuid.UUID(inc_id)) == inc_id  # same format as Incident.id
 
 
 def test_new_incident_id_is_unique() -> None:
@@ -168,7 +168,7 @@ def test_receive_alert_returns_ack_with_ids() -> None:
     response = _post_alert(client, payload)
     data = response.json()
     assert data["alert_id"] == "alert-unique-001"
-    assert data["incident_id"].startswith("inc-")
+    assert str(uuid.UUID(data["incident_id"])) == data["incident_id"]
     assert "received_at" in data
 
 

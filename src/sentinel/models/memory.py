@@ -33,8 +33,8 @@ class EpisodicRecord(BaseModel):
 class Runbook(BaseModel):
     """Ordered remediation steps for a specific failure class on a service.
 
-    Stored in the SQLite runbooks table. Referenced by the Triage and
-    Remediation agents to guide their decision-making.
+    Parsed from the markdown in services.runbook (one per service). Referenced by
+    the Triage and Remediation agents to guide their decision-making.
     """
 
     id: str
@@ -46,7 +46,7 @@ class Runbook(BaseModel):
 class SemanticRecord(BaseModel):
     """Combined view of a service's metadata and associated runbooks.
 
-    Loaded from semantic memory (SQLite) once per incident. The Triage Agent
+    Loaded from semantic memory (PostgreSQL) once per incident. The Triage Agent
     uses this to understand service topology and available remediation playbooks.
     """
 

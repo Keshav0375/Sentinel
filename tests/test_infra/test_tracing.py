@@ -1,20 +1,45 @@
-"""Tests for sentinel.infra.tracing — SentinelTracer and helper functions."""
+"""Tests for sentinel.infra.tracing — LangFuse helpers, SentinelTracer and its helpers.
+
+All offline: the suite runs without LangFuse keys (tests/conftest.py removes them), so the
+real client is the disabled no-op; tests that need a live client mock ``get_client``.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import os
+import threading
+import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+from fastapi import FastAPI
+
+from sentinel import main
+from sentinel.infra import tracing
 from sentinel.infra.tracing import (
+    PIPELINE_TRACE_NAME,
     SentinelTracer,
     _extract_incident_id,
     _incident_id_from_span,
     _parse_ended_at,
     _save_trajectory,
     _span_to_timeline_entry,
+    configure_langfuse,
+    flush_traces,
+    incident_trace_id,
+    langfuse_enabled,
+    load_prompt,
+    observe,
+    push_score,
+    shutdown_traces,
+    trace_incident,
 )
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
@@ -423,3 +448,350 @@ def test_tracer_multiple_incidents_isolated(tmp_path: Path) -> None:
     assert timeline_a[0].action == "fetch_logs"
     assert len(timeline_b) == 1
     assert timeline_b[0].action == "list_recent_deploys"
+
+
+# ── LangFuse helpers (backend §6) ─────────────────────────────────────────────
+
+_PROMPTS_DIR = Path(main.__file__).resolve().parent / "agents" / "prompts"
+
+
+@pytest.fixture
+def mock_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """A stand-in for the LangFuse client returned by ``get_client()``."""
+    client = MagicMock()
+    monkeypatch.setattr(tracing, "get_client", lambda: client)
+    return client
+
+
+async def test_load_prompt_returns_langfuse_prompt(mock_client: MagicMock) -> None:
+    prompt = MagicMock(name="TextPromptClient")
+    mock_client.get_prompt.return_value = prompt
+
+    assert await load_prompt("triage") is prompt
+    mock_client.get_prompt.assert_called_once_with("triage", cache_ttl_seconds=300)
+
+
+async def test_load_prompt_falls_back_to_file_when_get_prompt_raises(
+    mock_client: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mock_client.get_prompt.side_effect = RuntimeError("langfuse unreachable")
+    monkeypatch.chdir(tmp_path)  # the fallback resolves against the package, not the cwd
+
+    result = await load_prompt("triage")
+
+    assert result == (_PROMPTS_DIR / "triage.txt").read_text(encoding="utf-8")
+    assert result.startswith("You are the Triage Agent")
+
+
+async def test_load_prompt_raises_when_langfuse_and_file_both_fail(
+    mock_client: MagicMock,
+) -> None:
+    mock_client.get_prompt.side_effect = RuntimeError("langfuse unreachable")
+
+    with pytest.raises(FileNotFoundError):
+        await load_prompt("no_such_agent")
+
+
+async def test_load_prompt_fetches_off_the_event_loop_thread(mock_client: MagicMock) -> None:
+    loop_thread = threading.get_ident()
+    fetch_threads: list[int] = []
+
+    def _get_prompt(*args: Any, **kwargs: Any) -> MagicMock:
+        fetch_threads.append(threading.get_ident())
+        return MagicMock(name="TextPromptClient")
+
+    mock_client.get_prompt.side_effect = _get_prompt
+    await load_prompt("triage")
+
+    assert len(fetch_threads) == 1
+    assert fetch_threads[0] != loop_thread
+
+
+async def _ticks_during(coro: Any) -> tuple[Any, int]:
+    """Run *coro* beside a 10 ms ticker; return its result and how often the ticker ran."""
+    ticks = 0
+    done = asyncio.Event()
+
+    async def _ticker() -> None:
+        nonlocal ticks
+        while not done.is_set():
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    ticker = asyncio.create_task(_ticker())
+    try:
+        result = await coro
+    finally:
+        done.set()
+        await ticker
+    return result, ticks
+
+
+@pytest.mark.parametrize("unreachable", [False, True], ids=["slow", "unreachable"])
+async def test_slow_langfuse_does_not_block_other_coroutines(
+    mock_client: MagicMock, unreachable: bool
+) -> None:
+    prompt = MagicMock(name="TextPromptClient")
+
+    def _blocking_get_prompt(*args: Any, **kwargs: Any) -> MagicMock:
+        time.sleep(0.3)  # the SDK's synchronous HTTP call, retries included
+        if unreachable:
+            raise ConnectionError("connection refused")
+        return prompt
+
+    mock_client.get_prompt.side_effect = _blocking_get_prompt
+    result, ticks = await _ticks_during(load_prompt("triage"))
+
+    if unreachable:
+        assert result == (_PROMPTS_DIR / "triage.txt").read_text(encoding="utf-8")
+    else:
+        assert result is prompt
+    # A blocked loop would let the ticker run once; ~30 ticks fit in 0.3 s.
+    assert ticks >= 10
+
+
+def test_push_score_calls_create_score_with_exact_kwargs(mock_client: MagicMock) -> None:
+    push_score("0123456789abcdef0123456789abcdef", "triage_accuracy", 0.8)
+
+    mock_client.create_score.assert_called_once_with(
+        trace_id="0123456789abcdef0123456789abcdef",
+        name="triage_accuracy",
+        value=0.8,
+        data_type="NUMERIC",
+    )
+
+
+def test_flush_and_shutdown_call_the_client(mock_client: MagicMock) -> None:
+    flush_traces()
+    shutdown_traces()
+
+    mock_client.flush.assert_called_once_with()
+    mock_client.shutdown.assert_called_once_with()
+
+
+def test_flush_and_shutdown_never_raise(mock_client: MagicMock) -> None:
+    mock_client.flush.side_effect = RuntimeError("export failed")
+    mock_client.shutdown.side_effect = RuntimeError("export failed")
+
+    flush_traces()
+    shutdown_traces()
+
+
+def test_incident_trace_id_is_uuid_hex() -> None:
+    incident_id = uuid.uuid4()
+
+    assert incident_trace_id(incident_id) == incident_id.hex
+    assert incident_trace_id(str(incident_id)) == incident_id.hex
+    trace_id = incident_trace_id(str(incident_id).upper())
+    assert len(trace_id) == 32
+    assert trace_id == trace_id.lower()
+    assert all(c in "0123456789abcdef" for c in trace_id)
+    with pytest.raises(ValueError):
+        incident_trace_id("inc-not-a-uuid")
+
+
+def test_trace_incident_opens_root_with_trace_id_and_attributes(
+    mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    propagate = MagicMock()
+    monkeypatch.setattr(tracing, "propagate_attributes", propagate)
+    incident_id, correlation_id = uuid.uuid4(), uuid.uuid4()
+
+    with trace_incident(incident_id, correlation_id, "sentinel-watchtower") as trace_id:
+        assert trace_id == incident_id.hex
+        mock_client.start_as_current_observation.return_value.__enter__.assert_called_once()
+        propagate.return_value.__enter__.assert_called_once()
+
+    mock_client.start_as_current_observation.assert_called_once_with(
+        name=PIPELINE_TRACE_NAME, trace_context={"trace_id": incident_id.hex}
+    )
+    propagate.assert_called_once_with(
+        metadata={"correlation_id": str(correlation_id)},
+        tags=["incident", "sentinel-watchtower"],
+    )
+    mock_client.start_as_current_observation.return_value.__exit__.assert_called_once()
+
+
+def test_trace_incident_truncates_attributes_to_200_chars(
+    mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    propagate = MagicMock()
+    monkeypatch.setattr(tracing, "propagate_attributes", propagate)
+
+    with trace_incident(uuid.uuid4(), "c" * 300, "s" * 300):
+        pass
+
+    kwargs = propagate.call_args.kwargs
+    assert kwargs["metadata"] == {"correlation_id": "c" * 200}
+    assert kwargs["tags"] == ["incident", "s" * 200]
+
+
+# ── observe: input/output capture is opt-in ────────────────────────────────────
+
+
+@pytest.fixture
+def observe_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """The client langfuse's decorator resolves internally, as a mock."""
+    from langfuse._client import observe as langfuse_observe_module  # noqa: PLC0415
+
+    client = MagicMock()
+    monkeypatch.setattr(langfuse_observe_module, "get_client", lambda **_: client)
+    return client
+
+
+def _span(client: MagicMock) -> MagicMock:
+    return client.start_as_current_observation.return_value.__enter__.return_value
+
+
+def _output_updates(client: MagicMock) -> list[Any]:
+    return [c for c in _span(client).update.call_args_list if "output" in c.kwargs]
+
+
+async def test_observe_does_not_capture_input_or_output_by_default(
+    observe_client: MagicMock,
+) -> None:
+    @observe(name="fetch-logs", as_type="tool")
+    async def fetch_logs(query: str) -> str:
+        return f"raw log lines for {query}"
+
+    assert await fetch_logs("payment-service") == "raw log lines for payment-service"
+
+    kwargs = observe_client.start_as_current_observation.call_args.kwargs
+    assert kwargs["name"] == "fetch-logs"
+    assert kwargs["as_type"] == "tool"
+    assert kwargs["input"] is None
+    assert _output_updates(observe_client) == []
+
+
+def test_bare_observe_does_not_capture_either(observe_client: MagicMock) -> None:
+    @observe
+    def summarise(text: str) -> str:
+        return text.upper()
+
+    assert summarise("prompt text") == "PROMPT TEXT"
+    assert observe_client.start_as_current_observation.call_args.kwargs["input"] is None
+    assert _output_updates(observe_client) == []
+
+
+async def test_observe_captures_when_a_function_opts_in(observe_client: MagicMock) -> None:
+    @observe(name="triage-agent", as_type="agent", capture_input=True, capture_output=True)
+    async def run_triage(service: str) -> str:
+        return f"P1 for {service}"
+
+    await run_triage("payment-service")
+
+    assert observe_client.start_as_current_observation.call_args.kwargs["input"] is not None
+    assert [c.kwargs["output"] for c in _output_updates(observe_client)] == [
+        "P1 for payment-service"
+    ]
+
+
+# ── No keys: the real (disabled) client — no crash, no network, no log noise ──
+
+
+async def test_without_keys_everything_is_a_quiet_noop(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger="langfuse")
+    assert not langfuse_enabled()
+    received: dict[str, Any] = {}
+
+    @observe(name="fetch-logs", as_type="tool")
+    def fetch_logs(query: str) -> str:
+        return f"logs for {query}"
+
+    @observe(name="triage-agent", as_type="agent")
+    async def run_triage(service: str, **kwargs: Any) -> str:
+        received.update(kwargs)
+        return fetch_logs(service)
+
+    incident_id = uuid.uuid4()
+    with trace_incident(incident_id, uuid.uuid4(), "sentinel-watchtower") as trace_id:
+        assert await run_triage("api") == "logs for api"
+    assert trace_id == incident_id.hex
+    # langfuse_trace_id is consumed by @observe, never passed through to the function.
+    assert await run_triage("db", langfuse_trace_id=trace_id) == "logs for db"
+    assert received == {}
+
+    assert push_score(trace_id, "triage_accuracy", 1.0) is None
+    prompt = await load_prompt("triage")  # disabled client raises in get_prompt → file
+    assert prompt == (_PROMPTS_DIR / "triage.txt").read_text(encoding="utf-8")
+    flush_traces()
+    shutdown_traces()
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_blank_key_is_treated_as_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "  ")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    assert not langfuse_enabled()
+
+    assert configure_langfuse() is False
+
+    assert "LANGFUSE_PUBLIC_KEY" not in os.environ
+    assert os.environ["LANGFUSE_SECRET_KEY"] == "sk-lf-test"
+
+
+def test_langfuse_enabled_needs_both_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    assert not langfuse_enabled()
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    assert langfuse_enabled()
+
+
+# ── Lifespan: the LangFuse client is shut down on exit ────────────────────────
+
+
+@pytest.fixture
+def light_lifespan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """The real lifespan on a throwaway SQLite file, with app wiring stubbed out."""
+    monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
+    wire = MagicMock()
+    monkeypatch.setattr(main, "_wire_app", wire)
+    return wire
+
+
+async def test_lifespan_shuts_down_langfuse_on_exit(
+    light_lifespan: MagicMock, mock_client: MagicMock
+) -> None:
+    loop_thread = threading.get_ident()
+    shutdown_threads: list[int] = []
+    mock_client.shutdown.side_effect = lambda: shutdown_threads.append(threading.get_ident())
+
+    async with main.lifespan(FastAPI()):
+        mock_client.shutdown.assert_not_called()
+
+    mock_client.shutdown.assert_called_once_with()
+    assert shutdown_threads != [loop_thread]  # flushed off the event loop
+
+
+async def test_lifespan_closes_the_pool_when_shutdown_traces_is_cancelled(
+    light_lifespan: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    close_pool = AsyncMock()
+    monkeypatch.setattr(main, "close_pool", close_pool)
+    real_to_thread = asyncio.to_thread
+
+    async def _cancelled_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+        if func is main.shutdown_traces:
+            raise asyncio.CancelledError
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", _cancelled_to_thread)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with main.lifespan(FastAPI()):
+            pass
+
+    close_pool.assert_awaited_once_with()
+
+
+async def test_lifespan_shuts_down_langfuse_after_failed_startup(
+    light_lifespan: MagicMock, mock_client: MagicMock
+) -> None:
+    light_lifespan.side_effect = RuntimeError("wiring failed")
+
+    with pytest.raises(RuntimeError, match="wiring failed"):
+        async with main.lifespan(FastAPI()):
+            pytest.fail("startup should not have completed")
+
+    mock_client.shutdown.assert_called_once_with()

@@ -2,8 +2,9 @@
 
 The suite is independent of the caller's shell and of the developer's ``.env``:
 ``Settings`` never reads ``.env`` here, ``DATABASE_URL`` is unset for the whole session
-(a test that needs it sets it to the test database), and ``GROQ_API_KEY`` gets a dummy
-default. The only database the suite touches is ``TEST_DATABASE_URL``.
+(a test that needs it sets it to the test database), ``GROQ_API_KEY`` gets a dummy
+default, and the LangFuse keys are removed so the client is disabled and nothing is ever
+sent. The only database the suite touches is ``TEST_DATABASE_URL``.
 """
 
 from __future__ import annotations
@@ -33,11 +34,15 @@ from sentinel.memory.embeddings import EmbeddingClient
 _TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
 _IN_CI = os.environ.get("CI", "").strip().lower() == "true"
 _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
+_LANGFUSE_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Before collection: a dummy GROQ_API_KEY (Settings requires one), never a real one."""
+    """Before collection: a dummy GROQ_API_KEY (Settings requires one), never a real one,
+    and no LangFuse keys — a keyless langfuse client is a disabled no-op (no network)."""
     os.environ.setdefault("GROQ_API_KEY", "fake-key-for-tests")
+    for var in _LANGFUSE_KEYS:
+        os.environ.pop(var, None)
 
 
 def _postgres_dsn() -> str | None:
@@ -73,10 +78,16 @@ def make_alembic_config(dsn: str, embedding_client: EmbeddingClient | None = Non
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_environment() -> Iterator[None]:
-    """No ``.env`` for Settings and no ``DATABASE_URL`` for the whole session."""
+    """No ``.env`` for Settings, no ``DATABASE_URL`` and no LangFuse keys for the session.
+
+    The keys are removed again here, after collection: importing litellm loads the
+    developer's ``.env`` into ``os.environ``.
+    """
     with pytest.MonkeyPatch.context() as mp:
         mp.setitem(Settings.model_config, "env_file", None)
         mp.delenv("DATABASE_URL", raising=False)
+        for var in _LANGFUSE_KEYS:
+            mp.delenv(var, raising=False)
         yield
 
 

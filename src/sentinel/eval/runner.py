@@ -34,6 +34,7 @@ from sentinel.config import Settings, get_settings
 from sentinel.eval.judge import evaluate_trajectory
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario
 from sentinel.generator.scenarios import Scenario
+from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.db import create_tables
 from sentinel.infra.logging import configure_logging, get_logger
 from sentinel.infra.tracing import SentinelTracer
@@ -297,50 +298,56 @@ async def run_eval(
     except ImportError:
         logger.warning("eval_seed_skipped", reason="data package not on Python path")
 
-    embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
-    semantic_memory = SemanticMemory(resolved_db)
-    episodic_memory = EpisodicMemory(resolved_db, embedding_client)
-    short_term_memory = ShortTermMemory()
+    # Postgres pool for semantic and episodic memory. None without DATABASE_URL: every
+    # memory call then raises, and the memory tools report "memory unavailable".
+    pool = await init_pool_from_settings(settings)
+    try:
+        embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
+        semantic_memory = SemanticMemory(pool)
+        episodic_memory = EpisodicMemory(pool, embedding_client)
+        short_term_memory = ShortTermMemory()
 
-    apply_sdk_defaults(settings)
+        apply_sdk_defaults(settings)
 
-    # Register tracer once — it collects spans for all scenarios via incident_id.
-    tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
-    add_trace_processor(tracer)
+        # Register tracer once — it collects spans for all scenarios via incident_id.
+        tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
+        add_trace_processor(tracer)
 
-    # ── Batch run ──────────────────────────────────────────────────────────────
-    results: list[EvalRunResult] = []
+        # ── Batch run ──────────────────────────────────────────────────────────
+        results: list[EvalRunResult] = []
 
-    for scenario_id in resolved_ids:
-        try:
-            scenario = load_scenario(scenario_id)
-        except FileNotFoundError:
-            logger.error(
-                "eval_scenario_not_found",
-                scenario_id=scenario_id,
-            )
-            continue
+        for scenario_id in resolved_ids:
+            try:
+                scenario = load_scenario(scenario_id)
+            except FileNotFoundError:
+                logger.error(
+                    "eval_scenario_not_found",
+                    scenario_id=scenario_id,
+                )
+                continue
 
-        try:
-            result = await run_scenario_eval(
-                scenario,
-                short_term_memory=short_term_memory,
-                trajectories_dir=resolved_traj,
-                settings=settings,
-                judge_model=resolved_judge,
-                max_turns=settings.sentinel_max_tool_calls + 5,
-                semantic_memory=semantic_memory,
-                episodic_memory=episodic_memory,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "eval_scenario_unexpected_error",
-                scenario_id=scenario_id,
-                error=str(exc),
-            )
-            continue
+            try:
+                result = await run_scenario_eval(
+                    scenario,
+                    short_term_memory=short_term_memory,
+                    trajectories_dir=resolved_traj,
+                    settings=settings,
+                    judge_model=resolved_judge,
+                    max_turns=settings.sentinel_max_tool_calls + 5,
+                    semantic_memory=semantic_memory,
+                    episodic_memory=episodic_memory,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "eval_scenario_unexpected_error",
+                    scenario_id=scenario_id,
+                    error=str(exc),
+                )
+                continue
 
-        results.append(result)
+            results.append(result)
+    finally:
+        await close_pool()
 
     logger.info(
         "eval_run_complete",
