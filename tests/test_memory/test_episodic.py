@@ -343,6 +343,27 @@ async def test_store_upserts_on_same_id(mem: EpisodicMemory) -> None:
     assert record.resolution == "rollback"
 
 
+async def test_restore_keeps_the_original_created_at(
+    mem: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    inc = _make_incident("payment-service", "db_connection_pool", status=IncidentStatus.TRIAGE)
+    first = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+    inc.created_at = first
+    await mem.store_incident(inc)
+
+    # A later re-store carries a different created_at (e.g. a rebuilt Incident).
+    inc.created_at = first + timedelta(hours=1)
+    inc.resolved_at = first + timedelta(hours=1, seconds=30)
+    inc.status = IncidentStatus.RESOLVED
+    await mem.store_incident(inc)
+
+    row = await _raw_row(pool, inc.id)
+    assert row["created_at"] == first
+    assert row["status"] == "resolved"
+    # MTTR is measured from the kept created_at, not the re-store's.
+    assert row["mttr_seconds"] == 3630
+
+
 # ── Provenance: stored conclusions are marked as model output ─────────────────
 
 
@@ -473,11 +494,18 @@ async def test_query_scores_parallel_and_descending(mem: EpisodicMemory) -> None
     assert result.similarity_scores == pytest.approx([1.0, 0.0], abs=1e-6)
 
 
-async def test_query_accepts_an_embedding_vector(mem: EpisodicMemory) -> None:
+@pytest.mark.parametrize(
+    "as_vector",
+    [list, tuple, lambda v: np.array(v, dtype=np.float32)],
+    ids=["list", "tuple", "numpy"],
+)
+async def test_query_accepts_an_embedding_vector(
+    mem: EpisodicMemory, as_vector: Callable[[list[float]], Any]
+) -> None:
     mem_inc = _make_incident("analytics-pipeline", "memory_usage_percent")
     await mem.store_incident(_make_incident("payment-service", "db_connection_pool"))
     await mem.store_incident(mem_inc)
-    result = await mem.query(_one_hot(1), top_k=1)
+    result = await mem.query(as_vector(_one_hot(1)), top_k=1)
     assert [r.id for r in result.records] == [mem_inc.id]
 
 

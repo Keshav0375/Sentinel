@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -76,8 +77,10 @@ class EpisodicMemory:
     async def store_incident(self, incident: Incident) -> None:
         """Embed the incident's observed symptoms and upsert its row into ``incidents``.
 
-        Storing an incident with the same ID again overwrites the mapped columns; the
-        columns this model does not supply are left as they are.
+        Storing an incident with the same ID again overwrites the mapped columns, except
+        ``created_at``: the first store's value is kept (when the incident was first
+        recorded), and ``mttr_seconds`` is measured from it. The columns this model does
+        not supply are left as they are.
 
         Raises:
             SentinelMemoryError: no database, the ID is not a UUID, or the write failed.
@@ -130,9 +133,14 @@ class EpisodicMemory:
                     root_cause = EXCLUDED.root_cause,
                     resolution = EXCLUDED.resolution,
                     trajectory = EXCLUDED.trajectory,
-                    created_at = EXCLUDED.created_at,
+                    -- created_at is NOT updated: the first store's value is kept.
                     resolved_at = EXCLUDED.resolved_at,
-                    mttr_seconds = EXCLUDED.mttr_seconds,
+                    mttr_seconds = CASE
+                        WHEN EXCLUDED.resolved_at IS NULL OR incidents.created_at IS NULL
+                            THEN EXCLUDED.mttr_seconds
+                        ELSE FLOOR(EXTRACT(EPOCH FROM
+                            EXCLUDED.resolved_at - incidents.created_at))::int
+                    END,
                     embedding = EXCLUDED.embedding
                 """,
                 incident_uuid,
@@ -283,7 +291,7 @@ class EpisodicMemory:
 
         Args:
             query_input: Symptom text describing the current incident, or a ready
-                embedding vector (list[float]).
+                embedding vector — any sequence of floats (list, tuple, numpy array).
             top_k: Maximum number of results to return.
 
         Returns:
@@ -291,9 +299,8 @@ class EpisodicMemory:
             correspond to the same past incident, sorted descending by score.
         """
         self._require_pool()
-        if isinstance(query_input, list):
-            embedding: list[float] = [float(x) for x in query_input]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
-        else:
+        embedding = _as_vector(query_input)
+        if embedding is None:
             embedding = await self._embeddings.embed(str(query_input))
         return await self.search_by_embedding(embedding, top_k=top_k)
 
@@ -327,6 +334,15 @@ def _as_uuid(value: str) -> uuid.UUID | None:
         return uuid.UUID(value)
     except ValueError:
         return None
+
+
+def _as_vector(value: Any) -> list[float] | None:
+    """*value* as a list of floats when it is a vector (list, tuple, numpy array), else None."""
+    if isinstance(value, str | bytes):
+        return None
+    if isinstance(value, Sequence) or hasattr(value, "__array__"):
+        return [float(x) for x in value]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+    return None
 
 
 def _build_symptom_text(incident: Incident) -> str:
