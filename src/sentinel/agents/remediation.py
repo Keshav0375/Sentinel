@@ -1,4 +1,4 @@
-"""Remediation agent — rollback/hotfix drafting with HITL gate."""
+"""Remediation agent — drafts a rollback spec or an escalation, with HITL gate."""
 
 from __future__ import annotations
 
@@ -25,9 +25,10 @@ def build_remediation_agent(
     """Create a configured Remediation Agent with HITL gate.
 
     The agent receives root cause findings (hypothesis, suspect deploy, log
-    evidence) from the orchestrator, decides between rollback and hotfix,
-    drafts the remediation artifact via the appropriate draft tool, and
-    ALWAYS calls ``request_human_approval`` before returning its plan.
+    evidence) from the orchestrator, decides between rollback and escalation,
+    drafts the artifact with ``prepare_rollback_spec`` or ``format_escalation``
+    (both output-only), and ALWAYS calls ``request_human_approval`` before
+    returning its plan.
 
     The HITL gate is non-negotiable: the agent's system prompt explicitly
     mandates it, the only path to a remediation plan is through the approval
@@ -47,7 +48,7 @@ def build_remediation_agent(
     llm = resolve_model(model_string, settings)
     caps = get_capabilities(model_string)
 
-    # make_remediation_tools() returns [draft_rollback_pr, draft_hotfix]
+    # make_remediation_tools() returns [prepare_rollback_spec, format_escalation]
     tools: list[Tool] = [
         *make_remediation_tools(),
         make_hitl_tool(approval_fn=approval_fn),

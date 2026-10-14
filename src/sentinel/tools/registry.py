@@ -107,7 +107,7 @@ def build_tools(deps: ToolDeps) -> list[FunctionTool]:
 
     tools.append(make_incident_search_tool(deps.episodic_memory))
 
-    # ── 4.6 — draft_rollback_pr, draft_hotfix ────────────────────────────────
+    # ── 4.6 — prepare_rollback_spec, format_escalation (output only) ─────────
     from sentinel.tools.remediation_tools import make_remediation_tools
 
     tools.extend(make_remediation_tools())

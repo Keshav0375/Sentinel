@@ -196,7 +196,8 @@ def test_deploy_correlator_agent_no_extra_tools(
         "fetch_logs",
         "get_service_metadata",
         "search_past_incidents",
-        "draft_rollback_pr",
+        "prepare_rollback_spec",
+        "format_escalation",
         "request_human_approval",
     }
     assert not names & unexpected, f"Unexpected tools: {names & unexpected}"

@@ -225,3 +225,69 @@ class DeployRecord(BaseModel):
     github_note: str | None = Field(
         default=None, description="Why github is None for a deploy with a PR number."
     )
+
+
+# ── prepare_rollback_spec / format_escalation ─────────────────────────────────
+
+
+class TargetDeploy(BaseModel):
+    """The deploy a rollback reverts (a ``get_deploy_details`` record)."""
+
+    pr_number: int = Field(description="Pull request that shipped the deploy.")
+    commit_sha: str = Field(
+        description="Deployed commit, 7-40 hex characters. The incident workflow reverts "
+        "exactly this commit (its TARGET_SHA)."
+    )
+    deployed_at: datetime = Field(description="When the deploy was recorded (UTC).")
+
+
+class RollbackSpecInput(BaseModel):
+    """Input of ``prepare_rollback_spec``."""
+
+    incident_id: str = Field(description="Id of the incident being resolved.")
+    root_cause: str = Field(description="One sentence: what broke and which deploy caused it.")
+    evidence_summary: str = Field(
+        description="The evidence for the root cause: synthetic check results, deploy "
+        "timing, CI logs."
+    )
+    confidence: float = Field(description="Confidence the target deploy is the cause (0-1).")
+    justification: str = Field(description="Why reverting the target deploy fixes the incident.")
+    target_deploy: TargetDeploy = Field(description="The deploy to revert.")
+
+
+class RollbackSpec(BaseModel):
+    """A drafted rollback: the §3.4 ``POST /generate/pr-content`` body, field for field.
+
+    Output only. The backend never creates the revert PR: the incident workflow does,
+    reverting ``target_deploy.commit_sha``, and a human merges or closes it on GitHub.
+    """
+
+    incident_id: str
+    root_cause: str
+    evidence_summary: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    justification: str
+    resolution_type: Literal["rollback"] = "rollback"
+    target_deploy: TargetDeploy
+
+
+class EscalationInput(BaseModel):
+    """Input of ``format_escalation``."""
+
+    hypothesis: str = Field(description="The best current explanation of the incident.")
+    evidence: list[str] = Field(default=[], description="What was found, one finding per item.")
+    confidence: float = Field(description="Confidence in the hypothesis (0-1).")
+    missing: list[str] = Field(
+        default=[],
+        description="What could not be established or read, one item each — what a human "
+        "should check first.",
+    )
+
+
+class EscalationContext(BaseModel):
+    """An incident handed to a human: what is believed, on what evidence, what is unknown."""
+
+    hypothesis: str
+    evidence: list[str]
+    confidence: float = Field(ge=0.0, le=1.0)
+    missing: list[str]

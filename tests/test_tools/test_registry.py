@@ -112,7 +112,8 @@ def test_build_tools_non_empty(deps: ToolDeps) -> None:
 
 def test_build_tools_has_expected_tool_count(deps: ToolDeps) -> None:
     # 4.2 get_service_metadata + 4.3 fetch_logs + 4.4 get_deploy_details
-    # + 4.5 search_past_incidents + 4.6 (x2) + 4.7 draft_slack_summary
+    # + 4.5 search_past_incidents + 4.6 prepare_rollback_spec, format_escalation
+    # + 4.7 draft_slack_summary
     # + 4.8 request_human_approval = 8 tools total
     tools = build_tools(deps)
     assert len(tools) == 8
@@ -156,16 +157,16 @@ def test_build_tools_contains_search_past_incidents(deps: ToolDeps) -> None:
     assert "search_past_incidents" in names
 
 
-def test_build_tools_contains_draft_rollback_pr(deps: ToolDeps) -> None:
+def test_build_tools_contains_prepare_rollback_spec(deps: ToolDeps) -> None:
     tools = build_tools(deps)
     names = {t.name for t in tools}
-    assert "draft_rollback_pr" in names
+    assert "prepare_rollback_spec" in names
 
 
-def test_build_tools_contains_draft_hotfix(deps: ToolDeps) -> None:
+def test_build_tools_contains_format_escalation(deps: ToolDeps) -> None:
     tools = build_tools(deps)
     names = {t.name for t in tools}
-    assert "draft_hotfix" in names
+    assert "format_escalation" in names
 
 
 def test_build_tools_contains_draft_slack_summary(deps: ToolDeps) -> None:

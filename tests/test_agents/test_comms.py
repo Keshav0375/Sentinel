@@ -140,7 +140,8 @@ def test_comms_agent_no_extra_tools(comms_agent: Agent[SlackSummary]) -> None:
         "get_service_metadata",
         "get_deploy_details",
         "search_past_incidents",
-        "draft_rollback_pr",
+        "prepare_rollback_spec",
+        "format_escalation",
         "request_human_approval",
     }
     assert not names & unexpected, f"Unexpected tools: {names & unexpected}"

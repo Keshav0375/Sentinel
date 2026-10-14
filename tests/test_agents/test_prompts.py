@@ -144,11 +144,11 @@ def test_remediation_hitl_is_mandatory() -> None:
     )
 
 
-def test_remediation_rollback_and_hotfix_tools() -> None:
-    """Remediation prompt must mention both draft tools."""
+def test_remediation_names_the_output_only_tools() -> None:
+    """Remediation prompt must name both drafting tools."""
     text = load_prompt("remediation.txt")
-    assert "draft_rollback_pr" in text
-    assert "draft_hotfix" in text
+    assert "prepare_rollback_spec" in text
+    assert "format_escalation" in text
 
 
 def test_remediation_decision_tree_thresholds() -> None:

@@ -158,8 +158,8 @@ def test_remediation_agent_has_three_tools(remediation_agent: Agent[RemediationP
 
 def test_remediation_agent_tool_names(remediation_agent: Agent[RemediationPlan]) -> None:
     names = {t.name for t in remediation_agent.tools}
-    assert "draft_rollback_pr" in names
-    assert "draft_hotfix" in names
+    assert "prepare_rollback_spec" in names
+    assert "format_escalation" in names
     assert "request_human_approval" in names
 
 
@@ -233,12 +233,12 @@ def test_remediation_agent_hitl_required_for_all_paths(
     )
 
 
-def test_remediation_agent_instructions_mention_rollback_and_hotfix(
+def test_remediation_agent_instructions_name_the_drafting_tools(
     remediation_agent: Agent[RemediationPlan],
 ) -> None:
     assert isinstance(remediation_agent.instructions, str)
-    assert "rollback" in remediation_agent.instructions.lower()
-    assert "hotfix" in remediation_agent.instructions.lower()
+    assert "prepare_rollback_spec" in remediation_agent.instructions
+    assert "format_escalation" in remediation_agent.instructions
 
 
 def test_remediation_agent_uses_litellm_model(remediation_agent: Agent[RemediationPlan]) -> None:
