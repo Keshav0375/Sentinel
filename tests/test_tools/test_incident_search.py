@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from agents import FunctionTool
 from agents.tool_context import ToolContext
+from pydantic import ValidationError
 
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.memory.embeddings import EmbeddingClient
@@ -192,6 +193,14 @@ def test_similar_incident_is_model_generated_by_default() -> None:
     incident = _similar()
     assert incident.model_generated is True
     assert incident.resolution_type is None
+
+
+def test_similar_incident_cannot_be_marked_verified() -> None:
+    """model_generated is Literal[True]: no caller can claim a recall is ground truth."""
+    with pytest.raises(ValidationError):
+        _similar(model_generated=False)
+    schema = SimilarIncident.model_json_schema()["properties"]["model_generated"]
+    assert schema["const"] is True
 
 
 @pytest.mark.parametrize("field", ["root_cause", "resolution", "model_generated"])

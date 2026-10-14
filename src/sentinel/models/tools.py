@@ -77,7 +77,7 @@ class SimilarIncident(BaseModel):
         description="rollback | hotfix | config_change | escalated; None when not recorded.",
     )
     similarity: float = Field(description="Cosine similarity to the query symptoms (1 = same).")
-    model_generated: bool = Field(
+    model_generated: Literal[True] = Field(
         default=True,
         description=f"Always true: root_cause and resolution are {UNVERIFIED_LABEL}.",
     )
