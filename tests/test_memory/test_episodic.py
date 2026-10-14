@@ -34,6 +34,7 @@ from sentinel.memory.episodic import EpisodicMemory
 from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
 from sentinel.models.incident import Incident, IncidentStatus, Severity, TimelineEntry
 from sentinel.models.memory import EpisodicRecord, MemoryQueryResult
+from sentinel.models.tools import IncidentSearchInput, SimilarIncident, ToolFailure
 from sentinel.tools.incident_search import _search_past_incidents
 
 DIMS = 384
@@ -660,13 +661,73 @@ async def test_delete_nonexistent_is_noop(mem: EpisodicMemory) -> None:
 # ── search_past_incidents tool over real memory ───────────────────────────────
 
 
-async def test_incident_search_tool_ranks_nearest_first(mem: EpisodicMemory) -> None:
-    await mem.store_incident(_make_incident("api-gateway", "null_pointer_deploy"))
-    await mem.store_incident(_make_incident("payment-service", "db_connection_pool"))
-    await mem.store_incident(_make_incident("analytics-pipeline", "memory_leak_oom"))
+async def _set_resolution_type(pool: asyncpg.Pool, incident_id: str, value: str) -> None:
+    """Write resolution_type as the phase-4 pipeline would (store_incident leaves it NULL)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE incidents SET resolution_type = $2 WHERE id = $1", uuid.UUID(incident_id), value
+        )
 
-    result = await _search_past_incidents(mem, "database connection pool", 3)
-    assert result.startswith("Found 3 similar past incident(s)")
-    assert result.find("payment-service") < result.find("api-gateway")
-    assert result.find("payment-service") < result.find("analytics-pipeline")
-    assert "similarity:    1.000" in result
+
+async def test_resolution_type_reads_back(mem: EpisodicMemory, pool: asyncpg.Pool) -> None:
+    inc = _make_incident("payment-service", "db_connection_pool")
+    await mem.store_incident(inc)
+    record = await mem.get_incident(inc.id)
+    assert record is not None
+    assert record.resolution_type is None
+
+    await _set_resolution_type(pool, inc.id, "rollback")
+    record = await mem.get_incident(inc.id)
+    assert record is not None
+    assert record.resolution_type == "rollback"
+
+
+async def test_incident_search_tool_ranks_nearest_first(
+    mem: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    deploy = _make_incident("api-gateway", "null_pointer_deploy")
+    pool_inc = _make_incident("payment-service", "db_connection_pool")
+    oom = _make_incident("analytics-pipeline", "memory_leak_oom")
+    for inc in (deploy, pool_inc, oom):
+        await mem.store_incident(inc)
+    await _set_resolution_type(pool, pool_inc.id, "rollback")
+
+    result = await _search_past_incidents(
+        mem, IncidentSearchInput(symptom_text="database connection pool", k=3)
+    )
+
+    assert isinstance(result, list)
+    assert len(result) == 3
+    top = result[0]
+    assert isinstance(top, SimilarIncident)
+    assert (top.id, top.service, top.resolution_type) == (
+        pool_inc.id,
+        "payment-service",
+        "rollback",
+    )
+    assert top.created_at == pool_inc.created_at
+    assert top.similarity == pytest.approx(1.0, abs=1e-6)
+    assert top.model_generated is True
+    assert [r.similarity for r in result] == sorted((r.similarity for r in result), reverse=True)
+
+
+async def test_incident_search_tool_respects_k(mem: EpisodicMemory) -> None:
+    for metric in ("db_connection_pool", "null_pointer_deploy", "memory_leak_oom"):
+        await mem.store_incident(_make_incident("payment-service", metric))
+    result = await _search_past_incidents(
+        mem, IncidentSearchInput(symptom_text="database connection pool", k=2)
+    )
+    assert isinstance(result, list)
+    assert len(result) == 2
+
+
+async def test_incident_search_tool_empty_table_returns_empty_list(mem: EpisodicMemory) -> None:
+    assert await _search_past_incidents(mem, IncidentSearchInput(symptom_text="pool")) == []
+
+
+async def test_incident_search_tool_reports_memory_unavailable(client: EmbeddingClient) -> None:
+    result = await _search_past_incidents(
+        EpisodicMemory(None, client), IncidentSearchInput(symptom_text="pool")
+    )
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "unavailable"

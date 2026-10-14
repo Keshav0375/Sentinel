@@ -24,6 +24,9 @@ class EpisodicRecord(BaseModel):
     symptoms: str
     root_cause: str
     resolution: str
+    # Read-only here: incidents.resolution_type is written by the phase-4 pipeline;
+    # store_incident leaves it NULL (decision 2026-10-12, item 3).
+    resolution_type: str | None = None
     mttr_seconds: int | None = None
     embedding: list[float] = []
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
