@@ -54,7 +54,7 @@ def build_orchestrator_agent(
         log_analyst_agent: Pre-built Log Analyst Agent (root cause analysis).
         deploy_correlator_agent: Pre-built Deploy Correlator (deploy ranking).
         remediation_agent: Pre-built Remediation Agent (drafts a rollback spec or escalation).
-        comms_agent: Pre-built Comms Agent (Slack summary).
+        comms_agent: Pre-built Comms Agent (writes the incident summary; sends nothing).
         model_string: Provider/model string (e.g. 'groq/llama-3.3-70b-versatile').
         settings: Validated Settings instance for API key lookup.
 

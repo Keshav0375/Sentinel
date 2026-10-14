@@ -7,9 +7,11 @@ Usage::
     python scripts/run_scenario.py --help
 
 Run from the project root so that ``src/`` and ``data/`` are importable.
-The script builds the full agent pipeline, injects the scenario into the
-log/deploy tools so they return synthetic data, then runs the orchestrator
-and prints the full timeline. The pipeline only drafts: nothing is approved or executed.
+The script builds the full agent pipeline, runs the orchestrator on the scenario's
+alert and prints the full timeline. The scenario supplies only the alert: the tools
+read the real sources (Datadog for fetch_logs, the ``deployments`` table for
+get_deploy_details), so without their credentials or ``DATABASE_URL`` they report
+"unavailable". The pipeline only drafts: nothing is approved or executed.
 """
 
 from __future__ import annotations
@@ -154,9 +156,8 @@ async def run_scenario(
         apply_sdk_defaults(settings)
         print(f"  [OK] provider: {settings.sentinel_analysis_model.split('/')[0]}")
 
-        # ── Build agents with scenario injected ───────────────────────────────────
-        # Inject the scenario into log and deploy tools so they return
-        # synthetic data specific to this scenario rather than error messages.
+        # ── Build agents ──────────────────────────────────────────────────────────
+        # The tools read Datadog and Postgres, never the scenario: only its alert is used.
         triage_agent = build_triage_agent(
             semantic_memory,
             episodic_memory,
@@ -165,12 +166,11 @@ async def run_scenario(
         )
         log_analyst_agent = build_log_analyst_agent(
             semantic_memory,
-            scenario,  # synthetic logs from this scenario
             model_string=settings.sentinel_analysis_model,
             settings=settings,
         )
         deploy_correlator_agent = build_deploy_correlator_agent(
-            scenario,  # synthetic deploys from this scenario
+            pool,
             model_string=settings.sentinel_triage_model,
             settings=settings,
         )
@@ -205,7 +205,7 @@ async def run_scenario(
         ]:
             specialist.handoffs = [back]
 
-        print("  [OK] agents built (scenario injected into log/deploy tools)")
+        print("  [OK] agents built")
 
         # ── Incident setup ─────────────────────────────────────────────────────────
         incident_id = f"smoke-{alert.alert_id[:8]}"
