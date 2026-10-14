@@ -431,7 +431,7 @@ def test_tracer_multiple_incidents_isolated(tmp_path: Path) -> None:
     tracer.on_span_end(span_a)
 
     # Tool call on trace B
-    data_b = _function_span_data("list_recent_deploys", "deploys for beta")
+    data_b = _function_span_data("get_deploy_details", "deploys for beta")
     span_b = MagicMock()
     span_b.trace_id = "trace_bbb"
     span_b.span_data = data_b
@@ -447,7 +447,7 @@ def test_tracer_multiple_incidents_isolated(tmp_path: Path) -> None:
     assert len(timeline_a) == 1
     assert timeline_a[0].action == "fetch_logs"
     assert len(timeline_b) == 1
-    assert timeline_b[0].action == "list_recent_deploys"
+    assert timeline_b[0].action == "get_deploy_details"
 
 
 # ── LangFuse helpers (backend §6) ─────────────────────────────────────────────

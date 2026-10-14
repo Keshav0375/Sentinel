@@ -14,25 +14,24 @@ from sentinel.agents.deploy_correlator import (
     build_deploy_correlator_agent,
 )
 from sentinel.config import Settings
-from sentinel.generator.alert_gen import load_scenario
-from sentinel.generator.scenarios import Scenario
 from sentinel.models.deploy import Deploy, DeployCorrelation
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture()
-def scenario() -> Scenario:
-    return load_scenario("bad_deploy_01")
+def pool() -> MagicMock:
+    """A stand-in pool: building the agent never touches it."""
+    return MagicMock()
 
 
 @pytest.fixture()
 def correlator_agent(
-    scenario: Scenario,
+    pool: MagicMock,
     fake_settings: Settings,
 ) -> Agent[DeployCorrelation]:
     return build_deploy_correlator_agent(
-        scenario,
+        pool,
         model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
@@ -179,14 +178,14 @@ def test_deploy_correlator_agent_name_constant() -> None:
 def test_deploy_correlator_agent_has_one_tool(
     correlator_agent: Agent[DeployCorrelation],
 ) -> None:
-    """Deploy correlator has exactly one tool — list_recent_deploys."""
+    """Deploy correlator has exactly one tool — get_deploy_details."""
     assert len(correlator_agent.tools) == 1
 
 
 def test_deploy_correlator_agent_tool_name(
     correlator_agent: Agent[DeployCorrelation],
 ) -> None:
-    assert correlator_agent.tools[0].name == "list_recent_deploys"
+    assert correlator_agent.tools[0].name == "get_deploy_details"
 
 
 def test_deploy_correlator_agent_no_extra_tools(
@@ -223,11 +222,12 @@ def test_deploy_correlator_agent_instructions_mention_confidence(
     assert "confidence" in correlator_agent.instructions.lower()
 
 
-def test_deploy_correlator_agent_instructions_mention_list_recent_deploys(
+def test_deploy_correlator_agent_instructions_mention_get_deploy_details(
     correlator_agent: Agent[DeployCorrelation],
 ) -> None:
     assert isinstance(correlator_agent.instructions, str)
-    assert "list_recent_deploys" in correlator_agent.instructions
+    assert "get_deploy_details" in correlator_agent.instructions
+    assert "list_recent_deploys" not in correlator_agent.instructions
 
 
 def test_deploy_correlator_agent_uses_litellm_model(
@@ -237,11 +237,11 @@ def test_deploy_correlator_agent_uses_litellm_model(
 
 
 def test_deploy_correlator_agent_model_string_forwarded(
-    scenario: Scenario,
+    pool: MagicMock,
     fake_settings: Settings,
 ) -> None:
     agent = build_deploy_correlator_agent(
-        scenario,
+        pool,
         model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
@@ -250,11 +250,11 @@ def test_deploy_correlator_agent_model_string_forwarded(
 
 
 def test_deploy_correlator_agent_custom_model_string(
-    scenario: Scenario,
+    pool: MagicMock,
     fake_settings: Settings,
 ) -> None:
     agent = build_deploy_correlator_agent(
-        scenario,
+        pool,
         model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
@@ -268,23 +268,12 @@ def test_deploy_correlator_agent_no_handoffs(
     assert len(correlator_agent.handoffs) == 0
 
 
-def test_deploy_correlator_agent_accepts_none_scenario(fake_settings: Settings) -> None:
-    """Agent constructs with None scenario; list_recent_deploys errors at call time."""
+def test_deploy_correlator_agent_accepts_no_pool(fake_settings: Settings) -> None:
+    """Agent constructs without a pool; get_deploy_details reports "unavailable" at call time."""
     agent = build_deploy_correlator_agent(
         None,
         model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
     assert isinstance(agent, Agent)
-    assert len(agent.tools) == 1
-
-
-def test_deploy_correlator_agent_mock_scenario(fake_settings: Settings) -> None:
-    """Agent constructs with a MagicMock scenario."""
-    mock_scenario = MagicMock(spec=Scenario)
-    agent = build_deploy_correlator_agent(
-        mock_scenario,
-        model_string="groq/llama-3.1-8b-instant",
-        settings=fake_settings,
-    )
-    assert isinstance(agent, Agent)
+    assert [t.name for t in agent.tools] == ["get_deploy_details"]

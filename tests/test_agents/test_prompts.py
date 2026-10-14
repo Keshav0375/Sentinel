@@ -117,10 +117,11 @@ def test_log_analyst_output_fields() -> None:
         assert field in text, f"log_analyst.txt must reference output field {field!r}"
 
 
-def test_deploy_correlator_mentions_list_recent_deploys() -> None:
-    """Deploy correlator prompt must instruct use of list_recent_deploys."""
+def test_deploy_correlator_mentions_get_deploy_details() -> None:
+    """Deploy correlator prompt must instruct use of get_deploy_details, not the retired name."""
     text = load_prompt("deploy_correlator.txt")
-    assert "list_recent_deploys" in text
+    assert "get_deploy_details" in text
+    assert "list_recent_deploys" not in text
 
 
 def test_deploy_correlator_output_fields() -> None:

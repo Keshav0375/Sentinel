@@ -3,7 +3,7 @@
 Pattern
 -------
 Each tool is an async function decorated with ``@function_tool``. Tools cannot
-receive their dependencies (memory clients, scenario data) as LLM-visible
+receive their dependencies (memory clients, the database pool) as LLM-visible
 parameters — the LLM only sees the typed domain input schema. Dependencies
 are therefore injected at construction time via closure::
 
@@ -23,7 +23,7 @@ Usage::
     deps = ToolDeps(
         semantic_memory=SemanticMemory(pool),  # pool: asyncpg.Pool | None
         episodic_memory=EpisodicMemory(pool, embedding_client),
-        scenario=loaded_scenario,
+        pool=pool,
     )
     tools = build_tools(deps)
     agent = Agent(name="triage", tools=tools, ...)
@@ -39,10 +39,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from agents import FunctionTool
 
 from sentinel.config import Settings
-from sentinel.generator.scenarios import Scenario
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 
@@ -58,17 +58,17 @@ class ToolDeps:
     Attributes:
         semantic_memory: Service map and runbook lookups (SemanticMemory).
         episodic_memory: Past-incident similarity search (EpisodicMemory).
-        scenario: Active scenario supplying synthetic deploys in the MVP. None
-            when no scenario is pre-loaded (e.g. registry-only unit tests that
-            don't exercise the deploy tool).
+        pool: asyncpg pool ``get_deploy_details`` reads ``deployments`` from. None
+            (no ``DATABASE_URL``) builds fine; the tool then reports "unavailable".
         settings: Credentials and endpoints for the API-backed tools (Datadog for
-            ``fetch_logs``). Defaults to the environment's Settings; keys are read
-            at call time, so a missing key fails the call, never the build.
+            ``fetch_logs``, GitHub for ``get_deploy_details``). Defaults to the
+            environment's Settings; keys are read at call time, so a missing key fails
+            (or, for GitHub, skips) the call, never the build.
     """
 
     semantic_memory: SemanticMemory
     episodic_memory: EpisodicMemory
-    scenario: Scenario | None = field(default=None)
+    pool: asyncpg.Pool | None = field(default=None)
     settings: Settings = field(default_factory=Settings)
 
 
@@ -97,10 +97,10 @@ def build_tools(deps: ToolDeps) -> list[FunctionTool]:
 
     tools.append(make_log_fetcher_tool(deps.settings))
 
-    # ── 4.4 — list_recent_deploys ─────────────────────────────────────────────
+    # ── 4.4 — get_deploy_details ─────────────────────────────────────────────
     from sentinel.tools.deploy_checker import make_deploy_checker_tool
 
-    tools.append(make_deploy_checker_tool(deps.scenario))
+    tools.append(make_deploy_checker_tool(deps.pool, deps.settings))
 
     # ── 4.5 — search_past_incidents ──────────────────────────────────────────
     from sentinel.tools.incident_search import make_incident_search_tool

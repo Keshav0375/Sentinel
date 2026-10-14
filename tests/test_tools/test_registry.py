@@ -31,7 +31,7 @@ def deps(mock_semantic: SemanticMemory, mock_episodic: EpisodicMemory) -> ToolDe
     return ToolDeps(
         semantic_memory=mock_semantic,
         episodic_memory=mock_episodic,
-        scenario=None,
+        pool=None,
     )
 
 
@@ -47,25 +47,25 @@ def test_tool_deps_constructs(
     assert deps.episodic_memory is mock_episodic
 
 
-def test_tool_deps_scenario_defaults_to_none(
+def test_tool_deps_pool_defaults_to_none(
     mock_semantic: SemanticMemory,
     mock_episodic: EpisodicMemory,
 ) -> None:
     deps = ToolDeps(semantic_memory=mock_semantic, episodic_memory=mock_episodic)
-    assert deps.scenario is None
+    assert deps.pool is None
 
 
-def test_tool_deps_scenario_can_be_set(
+def test_tool_deps_pool_can_be_set(
     mock_semantic: SemanticMemory,
     mock_episodic: EpisodicMemory,
 ) -> None:
-    scenario = MagicMock()
+    pool = MagicMock()
     deps = ToolDeps(
         semantic_memory=mock_semantic,
         episodic_memory=mock_episodic,
-        scenario=scenario,
+        pool=pool,
     )
-    assert deps.scenario is scenario
+    assert deps.pool is pool
 
 
 def test_tool_deps_settings_default_and_injection(
@@ -111,7 +111,7 @@ def test_build_tools_non_empty(deps: ToolDeps) -> None:
 
 
 def test_build_tools_has_expected_tool_count(deps: ToolDeps) -> None:
-    # 4.2 get_service_metadata + 4.3 fetch_logs + 4.4 list_recent_deploys
+    # 4.2 get_service_metadata + 4.3 fetch_logs + 4.4 get_deploy_details
     # + 4.5 search_past_incidents + 4.6 (x2) + 4.7 draft_slack_summary
     # + 4.8 request_human_approval = 8 tools total
     tools = build_tools(deps)
@@ -142,10 +142,12 @@ def test_build_tools_contains_fetch_logs(deps: ToolDeps) -> None:
     assert "fetch_logs" in names
 
 
-def test_build_tools_contains_list_recent_deploys(deps: ToolDeps) -> None:
+def test_build_tools_contains_get_deploy_details(deps: ToolDeps) -> None:
+    """get_deploy_details is the one LLM-visible deploy tool; the old name is retired."""
     tools = build_tools(deps)
     names = {t.name for t in tools}
-    assert "list_recent_deploys" in names
+    assert "get_deploy_details" in names
+    assert "list_recent_deploys" not in names
 
 
 def test_build_tools_contains_search_past_incidents(deps: ToolDeps) -> None:

@@ -20,7 +20,7 @@ from sentinel.models.incident import IncidentStatus
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_ORCH_PATCH = "sentinel.main._build_orchestrator_for_scenario"
+_ORCH_PATCH = "sentinel.main._build_orchestrator"
 
 
 def _fake_settings() -> Settings:

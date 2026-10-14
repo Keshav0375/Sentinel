@@ -44,8 +44,6 @@ from sentinel.api.scenarios import make_scenarios_router
 from sentinel.api.trajectories import make_trajectories_router
 from sentinel.api.webhooks import AlertDeduplicator, PipelineFn, make_alert_router
 from sentinel.config import Settings, get_settings
-from sentinel.generator.alert_gen import load_scenario
-from sentinel.generator.scenarios import Scenario
 from sentinel.infra.dashboard_emitter import DashboardEventEmitter
 from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.db import create_tables
@@ -67,18 +65,18 @@ _EVAL_HTML = Path(__file__).resolve().parent / "dashboard" / "eval.html"
 logger = get_logger("sentinel.main")
 
 
-def _build_orchestrator_for_scenario(
-    scenario: Scenario | None,
+def _build_orchestrator(
     settings: Settings,
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
+    pool: asyncpg.Pool | None,
     approval_fn: ApprovalFn | None = None,
 ) -> Any:
-    """Build a full orchestrator pipeline with scenario data injected.
+    """Build a full orchestrator pipeline with its dependencies injected.
 
-    Rebuilds all agents per-incident so the deploy tool has access to
-    the scenario's synthetic data. The construction cost is negligible — it's
-    just Python object creation, not LLM calls.
+    Rebuilt per incident so each run reads the current (runtime-overridable) settings.
+    The construction cost is negligible — it's just Python object creation, not LLM
+    calls.
     """
     triage_agent = build_triage_agent(
         semantic_memory,
@@ -92,7 +90,7 @@ def _build_orchestrator_for_scenario(
         settings=settings,
     )
     deploy_correlator_agent = build_deploy_correlator_agent(
-        scenario,
+        pool,
         model_string=settings.sentinel_triage_model,
         settings=settings,
     )
@@ -139,11 +137,11 @@ def make_pipeline_fn(
     max_turns: int = 20,
     event_bus: EventBus | None = None,
     approval_fn: ApprovalFn | None = None,
+    pool: asyncpg.Pool | None = None,
 ) -> PipelineFn:
     """Build the async pipeline callback fired by the webhook for each new alert.
 
-    Agents are rebuilt per-incident so scenario-based alerts get their synthetic
-    log/deploy data injected into the tools.
+    Agents are rebuilt per-incident so each run picks up the current settings.
 
     Args:
         settings_fn: Callable returning current Settings (supports runtime
@@ -154,6 +152,8 @@ def make_pipeline_fn(
         max_turns: Maximum agent turns before the SDK raises an error.
         event_bus: Optional EventBus for dashboard streaming.
         approval_fn: Optional HITL callback for the remediation agent.
+        pool: asyncpg pool for ``get_deploy_details``; None without ``DATABASE_URL``
+            (the tool then reports "unavailable").
 
     Returns:
         Async callable ``(incident_id, alert) → None`` suitable for passing to
@@ -164,20 +164,12 @@ def make_pipeline_fn(
         settings = settings_fn()
         logger.info("pipeline_start", incident_id=incident_id, service=alert.service)
 
-        scenario_id = alert.metadata.get("scenario_id")
-        scenario: Scenario | None = None
-        if scenario_id:
-            try:
-                scenario = load_scenario(str(scenario_id))
-            except FileNotFoundError:
-                logger.warning("scenario_not_found", scenario_id=scenario_id)
-
         token = set_current_incident(incident_id)
         try:
             # Built inside the try: a provider key missing at use (keys are optional at
             # boot) escalates this incident instead of escaping the background task.
-            orchestrator = _build_orchestrator_for_scenario(
-                scenario, settings, semantic_memory, episodic_memory, approval_fn
+            orchestrator = _build_orchestrator(
+                settings, semantic_memory, episodic_memory, pool, approval_fn
             )
             input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
             with agent_trace(
@@ -305,8 +297,7 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
     runtime_config = RuntimeConfig(settings)
 
     # ── API wiring ────────────────────────────────────────────────────────────
-    # Agents are built per-incident inside make_pipeline_fn so scenario-based
-    # alerts get their synthetic log/deploy data injected into the tools.
+    # Agents are built per-incident inside make_pipeline_fn.
     deduplicator = AlertDeduplicator()
     pipeline_fn = make_pipeline_fn(
         runtime_config.effective_settings,
@@ -316,6 +307,7 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
         max_turns=settings.sentinel_max_tool_calls + 5,
         event_bus=event_bus,
         approval_fn=api_approval_fn,
+        pool=pool,
     )
 
     app.include_router(make_alert_router(deduplicator, short_term_memory, pipeline_fn))

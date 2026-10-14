@@ -123,7 +123,7 @@ def test_log_analyst_agent_no_extra_tools(log_analyst_agent: Agent[LogAnalysis])
     """Log analyst must not have deploy/remediation tools — scope is narrow."""
     names = {t.name for t in log_analyst_agent.tools}
     unexpected = {
-        "list_recent_deploys",
+        "get_deploy_details",
         "search_past_incidents",
         "draft_rollback_pr",
         "request_human_approval",

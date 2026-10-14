@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
+import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from agents import Runner, add_trace_processor
 from agents import trace as agent_trace
 from openai import AsyncOpenAI
@@ -76,12 +78,12 @@ async def run_scenario_eval(
     max_turns: int = 20,
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
+    pool: asyncpg.Pool | None = None,
 ) -> EvalRunResult:
     """Run one scenario end-to-end and return a scored result.
 
-    Builds a fresh agent set with the scenario injected into log/deploy tools,
-    runs the pipeline, reads the trajectory written by SentinelTracer, and
-    calls the LLM judge.
+    Builds a fresh agent set, runs the pipeline on the scenario's alert, reads the
+    trajectory written by SentinelTracer, and calls the LLM judge.
 
     HITL is auto-approved so the batch runs without human intervention.
 
@@ -95,6 +97,7 @@ async def run_scenario_eval(
         max_turns: Tool-call cap per pipeline run.
         semantic_memory: Service metadata store.
         episodic_memory: Past-incident similarity store.
+        pool: asyncpg pool ``get_deploy_details`` reads; None without ``DATABASE_URL``.
 
     Returns:
         ``EvalRunResult`` with scenario_id, incident_id, score, and error info.
@@ -109,7 +112,7 @@ async def run_scenario_eval(
         incident_id=incident_id,
     )
 
-    # ── Build fresh agents with scenario injected ──────────────────────────────
+    # ── Build fresh agents ─────────────────────────────────────────────────────
     triage_agent = build_triage_agent(
         semantic_memory,
         episodic_memory,
@@ -122,7 +125,7 @@ async def run_scenario_eval(
         settings=settings,
     )
     deploy_correlator_agent = build_deploy_correlator_agent(
-        scenario,
+        pool,
         model_string=settings.sentinel_triage_model,
         settings=settings,
     )
@@ -335,6 +338,7 @@ async def run_eval(
                     max_turns=settings.sentinel_max_tool_calls + 5,
                     semantic_memory=semantic_memory,
                     episodic_memory=episodic_memory,
+                    pool=pool,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error(

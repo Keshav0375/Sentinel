@@ -177,3 +177,51 @@ class LogFetchResult(BaseModel):
     synthetic_results: list[SyntheticResult] = []
     deploy_logs: list[DeployLogEntry] = []
     truncated: bool = False
+
+
+# ── get_deploy_details ────────────────────────────────────────────────────────
+
+
+class DeployQuery(BaseModel):
+    """Input of ``get_deploy_details``."""
+
+    service: str = Field(description='Exact service name (e.g. "sentinel-watchtower").')
+    window_hours: int = Field(
+        default=24, description="How far back from now to look, in hours (1-168)."
+    )
+    limit: int = Field(default=20, description="Most deploys to return, newest first (1-50).")
+
+
+class GitHubPR(BaseModel):
+    """The GitHub pull request a deploy shipped (``GET /repos/{repo}/pulls/{n}``)."""
+
+    title: str = Field(description="PR title.")
+    html_url: str = Field(description="PR page on github.com.")
+    merged_at: datetime | None = Field(
+        default=None, description="When the PR was merged (UTC); None if not merged."
+    )
+    author: str | None = Field(default=None, description="GitHub login of the PR author.")
+
+
+class DeployRecord(BaseModel):
+    """One deploy attempt the CI pipeline recorded in ``deployments``, failed ones included."""
+
+    pr_number: int | None = Field(
+        description="Pull request that was deployed; None for a direct push."
+    )
+    commit_sha: str = Field(description="Deployed commit (short SHA).")
+    author: str | None = Field(default=None, description="Author of the deployed commit.")
+    deploy_status: str = Field(description="succeeded | failed | rolled_back.")
+    deployed_at: datetime = Field(description="When the deploy was recorded (UTC).")
+    files_changed: list[str] = Field(default=[], description="Paths the deploy changed.")
+    failed_stage: str | None = Field(
+        default=None, description='Stage that failed (build, deploy, verify) or "none".'
+    )
+    version: str | None = Field(default=None, description='Deployed version, "pr-<n>-<sha>".')
+    gha_run_id: int | None = Field(default=None, description="GitHub Actions run id.")
+    github: GitHubPR | None = Field(
+        default=None, description="The PR from GitHub; None when not looked up or not found."
+    )
+    github_note: str | None = Field(
+        default=None, description="Why github is None for a deploy with a PR number."
+    )

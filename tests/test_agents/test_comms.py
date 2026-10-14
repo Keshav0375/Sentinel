@@ -138,7 +138,7 @@ def test_comms_agent_no_extra_tools(comms_agent: Agent[SlackSummary]) -> None:
     unexpected = {
         "fetch_logs",
         "get_service_metadata",
-        "list_recent_deploys",
+        "get_deploy_details",
         "search_past_incidents",
         "draft_rollback_pr",
         "request_human_approval",
