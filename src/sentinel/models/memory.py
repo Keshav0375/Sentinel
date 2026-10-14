@@ -44,6 +44,8 @@ class Runbook(BaseModel):
     service_name: str
     failure_class: str
     steps: list[str]
+    # Set by get_service_metadata when it cut steps to keep its output small.
+    truncated: bool = False
 
 
 class SemanticRecord(BaseModel):

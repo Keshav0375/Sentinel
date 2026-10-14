@@ -189,6 +189,70 @@ async def test_database_failure_reports_unavailable() -> None:
     assert "ConnectionDoesNotExistError" in result.message
 
 
+# ── Runbook caps ──────────────────────────────────────────────────────────────
+
+
+def _with_steps(*runbook_steps: list[str]) -> SemanticRecord:
+    return SemanticRecord(
+        service=_LEAF.service,
+        runbooks=[
+            Runbook(
+                id=f"user-service-runbook-{i}",
+                service_name="user-service",
+                failure_class="general",
+                steps=steps,
+            )
+            for i, steps in enumerate(runbook_steps)
+        ],
+    )
+
+
+async def _looked_up(record: SemanticRecord) -> SemanticRecord:
+    mem = _InMemorySemantic({"user-service": record})
+    result = await _lookup_service(mem, _lookup("user-service"))
+    assert isinstance(result, SemanticRecord), result
+    return result
+
+
+async def test_runbook_is_cut_to_10_steps() -> None:
+    steps = [f"step {i}" for i in range(25)]
+    [runbook] = (await _looked_up(_with_steps(steps))).runbooks
+    assert runbook.steps == steps[:10]
+    assert runbook.truncated is True
+
+
+async def test_runbook_is_cut_to_2000_characters() -> None:
+    steps = ["a" * 900, "b" * 900, "c" * 900, "d" * 10]
+    [runbook] = (await _looked_up(_with_steps(steps))).runbooks
+    assert runbook.steps == ["a" * 900, "b" * 900, "c" * 200]
+    assert sum(len(step) for step in runbook.steps) == 2000
+    assert runbook.truncated is True
+
+
+async def test_caps_are_shared_by_all_runbooks() -> None:
+    record = await _looked_up(_with_steps(["a" * 1500], ["b" * 1000, "c"]))
+    first, second = record.runbooks
+    assert (first.steps, first.truncated) == (["a" * 1500], False)
+    assert (second.steps, second.truncated) == (["b" * 500], True)
+
+
+async def test_a_runbook_within_the_caps_is_whole_and_unflagged(mem: SemanticMemory) -> None:
+    result = await _lookup_service(mem, _lookup("api-gateway"))
+    assert result == _GATEWAY
+    assert isinstance(result, SemanticRecord)
+    assert result.runbooks[0].truncated is False
+
+
+async def test_the_truncated_flag_reaches_the_model() -> None:
+    mem = _InMemorySemantic({"user-service": _with_steps([f"s{i}" for i in range(11)])})
+    text = await _invoke(
+        make_service_lookup_tool(mem), {"request": {"service_name": "user-service"}}
+    )
+    data = json.loads(text)
+    assert data["runbooks"][0]["truncated"] is True
+    assert len(data["runbooks"][0]["steps"]) == 10
+
+
 # ── The FunctionTool as the Runner calls it ───────────────────────────────────
 
 

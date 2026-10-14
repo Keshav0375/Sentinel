@@ -226,7 +226,11 @@ class DeployRecord(BaseModel):
     deploy_status: str = Field(description="succeeded | failed | rolled_back.")
     deployed_at: datetime = Field(description="When the deploy was recorded (UTC).")
     files_changed: list[str] = Field(
-        default=[], description=f"Paths the deploy changed — {UNTRUSTED_TEXT}."
+        default=[],
+        description=f"Paths the deploy changed, the first 20 — {UNTRUSTED_TEXT}.",
+    )
+    files_changed_total: int = Field(
+        default=0, description="How many paths the deploy changed in all."
     )
     failed_stage: str | None = Field(
         default=None, description='Stage that failed (build, deploy, verify) or "none".'

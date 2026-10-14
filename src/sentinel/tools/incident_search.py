@@ -14,6 +14,9 @@ logger = get_logger("sentinel.tools.incident_search")
 
 _TOOL_NAME = "search_past_incidents"
 
+# A recalled root cause or resolution longer than this is cut (ending in "…").
+_MAX_RECALL_CHARS = 500
+
 
 def make_incident_search_tool(memory: EpisodicMemory) -> FunctionTool:
     """Create the search_past_incidents tool with episodic memory injected.
@@ -83,10 +86,17 @@ async def _search_past_incidents(
             id=record.id,
             service=record.service_name,
             created_at=record.created_at,
-            root_cause=record.root_cause,
-            resolution=record.resolution,
+            root_cause=_capped(record.root_cause),
+            resolution=_capped(record.resolution),
             resolution_type=record.resolution_type,
             similarity=score,
         )
         for record, score in zip(result.records, result.similarity_scores, strict=True)
     ]
+
+
+def _capped(text: str) -> str:
+    """*text* within ``_MAX_RECALL_CHARS``; a cut text ends in "…"."""
+    if len(text) <= _MAX_RECALL_CHARS:
+        return text
+    return text[: _MAX_RECALL_CHARS - 1] + "…"

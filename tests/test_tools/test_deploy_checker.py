@@ -492,6 +492,7 @@ async def test_row_written_by_the_pipeline_insert_reads_back(pool: asyncpg.Pool)
         deploy_status="failed",
         deployed_at=first.deployed_at,
         files_changed=["app/main.py", "app/dir with space/x.py"],
+        files_changed_total=2,
         failed_stage="verify",
         version="pr-57-9f8e7d6",
         gha_run_id=11223344556,
@@ -500,6 +501,40 @@ async def test_row_written_by_the_pipeline_insert_reads_back(pool: asyncpg.Pool)
     assert second.pr_number is None
     assert (second.failed_stage, second.version) == ("none", "pr-0-1a2b3c4")
     assert second.github_note is None  # no PR, nothing to look up
+
+
+# ── Payload caps ──────────────────────────────────────────────────────────────
+
+
+async def test_files_changed_keeps_the_first_20_and_the_total(pool: asyncpg.Pool) -> None:
+    files = [f"app/module_{i:02d}.py" for i in range(45)]
+    await _insert(pool, ago=timedelta(minutes=5), files=files)
+    [record] = _records(await _details(pool))
+    assert record.files_changed == files[:20]
+    assert record.files_changed_total == 45
+
+
+async def test_a_small_change_lists_every_file(pool: asyncpg.Pool) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), files=["a.py", "b.py"])
+    [record] = _records(await _details(pool))
+    assert (record.files_changed, record.files_changed_total) == (["a.py", "b.py"], 2)
+
+
+async def test_a_long_author_is_cut_to_100_characters(pool: asyncpg.Pool) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), author="x" * 300)
+    [record] = _records(await _details(pool))
+    assert record.author == "x" * 100
+
+
+async def test_a_long_github_login_is_cut_to_100_characters(
+    pool: asyncpg.Pool, gh: FakeGitHub
+) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), pr=42)
+    body = {**_pr_body(42), "user": {"login": "y" * 300}}
+    gh.faults[42] = lambda request: httpx.Response(200, json=body, request=request)
+    [record] = _records(await _details(pool, gh, settings=_settings()))
+    assert record.github is not None
+    assert record.github.author == "y" * 100
 
 
 # ── GitHub enrichment ─────────────────────────────────────────────────────────

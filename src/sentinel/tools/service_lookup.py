@@ -7,13 +7,18 @@ from agents import FunctionTool, function_tool
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra.logging import get_logger
 from sentinel.memory.semantic import SemanticMemory
-from sentinel.models.memory import SemanticRecord
+from sentinel.models.memory import Runbook, SemanticRecord
 from sentinel.models.tools import ServiceLookupInput, ToolFailure
 from sentinel.tools.output import tool_json
 
 logger = get_logger("sentinel.tools.service_lookup")
 
 _TOOL_NAME = "get_service_metadata"
+
+# Runbook caps — the result goes to the model, so it stays small. Shared by all the
+# record's runbooks, in order (001 holds one per service).
+_MAX_RUNBOOK_STEPS = 10
+_MAX_RUNBOOK_CHARS = 2000
 
 
 def make_service_lookup_tool(memory: SemanticMemory) -> FunctionTool:
@@ -32,6 +37,8 @@ def make_service_lookup_tool(memory: SemanticMemory) -> FunctionTool:
 
         Use this before any analysis to understand the service topology, who
         owns the affected service, and what remediation runbook exists for it.
+        Runbook steps are capped (10 steps, 2000 characters); a runbook whose steps
+        were cut has "truncated": true.
         Returns JSON. A failure carries "error": true — kind "not_found" for a service
         that is not in the service map, kind "unavailable" when memory cannot be read
         (the latter is no finding about the service either way).
@@ -56,7 +63,7 @@ async def _lookup_service(
         return ToolFailure(tool=_TOOL_NAME, kind="bad_input", message="service_name is empty")
 
     try:
-        return await memory.query(name)
+        record = await memory.query(name)
     except KeyError:
         return ToolFailure(
             tool=_TOOL_NAME,
@@ -72,3 +79,25 @@ async def _lookup_service(
             kind="unavailable",
             message=f"service metadata cannot be looked up: {exc}",
         )
+    return _capped(record)
+
+
+def _capped(record: SemanticRecord) -> SemanticRecord:
+    """*record* with its runbook steps within the step and character caps.
+
+    The steps are kept in order until either cap is reached; a step that crosses the
+    character cap is cut at it. Every runbook that lost text is flagged ``truncated``.
+    """
+    steps_left, chars_left = _MAX_RUNBOOK_STEPS, _MAX_RUNBOOK_CHARS
+    runbooks: list[Runbook] = []
+    for runbook in record.runbooks:
+        kept: list[str] = []
+        for step in runbook.steps:
+            if steps_left == 0 or chars_left == 0:
+                break
+            kept.append(step[:chars_left])
+            steps_left -= 1
+            chars_left -= len(kept[-1])
+        truncated = runbook.truncated or kept != runbook.steps
+        runbooks.append(runbook.model_copy(update={"steps": kept, "truncated": truncated}))
+    return record.model_copy(update={"runbooks": runbooks})

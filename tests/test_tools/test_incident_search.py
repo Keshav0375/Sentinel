@@ -106,6 +106,11 @@ def _search(symptoms: str, k: int = 5) -> IncidentSearchInput:
     return IncidentSearchInput(symptom_text=symptoms, k=k)
 
 
+def _incidents(result: list[SimilarIncident] | ToolFailure) -> list[SimilarIncident]:
+    assert isinstance(result, list), result
+    return result
+
+
 async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> str:
     """Call the tool the way the Runner does: JSON arguments through on_invoke_tool.
 
@@ -324,6 +329,22 @@ async def test_result_maps_every_field(seeded_mem: EpisodicMemory) -> None:
         "_note": RECALL_NOTE,
     }
     assert result[0].similarity == pytest.approx(1.0)
+
+
+async def test_long_recalled_text_is_cut_to_500_characters(mem: _InMemoryEpisodic) -> None:
+    await mem.add(
+        "inc-long", "api-gateway", "memory leak", root_cause="r" * 2000, resolution="s" * 501
+    )
+    [incident] = _incidents(await _search_past_incidents(mem, _search("memory leak", 1)))
+    assert len(incident.root_cause) == 500 and incident.root_cause.endswith("…")
+    assert len(incident.resolution) == 500 and incident.resolution.endswith("…")
+    assert incident.root_cause.startswith("r" * 499)
+
+
+async def test_recalled_text_at_the_cap_is_kept_whole(mem: _InMemoryEpisodic) -> None:
+    await mem.add("inc-500", "api-gateway", "memory leak", root_cause="r" * 500)
+    [incident] = _incidents(await _search_past_incidents(mem, _search("memory leak", 1)))
+    assert incident.root_cause == "r" * 500
 
 
 async def test_symptoms_are_stripped(seeded_mem: _InMemoryEpisodic) -> None:

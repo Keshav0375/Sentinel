@@ -58,6 +58,10 @@ _GITHUB_API_VERSION = "2022-11-28"
 _GITHUB_TIMEOUT = httpx.Timeout(5.0)
 _TITLE_CHARS = 200
 
+# ── Payload caps (the result goes to the model, so it stays small) ───────────
+_AUTHOR_CHARS = 100
+_MAX_FILES = 20  # files_changed entries per record; files_changed_total has the count
+
 # The service is a bind parameter, but a non-name is refused before it reaches the DB.
 _SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 # ``owner/name`` as GitHub allows them; the repo is spliced into the request path.
@@ -104,7 +108,8 @@ def make_deploy_checker_tool(
         One entry per deploy attempt the CI pipeline recorded, failed ones included:
         deploy_status (succeeded | failed | rolled_back), failed_stage (build, deploy,
         verify, or "none"), PR number, commit SHA, author, deploy time (UTC), files
-        changed, version ("pr-<n>-<sha>") and the GitHub Actions run id. When GitHub is
+        changed (the first 20, with files_changed_total), version ("pr-<n>-<sha>") and
+        the GitHub Actions run id. When GitHub is
         configured the newest few deploys also carry their PR (title, link, merge time,
         author) in ``github``; otherwise ``github`` is null and ``github_note`` says
         why. Returns a JSON array; an empty array means nothing was deployed in the
@@ -184,17 +189,24 @@ def _failure(kind: ToolFailureKind, message: str) -> ToolFailure:
 
 def _record(row: asyncpg.Record) -> DeployRecord:
     """A ``deployments`` row → DeployRecord (failed_stage/version come from ``metadata``)."""
+    files = _files(row["files_changed"])
     return DeployRecord(
         pr_number=_pr_number(row["pr_number"]),
         commit_sha=row["commit_sha"],
-        author=row["author"],
+        author=_author(row["author"]),
         deploy_status=row["deploy_status"],
         deployed_at=row["deployed_at"],
-        files_changed=_files(row["files_changed"]),
+        files_changed=files[:_MAX_FILES],
+        files_changed_total=len(files),
         failed_stage=row["failed_stage"],
         version=row["version"],
         gha_run_id=row["gha_run_id"],
     )
+
+
+def _author(value: object) -> str | None:
+    """An author name or login within ``_AUTHOR_CHARS``."""
+    return value[:_AUTHOR_CHARS] if isinstance(value, str) else None
 
 
 def _pr_number(value: object) -> int | None:
@@ -325,7 +337,7 @@ def _github_pr(data: object) -> GitHubPR | None:
         title=title[:_TITLE_CHARS],
         html_url=html_url,
         merged_at=_parse_time(body.get("merged_at")),
-        author=login if isinstance(login, str) else None,
+        author=_author(login),
     )
 
 
