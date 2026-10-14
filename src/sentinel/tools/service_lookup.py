@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from agents import FunctionTool, function_tool
 
+from sentinel.exceptions import SentinelMemoryError
+from sentinel.infra.logging import get_logger
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.memory import SemanticRecord
+
+logger = get_logger("sentinel.tools.service_lookup")
 
 
 def make_service_lookup_tool(memory: SemanticMemory) -> FunctionTool:
@@ -45,12 +49,18 @@ async def _build_service_response(memory: SemanticMemory, service_name: str) -> 
         service_name: The service to look up.
 
     Returns:
-        Human-readable service summary, or an error string if not found.
+        Human-readable service summary, or an error string if the service is not
+        found or memory is unavailable.
     """
     try:
         record = await memory.query(service_name)
     except KeyError:
         return f"ERROR: Service '{service_name}' not found in the service map."
+    except SentinelMemoryError as exc:
+        # No database configured, or it failed: say so plainly — "not found" here would
+        # read as "this service does not exist", which is a different (false) finding.
+        logger.warning("service_lookup_memory_unavailable", error=str(exc))
+        return f"ERROR: memory unavailable — service metadata cannot be looked up ({exc})."
 
     return _format_record(record)
 

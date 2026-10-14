@@ -429,8 +429,8 @@ class TestRunEval:
         assert len(results) == 1
         assert results[0].scenario_id == "bad_deploy_01"
 
-    async def test_episodic_memory_gets_the_pool_and_pool_is_closed(self, tmp_path: Path) -> None:
-        """run_eval opens the Postgres pool, hands it to EpisodicMemory, closes it after."""
+    async def test_memory_gets_the_pool_and_pool_is_closed(self, tmp_path: Path) -> None:
+        """run_eval opens the Postgres pool, hands it to both memories, closes it after."""
         pool = MagicMock(name="pool")
         with (
             patch("sentinel.eval.runner.get_settings", return_value=_settings_mock(tmp_path)),
@@ -443,7 +443,7 @@ class TestRunEval:
             ),
             patch("sentinel.eval.runner.close_pool", new_callable=AsyncMock) as close_pool,
             patch("sentinel.eval.runner.EmbeddingClient") as embedding_cls,
-            patch("sentinel.eval.runner.SemanticMemory"),
+            patch("sentinel.eval.runner.SemanticMemory") as semantic_cls,
             patch("sentinel.eval.runner.EpisodicMemory") as episodic_cls,
             patch("sentinel.eval.runner.ShortTermMemory"),
             patch("sentinel.eval.runner.apply_sdk_defaults"),
@@ -454,6 +454,7 @@ class TestRunEval:
         ):
             await run_eval(scenario_ids=["missing"], db_path=tmp_path / "test.db")
 
+        semantic_cls.assert_called_once_with(pool)
         episodic_cls.assert_called_once_with(pool, embedding_cls.from_model_name.return_value)
         close_pool.assert_awaited_once()
 

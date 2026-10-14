@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -68,15 +67,10 @@ def test_tool_deps_scenario_can_be_set(
     assert deps.scenario is scenario
 
 
-async def test_tool_deps_with_real_memory_objects(tmp_path: Path) -> None:
+def test_tool_deps_with_real_memory_objects() -> None:
     """ToolDeps accepts concrete memory implementations, not just mocks."""
-    from sentinel.infra.db import create_tables  # noqa: PLC0415
-
-    db_path = tmp_path / "test.db"
-    await create_tables(db_path)
-
     client = EmbeddingClient(MagicMock())
-    semantic = SemanticMemory(db_path)
+    semantic = SemanticMemory(None)  # no pool: constructs; calls would raise
     episodic = EpisodicMemory(None, client)  # no pool: constructs; calls would raise
 
     deps = ToolDeps(semantic_memory=semantic, episodic_memory=episodic)

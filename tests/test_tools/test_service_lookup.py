@@ -1,13 +1,19 @@
-"""Tests for sentinel.tools.service_lookup — get_service_metadata tool."""
+"""Tests for sentinel.tools.service_lookup — get_service_metadata tool.
+
+Unit tests: no database. The tool is exercised against an in-memory stand-in for
+SemanticMemory, and against a real SemanticMemory with no pool for the "memory
+unavailable" path. Lookups against the services table are covered by
+tests/test_memory/test_semantic.py.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import Any
 
 import pytest
 from agents import FunctionTool
 
-from data.seed import seed
+from sentinel.exceptions import SentinelMemoryError
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.memory import Runbook, SemanticRecord
 from sentinel.models.service import ServiceMetadata, ServiceTier
@@ -17,19 +23,59 @@ from sentinel.tools.service_lookup import (
     make_service_lookup_tool,
 )
 
+
+class _InMemorySemantic(SemanticMemory):
+    """SemanticMemory stand-in: records in a dict. Only query (the tool's call) is overridden."""
+
+    def __init__(self, records: dict[str, SemanticRecord]) -> None:
+        super().__init__(None)
+        self._records = records
+
+    async def query(self, query_input: Any, *, top_k: int = 5) -> SemanticRecord:
+        name = str(query_input)
+        if name not in self._records:
+            raise KeyError(f"Service not found in semantic memory: {name!r}")
+        return self._records[name]
+
+
+class _FailingSemantic(SemanticMemory):
+    """SemanticMemory whose database fails mid-query."""
+
+    async def query(self, query_input: Any, *, top_k: int = 5) -> SemanticRecord:
+        raise SentinelMemoryError("database operation failed: ConnectionDoesNotExistError")
+
+
+_GATEWAY = SemanticRecord(
+    service=ServiceMetadata(
+        name="api-gateway",
+        team="team-platform",
+        tier=ServiceTier.CRITICAL,
+        oncall_channel="#oncall-platform",
+        repo_url="https://github.com/acme/api-gateway",
+        description="Edge routing",
+        dependencies=["auth-service", "payment-service"],
+    ),
+    runbooks=[
+        Runbook(
+            id="api-gateway-runbook",
+            service_name="api-gateway",
+            failure_class="general",
+            steps=["Check recent deploys", "Identify the bad commit", "Open a revert PR"],
+        )
+    ],
+)
+
+_LEAF = SemanticRecord(
+    service=ServiceMetadata(name="user-service", team="team-users", tier=ServiceTier.STANDARD),
+    runbooks=[],
+)
+
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture()
-async def db_path(tmp_path: Path) -> Path:
-    path = tmp_path / "test_service_lookup.db"
-    await seed(path, verbose=False)
-    return path
-
-
-@pytest.fixture()
-def mem(db_path: Path) -> SemanticMemory:
-    return SemanticMemory(db_path)
+def mem() -> SemanticMemory:
+    return _InMemorySemantic({"api-gateway": _GATEWAY, "user-service": _LEAF})
 
 
 # ── make_service_lookup_tool ──────────────────────────────────────────────────
@@ -63,115 +109,56 @@ def test_tool_params_schema_no_memory_leak(mem: SemanticMemory) -> None:
     assert "memory" not in schema_str
 
 
-# ── _build_service_response (integration via seeded DB) ──────────────────────
+# ── _build_service_response ───────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_known_service_returns_string(mem: SemanticMemory) -> None:
+async def test_known_service_response_has_every_field(mem: SemanticMemory) -> None:
     result = await _build_service_response(mem, "api-gateway")
-    assert isinstance(result, str)
-    assert len(result) > 0
+    for expected in (
+        "name: api-gateway",
+        "team: team-platform",
+        "tier: critical",
+        "oncall_channel: #oncall-platform",
+        "repo_url: https://github.com/acme/api-gateway",
+        "description: Edge routing",
+        "dependencies: auth-service, payment-service",
+        "runbooks (1):",
+        "[general] Check recent deploys → Identify the bad commit → Open a revert PR",
+    ):
+        assert expected in result
 
 
 @pytest.mark.asyncio
-async def test_response_contains_service_name(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "api-gateway")
-    assert "api-gateway" in result
-
-
-@pytest.mark.asyncio
-async def test_response_contains_team(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "api-gateway")
-    assert "team-platform" in result
-
-
-@pytest.mark.asyncio
-async def test_response_contains_tier(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "api-gateway")
-    assert "critical" in result
-
-
-@pytest.mark.asyncio
-async def test_response_contains_oncall_channel(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "api-gateway")
-    assert "oncall" in result.lower() or "#oncall" in result
-
-
-@pytest.mark.asyncio
-async def test_response_contains_dependencies(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "api-gateway")
-    # api-gateway depends on auth-service, payment-service, order-service
-    assert "auth-service" in result or "payment-service" in result
-
-
-@pytest.mark.asyncio
-async def test_response_leaf_service_has_none_dependencies(mem: SemanticMemory) -> None:
-    # user-service has no dependencies
+async def test_leaf_service_shows_none_for_missing_fields(mem: SemanticMemory) -> None:
     result = await _build_service_response(mem, "user-service")
-    assert "none" in result
+    assert "dependencies: none" in result
+    assert "oncall_channel: none" in result
+    assert "repo_url: unknown" in result
+    assert "runbooks: none" in result
 
 
 @pytest.mark.asyncio
-async def test_response_contains_runbooks_section(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "api-gateway")
-    assert "runbook" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_response_runbooks_include_failure_class(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "api-gateway")
-    # api-gateway has a bad_deploy runbook
-    assert "bad_deploy" in result
-
-
-@pytest.mark.asyncio
-async def test_response_runbooks_include_step_preview(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "api-gateway")
-    # Runbook steps should appear as a preview
-    # Steps are connected with " → " in the format
-    assert "→" in result
-
-
-@pytest.mark.asyncio
-async def test_all_8_services_return_valid_response(mem: SemanticMemory) -> None:
-    services = [
-        "api-gateway",
-        "user-service",
-        "auth-service",
-        "payment-service",
-        "order-service",
-        "notification-service",
-        "analytics-pipeline",
-        "cdn-proxy",
-    ]
-    for svc in services:
-        result = await _build_service_response(mem, svc)
-        assert svc in result, f"Service name missing from response for {svc}"
-
-
-@pytest.mark.asyncio
-async def test_unknown_service_returns_error_string(mem: SemanticMemory) -> None:
+async def test_unknown_service_returns_not_found(mem: SemanticMemory) -> None:
+    # Tools must return errors as strings, never raise.
     result = await _build_service_response(mem, "nonexistent-service")
-    assert "ERROR" in result or "not found" in result.lower()
+    assert result == "ERROR: Service 'nonexistent-service' not found in the service map."
 
 
 @pytest.mark.asyncio
-async def test_unknown_service_does_not_raise(mem: SemanticMemory) -> None:
-    # Tools must return errors as strings, never raise
-    result = await _build_service_response(mem, "totally-made-up-service")
-    assert isinstance(result, str)
+async def test_unconfigured_memory_reports_unavailable() -> None:
+    """No DATABASE_URL (pool None): a clear tool result, not a crash or "not found"."""
+    result = await _build_service_response(SemanticMemory(None), "api-gateway")
+    assert result.startswith("ERROR: memory unavailable")
+    assert "no database configured" in result
+    assert "not found" not in result
 
 
 @pytest.mark.asyncio
-async def test_payment_service_has_db_pool_runbook(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "payment-service")
-    assert "db_pool" in result
-
-
-@pytest.mark.asyncio
-async def test_analytics_pipeline_has_memory_leak_runbook(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "analytics-pipeline")
-    assert "memory_leak" in result
+async def test_database_failure_reports_unavailable() -> None:
+    result = await _build_service_response(_FailingSemantic(None), "api-gateway")
+    assert result.startswith("ERROR: memory unavailable")
+    assert "ConnectionDoesNotExistError" in result
 
 
 # ── _format_record (unit tests with synthetic data) ───────────────────────────

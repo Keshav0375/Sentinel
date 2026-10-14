@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from agents import Agent
 from agents.extensions.models.litellm_model import LitellmModel
 
-from data.seed import seed
 from sentinel.agents.triage import TRIAGE_AGENT_NAME, build_triage_agent
 from sentinel.config import Settings
 from sentinel.memory.episodic import EpisodicMemory
@@ -20,15 +18,9 @@ from sentinel.models.incident import Severity, TriageResult
 
 
 @pytest.fixture()
-async def db_path(tmp_path: Path) -> Path:
-    path = tmp_path / "test_triage.db"
-    await seed(path, verbose=False)
-    return path
-
-
-@pytest.fixture()
-def semantic_memory(db_path: Path) -> SemanticMemory:
-    return SemanticMemory(db_path)
+def semantic_memory() -> SemanticMemory:
+    # No pool: the agent is only built here, never run, so memory is never called.
+    return SemanticMemory(None)
 
 
 @pytest.fixture()

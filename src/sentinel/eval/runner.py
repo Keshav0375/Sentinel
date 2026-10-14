@@ -298,12 +298,12 @@ async def run_eval(
     except ImportError:
         logger.warning("eval_seed_skipped", reason="data package not on Python path")
 
-    # Postgres pool for episodic memory. None without DATABASE_URL: every episodic call
-    # then raises, and search_past_incidents reports "memory unavailable".
+    # Postgres pool for semantic and episodic memory. None without DATABASE_URL: every
+    # memory call then raises, and the memory tools report "memory unavailable".
     pool = await init_pool_from_settings(settings)
     try:
         embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
-        semantic_memory = SemanticMemory(resolved_db)
+        semantic_memory = SemanticMemory(pool)
         episodic_memory = EpisodicMemory(pool, embedding_client)
         short_term_memory = ShortTermMemory()
 

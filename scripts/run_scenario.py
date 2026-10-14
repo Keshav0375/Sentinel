@@ -151,9 +151,10 @@ async def run_scenario(
 
     # ── Memory clients ─────────────────────────────────────────────────────────
     embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
-    semantic_memory = SemanticMemory(resolved_db)
-    # Postgres pool for episodic memory; None without DATABASE_URL (memory unavailable).
+    # Postgres pool for semantic and episodic memory; None without DATABASE_URL (memory
+    # unavailable).
     pool = await init_pool_from_settings(settings)
+    semantic_memory = SemanticMemory(pool)
     episodic_memory = EpisodicMemory(pool, embedding_client)
     short_term_memory = ShortTermMemory()
     print(f"  [OK] embedding model: {settings.sentinel_embedding_model}")

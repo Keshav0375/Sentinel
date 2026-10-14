@@ -260,12 +260,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> None:
     """Build the memory clients, SDK defaults, tracing and routers, and mount them.
 
-    *pool* is None when no ``DATABASE_URL`` is configured: episodic memory is still
-    built, and every call to it raises ``SentinelMemoryError`` ("memory unavailable").
+    *pool* is None when no ``DATABASE_URL`` is configured: semantic and episodic memory
+    are still built, and every call to them raises ``SentinelMemoryError`` ("memory
+    unavailable").
     """
     # ── Memory clients ────────────────────────────────────────────────────────
     embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
-    semantic_memory = SemanticMemory(settings.sentinel_db_path)
+    semantic_memory = SemanticMemory(pool)
     episodic_memory = EpisodicMemory(pool, embedding_client)
     short_term_memory = ShortTermMemory()
 
