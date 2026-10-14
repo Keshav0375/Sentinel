@@ -21,10 +21,12 @@ from sentinel.models.incident import IncidentStatus
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 _ORCH_PATCH = "sentinel.main._build_orchestrator"
+# The pipeline runs the orchestrator through providers.router.call_with_fallback.
+_RUN_PATCH = "agents.Runner.run"
 
 
 def _fake_settings() -> Settings:
-    return Settings(groq_api_key="gsk_test", _env_file=None)
+    return Settings(anthropic_api_key="sk-ant-test", openai_api_key="sk-test", _env_file=None)
 
 
 def _make_alert(service: str = "api-gateway") -> AlertPayload:
@@ -151,7 +153,7 @@ async def test_pipeline_fn_marks_incident_resolved_on_success() -> None:
 
     with (
         patch(_ORCH_PATCH, return_value=MagicMock()),
-        patch("sentinel.main.Runner.run", new_callable=AsyncMock, return_value=mock_result),
+        patch(_RUN_PATCH, new_callable=AsyncMock, return_value=mock_result),
     ):
         fn = _make_fn(stm)
         await fn("inc-test0001", _make_alert())
@@ -166,7 +168,7 @@ async def test_pipeline_fn_marks_incident_escalated_on_exception() -> None:
     with (
         patch(_ORCH_PATCH, return_value=MagicMock()),
         patch(
-            "sentinel.main.Runner.run",
+            _RUN_PATCH,
             new_callable=AsyncMock,
             side_effect=RuntimeError("LLM timeout"),
         ),
@@ -185,7 +187,7 @@ async def test_pipeline_fn_does_not_raise_on_exception() -> None:
     with (
         patch(_ORCH_PATCH, return_value=MagicMock()),
         patch(
-            "sentinel.main.Runner.run",
+            _RUN_PATCH,
             new_callable=AsyncMock,
             side_effect=Exception("catastrophic failure"),
         ),
@@ -207,7 +209,7 @@ async def test_pipeline_fn_handles_cleared_incident_gracefully() -> None:
 
     with (
         patch(_ORCH_PATCH, return_value=MagicMock()),
-        patch("sentinel.main.Runner.run", side_effect=clear_during_pipeline),
+        patch(_RUN_PATCH, side_effect=clear_during_pipeline),
     ):
         fn = _make_fn(stm)
         await fn("inc-cleared01", _make_alert())
@@ -225,7 +227,7 @@ async def test_pipeline_fn_passes_incident_id_in_input() -> None:
 
     with (
         patch(_ORCH_PATCH, return_value=MagicMock()),
-        patch("sentinel.main.Runner.run", side_effect=capture_input),
+        patch(_RUN_PATCH, side_effect=capture_input),
     ):
         fn = _make_fn(stm)
         await fn("inc-idcheck0", _make_alert())
@@ -246,7 +248,7 @@ async def test_pipeline_fn_respects_max_turns() -> None:
 
     with (
         patch(_ORCH_PATCH, return_value=MagicMock()),
-        patch("sentinel.main.Runner.run", side_effect=capture_kwargs),
+        patch(_RUN_PATCH, side_effect=capture_kwargs),
     ):
         fn = _make_fn(stm, max_turns=7)
         await fn("inc-test0001", _make_alert())
@@ -266,7 +268,7 @@ async def test_pipeline_fn_default_max_turns() -> None:
 
     with (
         patch(_ORCH_PATCH, return_value=MagicMock()),
-        patch("sentinel.main.Runner.run", side_effect=capture_kwargs),
+        patch(_RUN_PATCH, side_effect=capture_kwargs),
     ):
         fn = _make_fn(stm)
         await fn("inc-test0001", _make_alert())
@@ -280,9 +282,9 @@ async def test_pipeline_fn_escalates_when_provider_key_missing() -> None:
     stm = _populated_stm()
 
     def keyless_settings() -> Settings:
-        return Settings(groq_api_key=None, _env_file=None)  # type: ignore[call-arg]
+        return Settings(_env_file=None)  # type: ignore[call-arg]
 
-    with patch("sentinel.main.Runner.run", new_callable=AsyncMock) as run:
+    with patch(_RUN_PATCH, new_callable=AsyncMock) as run:
         fn = make_pipeline_fn(keyless_settings, MagicMock(), MagicMock(), stm)
         await fn("inc-test0001", _make_alert())
 

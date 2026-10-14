@@ -63,9 +63,7 @@
     .model-badge{display:inline-flex;align-items:center;gap:4px;
                  padding:3px 10px;border-radius:12px;font-size:11px;
                  font-weight:600;background:var(--surface-2);
-                 border:1px solid var(--border);color:var(--text-secondary);
-                 cursor:pointer;transition:border-color var(--transition)}
-    .model-badge:hover{border-color:var(--blue)}
+                 border:1px solid var(--border);color:var(--text-secondary)}
     .model-badge .badge-label{color:var(--muted);font-weight:400}
     .fire-row{display:flex;align-items:center;gap:8px}
     select{background:var(--bg);border:1px solid var(--border);color:var(--text);
@@ -256,17 +254,6 @@
     .resolve-value code{font-family:var(--mono);background:var(--surface-2);
                         padding:1px 6px;border-radius:3px;font-size:12px}
 
-    /* ══ Settings Modal ════════════════════════════════════════════════════ */
-    #settings-modal .modal-card{border:2px solid var(--blue);max-width:520px}
-    #settings-modal h2{color:var(--blue)}
-    .setting-row{display:flex;align-items:center;gap:12px;margin-bottom:12px}
-    .setting-row:last-child{margin-bottom:0}
-    .setting-label{font-size:12px;font-weight:600;min-width:80px;color:var(--muted)}
-    .setting-row select{flex:1;min-width:0}
-    .setting-note{font-size:11px;color:var(--muted);margin-top:8px;
-                  padding:8px 10px;background:var(--bg);border-radius:var(--r);
-                  line-height:1.5}
-
     /* ══ Footer ════════════════════════════════════════════════════════════ */
     footer{background:var(--surface);border-top:1px solid var(--border);
            padding:8px 20px;display:flex;align-items:center;gap:24px;
@@ -293,11 +280,11 @@
   </div>
 
   <div class="header-center" id="model-badges">
-    <div class="model-badge" onclick="openSettings()" title="Click to configure models">
+    <div class="model-badge" title="Models are fixed per role (§4.7)">
       <span class="badge-label">Triage</span>
       <span id="badge-triage">loading...</span>
     </div>
-    <div class="model-badge" onclick="openSettings()" title="Click to configure models">
+    <div class="model-badge" title="Models are fixed per role (§4.7)">
       <span class="badge-label">Analysis</span>
       <span id="badge-analysis">loading...</span>
     </div>
@@ -385,33 +372,6 @@
   </div>
 </div>
 
-<!-- ═══ SETTINGS MODAL ════════════════════════════════════════════════════ -->
-<div class="modal-backdrop" id="settings-modal" onclick="closeModal('settings-modal')">
-  <div class="modal-card" onclick="event.stopPropagation()">
-    <h2>&#9881; Model Configuration</h2>
-    <div class="setting-row">
-      <span class="setting-label">Triage</span>
-      <select id="cfg-triage"></select>
-    </div>
-    <div class="setting-row">
-      <span class="setting-label">Analysis</span>
-      <select id="cfg-analysis"></select>
-    </div>
-    <div class="setting-row">
-      <span class="setting-label">Judge</span>
-      <select id="cfg-judge"></select>
-    </div>
-    <div class="setting-note">
-      Changes take effect on the next scenario fire. Models require the matching
-      API key to be set in <code>.env</code> (e.g. <code>ANTHROPIC_API_KEY</code>
-      for <code>anthropic/</code> models).
-    </div>
-    <div class="modal-actions" style="margin-top:16px">
-      <button class="btn btn-primary" onclick="saveConfig()">Save</button>
-      <button class="btn btn-outline" onclick="closeModal('settings-modal')">Cancel</button>
-    </div>
-  </div>
-</div>
 
 <!-- ═══ FOOTER ═════════════════════════════════════════════════════════════ -->
 <footer>
@@ -451,24 +411,6 @@ const AGENTS = [
 
 const SEV_MAP = {critical:'critical',high:'high',warning:'warning',low:'low',info:'info'};
 
-const MODEL_OPTIONS = {
-  groq: [
-    'groq/llama-3.3-70b-versatile',
-    'groq/llama-3.1-8b-instant',
-    'groq/llama-3.1-70b-versatile',
-    'groq/gemma2-9b-it',
-    'groq/mixtral-8x7b-32768',
-  ],
-  openai: [
-    'openai/gpt-4o',
-    'openai/gpt-4o-mini',
-  ],
-  anthropic: [
-    'anthropic/claude-sonnet-4-6',
-    'anthropic/claude-haiku-4-5',
-    'anthropic/claude-opus-4-6',
-  ],
-};
 
 const TOOL_LABELS = {
   get_service_metadata: 'Looking up service metadata',
@@ -527,7 +469,6 @@ async function loadConfig() {
     if (!r.ok) return;
     currentConfig = await r.json();
     updateModelBadges();
-    populateSettingsDropdowns();
   } catch { /* config display is optional */ }
 }
 
@@ -549,51 +490,9 @@ async function loadHistory() {
 
 function updateModelBadges() {
   const fmt = s => s.includes('/') ? s.split('/')[1] : s;
-  document.getElementById('badge-triage').textContent = fmt(currentConfig.triage_model || '');
-  document.getElementById('badge-analysis').textContent = fmt(currentConfig.analysis_model || '');
-}
-
-function populateSettingsDropdowns() {
-  const allModels = [].concat(...Object.values(MODEL_OPTIONS));
-  ['triage', 'analysis', 'judge'].forEach(role => {
-    const sel = document.getElementById(`cfg-${role}`);
-    const current = currentConfig[`${role}_model`] || '';
-    sel.innerHTML = allModels.map(m =>
-      `<option value="${esc(m)}" ${m === current ? 'selected' : ''}>${esc(m)}</option>`
-    ).join('');
-    if (current && !allModels.includes(current)) {
-      sel.innerHTML = `<option value="${esc(current)}" selected>${esc(current)}</option>` + sel.innerHTML;
-    }
-  });
-}
-
-function openSettings() {
-  document.getElementById('settings-modal').classList.add('on');
-}
-
-async function saveConfig() {
-  const body = {
-    triage_model: document.getElementById('cfg-triage').value,
-    analysis_model: document.getElementById('cfg-analysis').value,
-    judge_model: document.getElementById('cfg-judge').value,
-  };
-  try {
-    const r = await fetch('/api/config', {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      alert(err.detail || `Error: HTTP ${r.status}`);
-      return;
-    }
-    currentConfig = await r.json();
-    updateModelBadges();
-    closeModal('settings-modal');
-  } catch(e) {
-    alert(`Failed to save: ${e.message}`);
-  }
+  const roles = currentConfig.roles || {};
+  document.getElementById('badge-triage').textContent = fmt(roles.triage?.primary || '');
+  document.getElementById('badge-analysis').textContent = fmt(roles.analysis?.primary || '');
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

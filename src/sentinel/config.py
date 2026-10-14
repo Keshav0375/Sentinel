@@ -12,11 +12,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # key is missing fails at use (backend.md §8.2; decision 2026-10-14). A blank value counts
 # as missing.
 _SECRET_FIELDS = (
-    "groq_api_key",
     "openai_api_key",
     "anthropic_api_key",
-    "azure_api_key",
-    "gemini_api_key",
     "dd_api_key",
     "dd_app_key",
     "github_api_token",
@@ -43,44 +40,16 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ── Groq (primary dev provider) ───────────────────────────────────────────
-    # All model defaults use groq/, so running an incident needs this key, but booting
-    # does not: resolve_model fails with a clear error when it is unset.
-    groq_api_key: SecretStr | None = None
+    # ── LLM providers (§4.7) ──────────────────────────────────────────────────
+    # Anthropic and OpenAI only. Each agent role has a fixed model pair (§4.7 table, in
+    # providers/router.py); this flag picks which side of the pair runs first. The judge
+    # always runs on the other provider. Models are not configurable per environment.
+    sentinel_primary_provider: Literal["anthropic", "openai"] = "anthropic"
 
-    # Base URL for the Groq-compatible OpenAI client.
-    groq_base_url: str = "https://api.groq.com/openai/v1"
-
-    # ── OpenAI ────────────────────────────────────────────────────────────────
-    # Required only when a sentinel_*_model field uses the "openai/" prefix.
-    openai_api_key: SecretStr | None = None
-
-    # ── Anthropic ─────────────────────────────────────────────────────────────
-    # Required only when a sentinel_*_model field uses the "anthropic/" prefix.
+    # Read at use by providers/router.py, never at boot. A missing primary-provider key
+    # falls back to the other provider; with neither, the incident escalates.
     anthropic_api_key: SecretStr | None = None
-
-    # ── Azure OpenAI ──────────────────────────────────────────────────────────
-    # Required only when a sentinel_*_model field uses the "azure/" prefix.
-    azure_api_key: SecretStr | None = None
-    azure_api_base: str = ""
-    azure_api_version: str = "2024-02-01"
-
-    # ── Gemini (future — excluded from provider layer for now) ────────────────
-    gemini_api_key: SecretStr | None = None
-
-    # ── Models — provider/model format (LiteLLM) ──────────────────────────────
-    # Each string selects both the provider and the model in one value.
-    # Change the prefix to switch providers: groq/ openai/ anthropic/ azure/
-    # See available_models.md for the full list of supported strings.
-
-    # Fast model — triage classification and eval judging.
-    sentinel_triage_model: str = "groq/llama-3.1-8b-instant"
-
-    # Capable model — log analysis, deploy correlation, remediation drafting.
-    sentinel_analysis_model: str = "groq/llama-3.3-70b-versatile"
-
-    # Judge model — kept separate so it can be a different family than the agents.
-    sentinel_judge_model: str = "groq/llama-3.1-8b-instant"
+    openai_api_key: SecretStr | None = None
 
     # Local sentence-transformers model for zero-cost embedding (384 dims).
     sentinel_embedding_model: str = "all-MiniLM-L6-v2"

@@ -201,7 +201,7 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 ### Prerequisites
 
 - Python 3.12+
-- [Groq API key](https://console.groq.com/keys) (free tier is sufficient)
+- An Anthropic and/or OpenAI API key (not needed to boot; an incident without one escalates)
 - Docker + docker-compose (optional but recommended)
 
 ### 1. Clone and configure
@@ -210,7 +210,7 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 git clone https://github.com/keshxv/sentinel.git
 cd sentinel
 cp .env.example .env
-# Edit .env — add your GROQ_API_KEY
+# Edit .env — add ANTHROPIC_API_KEY and OPENAI_API_KEY
 ```
 
 ### 2a. Run with Docker
@@ -233,25 +233,17 @@ uvicorn sentinel.main:app --reload
 
 Dashboard: [http://localhost:8000](http://localhost:8000)
 
-### 3. Switch providers (optional)
+### 3. Switch the primary provider (optional)
 
-Model strings use the `provider/model` format. Swap any provider with 3 env vars — no code changes.
+Each agent role runs a fixed Anthropic/OpenAI model pair (architecture §4.7, in
+`src/sentinel/providers/router.py`). Anthropic runs first by default; a rate limit, timeout
+or API error re-runs the agent once on OpenAI. To run OpenAI first:
 
-**Switch analysis to Anthropic Claude:**
 ```env
-SENTINEL_ANALYSIS_MODEL=anthropic/claude-sonnet-4-6
-ANTHROPIC_API_KEY=sk-ant-...
+SENTINEL_PRIMARY_PROVIDER=openai
 ```
 
-**Switch everything to OpenAI:**
-```env
-SENTINEL_TRIAGE_MODEL=openai/gpt-4o-mini
-SENTINEL_ANALYSIS_MODEL=openai/gpt-4o
-SENTINEL_JUDGE_MODEL=openai/gpt-4o-mini
-OPENAI_API_KEY=sk-...
-```
-
-See [available_models.md](available_models.md) for the full model table and provider capability matrix.
+The eval judge always runs on the provider the agents do not use.
 
 ### 4. Fire a scenario
 
@@ -295,7 +287,7 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 | Layer | Technology |
 |-------|-----------|
 | Agent framework | [openai-agents](https://github.com/openai/openai-agents-python) (Agents SDK) |
-| LLM | LiteLLM multi-provider — `groq/`, `openai/`, `anthropic/`, `azure/` via `provider/model` env var. Default: Groq (free tier). See [available_models.md](available_models.md). |
+| LLM | LiteLLM — Anthropic (default) and OpenAI, a fixed model pair per agent role with automatic fallback (§4.7). |
 | API layer | FastAPI + uvicorn |
 | Memory — episodic | SQLite via aiosqlite + cosine similarity |
 | Memory — semantic | SQLite (service map, runbooks) |

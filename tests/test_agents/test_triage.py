@@ -39,7 +39,6 @@ def triage_agent(
     return build_triage_agent(
         semantic_memory,
         episodic_memory,
-        model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
 
@@ -174,7 +173,7 @@ def test_triage_agent_uses_litellm_model(triage_agent: Agent[TriageResult]) -> N
     assert isinstance(triage_agent.model, LitellmModel)
 
 
-def test_triage_agent_model_string_forwarded(
+def test_triage_agent_runs_on_its_role_primary_model(
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     fake_settings: Settings,
@@ -182,14 +181,13 @@ def test_triage_agent_model_string_forwarded(
     agent = build_triage_agent(
         semantic_memory,
         episodic_memory,
-        model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.1-8b-instant"
+    assert agent.model.model == "anthropic/claude-haiku-4-5"
 
 
-def test_triage_agent_custom_model_string(
+def test_triage_agent_primary_openai_runs_openai_model(
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     fake_settings: Settings,
@@ -197,11 +195,10 @@ def test_triage_agent_custom_model_string(
     agent = build_triage_agent(
         semantic_memory,
         episodic_memory,
-        model_string="groq/llama-3.3-70b-versatile",
-        settings=fake_settings,
+        settings=fake_settings.model_copy(update={"sentinel_primary_provider": "openai"}),
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.3-70b-versatile"
+    assert agent.model.model == "openai/gpt-4o-mini"
 
 
 def test_triage_agent_no_handoffs(triage_agent: Agent[TriageResult]) -> None:

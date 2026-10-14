@@ -22,9 +22,8 @@ from typing import Any
 
 # asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
-from agents import Runner, add_trace_processor
+from agents import add_trace_processor
 from agents import trace as agent_trace
-from openai import AsyncOpenAI
 
 from sentinel.agents.comms import build_comms_agent
 from sentinel.agents.deploy_correlator import build_deploy_correlator_agent
@@ -32,8 +31,8 @@ from sentinel.agents.log_analyst import build_log_analyst_agent
 from sentinel.agents.orchestrator import build_orchestrator_agent
 from sentinel.agents.remediation import build_remediation_agent
 from sentinel.agents.triage import build_triage_agent
-from sentinel.config import Settings, get_settings, secret_value
-from sentinel.eval.judge import evaluate_trajectory
+from sentinel.config import Settings, get_settings
+from sentinel.eval.judge import evaluate_trajectory, make_judge_client
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario
 from sentinel.generator.scenarios import Scenario
 from sentinel.infra.database import close_pool, init_pool_from_settings
@@ -46,7 +45,7 @@ from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.eval_result import TrajectoryScore
 from sentinel.models.incident import IncidentStatus
-from sentinel.providers import apply_sdk_defaults
+from sentinel.providers import apply_sdk_defaults, call_with_fallback
 
 logger = get_logger("sentinel.eval.runner")
 
@@ -68,7 +67,6 @@ async def run_scenario_eval(
     short_term_memory: ShortTermMemory,
     trajectories_dir: Path,
     settings: Settings,
-    judge_model: str,
     max_turns: int = 20,
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
@@ -84,8 +82,8 @@ async def run_scenario_eval(
         short_term_memory: Shared STM — keyed by incident_id so concurrent
             scenarios don't collide.
         trajectories_dir: Directory where SentinelTracer writes trajectory JSON.
-        settings: Validated Settings — used for provider resolution.
-        judge_model: Bare model name for the eval judge (Groq-compatible).
+        settings: Validated Settings — selects the primary provider (the judge runs on
+            the other one) and supplies the provider credentials.
         max_turns: Tool-call cap per pipeline run.
         semantic_memory: Service metadata store.
         episodic_memory: Past-incident similarity store.
@@ -105,45 +103,22 @@ async def run_scenario_eval(
     )
 
     # ── Build fresh agents ─────────────────────────────────────────────────────
-    triage_agent = build_triage_agent(
-        semantic_memory,
-        episodic_memory,
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    log_analyst_agent = build_log_analyst_agent(
-        semantic_memory,
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-    deploy_correlator_agent = build_deploy_correlator_agent(
-        pool,
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    remediation_agent = build_remediation_agent(
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-    comms_agent = build_comms_agent(
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
+    triage_agent = build_triage_agent(semantic_memory, episodic_memory, settings=settings)
+    log_analyst_agent = build_log_analyst_agent(semantic_memory, settings=settings)
+    deploy_correlator_agent = build_deploy_correlator_agent(pool, settings=settings)
+    remediation_agent = build_remediation_agent(settings=settings)
+    comms_agent = build_comms_agent(settings=settings)
     orchestrator = build_orchestrator_agent(
         triage_agent,
         log_analyst_agent,
         deploy_correlator_agent,
         remediation_agent,
         comms_agent,
-        model_string=settings.sentinel_analysis_model,
         settings=settings,
     )
 
-    # Judge uses Groq directly (not LiteLLM) — strip provider prefix if present.
-    groq_client = AsyncOpenAI(
-        api_key=secret_value(settings.groq_api_key, "GROQ_API_KEY"),
-        base_url=settings.groq_base_url,
-    )
+    # The judge runs on the non-primary provider (§4.7, decision 2026-10-15).
+    judge_model, judge_client = make_judge_client(settings)
 
     # ── Set up incident in STM ─────────────────────────────────────────────────
     short_term_memory.create(incident_id, alert)
@@ -157,7 +132,13 @@ async def run_scenario_eval(
             "incident_pipeline",
             metadata={"incident_id": incident_id},
         ):
-            await Runner.run(orchestrator, input_text, max_turns=max_turns)
+            await call_with_fallback(
+                orchestrator,
+                input_text,
+                role="orchestrator",
+                settings=settings,
+                run_kwargs={"max_turns": max_turns},
+            )
         short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
         logger.info("eval_pipeline_complete", incident_id=incident_id)
     except Exception as exc:  # noqa: BLE001
@@ -221,7 +202,7 @@ async def run_scenario_eval(
         ground_truth,
         incident_id=incident_id,
         scenario_id=scenario_id,
-        client=groq_client,
+        client=judge_client,
         model=judge_model,
     )
 
@@ -245,7 +226,6 @@ async def run_eval(
     *,
     db_path: Path | None = None,
     trajectories_dir: Path | None = None,
-    judge_model: str | None = None,
 ) -> list[EvalRunResult]:
     """Run the full eval suite and return per-scenario results.
 
@@ -262,7 +242,6 @@ async def run_eval(
         db_path: SQLite path override. Defaults to config value.
         trajectories_dir: Directory for trajectory JSON files.
             Defaults to ``reports/trajectories/eval``.
-        judge_model: Override judge model. Defaults to config value.
 
     Returns:
         List of ``EvalRunResult`` in scenario order.
@@ -272,13 +251,12 @@ async def run_eval(
 
     resolved_db = db_path or settings.sentinel_db_path
     resolved_traj = trajectories_dir or Path("reports/trajectories/eval")
-    resolved_judge = judge_model or settings.sentinel_judge_model
     resolved_ids = scenario_ids or list_scenarios()
 
     logger.info(
         "eval_run_start",
         scenario_count=len(resolved_ids),
-        judge_model=resolved_judge,
+        primary_provider=settings.sentinel_primary_provider,
         db_path=str(resolved_db),
     )
 
@@ -325,7 +303,6 @@ async def run_eval(
                     short_term_memory=short_term_memory,
                     trajectories_dir=resolved_traj,
                     settings=settings,
-                    judge_model=resolved_judge,
                     max_turns=settings.sentinel_max_tool_calls + 5,
                     semantic_memory=semantic_memory,
                     episodic_memory=episodic_memory,

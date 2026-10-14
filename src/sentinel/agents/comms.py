@@ -9,14 +9,17 @@ from agents import Agent
 from sentinel.agents.loader import load_prompt
 from sentinel.config import Settings
 from sentinel.models.comms import SlackSummary
-from sentinel.providers import get_capabilities, resolve_model
+from sentinel.providers import Role, model_for, role_capabilities
 
 COMMS_AGENT_NAME = "comms_agent"
+# The §4.7 role whose model pair this agent runs on (providers/router.py). §4.7 has no comms
+# row and backend 4.2 deletes this agent; until then it uses the constrained-text-generation
+# pair.
+_ROLE: Role = "pr_content_generator"
 
 
 def build_comms_agent(
     *,
-    model_string: str,
     settings: Settings,
 ) -> Agent[SlackSummary]:
     """Create a configured Comms Agent with injected dependencies.
@@ -28,21 +31,18 @@ def build_comms_agent(
     (backend.md §4.8).
 
     Args:
-        model_string: Provider/model string (e.g. 'groq/llama-3.1-8b-instant').
-        settings: Validated Settings instance for API key lookup.
+        settings: Validated Settings — selects the primary provider and supplies its key.
 
     Returns:
         Configured Agent that produces a ``SlackSummary`` as structured output
         when the provider supports it, or plain text otherwise.
     """
-    llm = resolve_model(model_string, settings)
-    caps = get_capabilities(model_string)
+    llm, _ = model_for(_ROLE, settings)
+    caps = role_capabilities(_ROLE, settings)
 
     kwargs: dict[str, Any] = {}
     if caps.supports_structured_outputs:
         kwargs["output_type"] = SlackSummary
-    if caps.default_model_settings:
-        kwargs["model_settings"] = caps.default_model_settings
 
     return Agent(
         name=COMMS_AGENT_NAME,

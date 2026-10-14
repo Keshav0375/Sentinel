@@ -29,5 +29,9 @@ class AgentError(SentinelError):
     """An agent run failed or produced output that violates its contract."""
 
 
+class ProviderUnavailableError(AgentError):
+    """No LLM provider can serve a call: its credential (and the fallback's) is not set."""
+
+
 class EvalError(SentinelError):
     """The eval pipeline could not score a run."""

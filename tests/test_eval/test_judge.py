@@ -8,12 +8,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from sentinel.config import Settings
 from sentinel.eval.judge import (
+    LitellmJudgeClient,
     _parse_judge_response,
     _strip_code_fences,
     _zero_score,
     evaluate_trajectory,
+    make_judge_client,
 )
+from sentinel.exceptions import ProviderUnavailableError
 from sentinel.models.eval_result import EvalDimension, TrajectoryScore
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -35,17 +39,9 @@ def _all_dim_scores(score: float = 4.0) -> dict[str, float]:
 
 
 def _make_client(content: str = "") -> MagicMock:
-    """Create a mock AsyncOpenAI client that returns a fixed response."""
-    choice = MagicMock()
-    choice.message.content = content or _make_judge_response()
-
-    completion = MagicMock()
-    completion.choices = [choice]
-
+    """Create a mock JudgeClient whose ``complete`` returns a fixed response."""
     client = MagicMock()
-    client.chat = MagicMock()
-    client.chat.completions = MagicMock()
-    client.chat.completions.create = AsyncMock(return_value=completion)
+    client.complete = AsyncMock(return_value=content or _make_judge_response())
     return client
 
 
@@ -195,6 +191,7 @@ class TestEvaluateTrajectory:
             incident_id="inc-001",
             scenario_id="bad_deploy_01",
             client=client,
+            model="openai/gpt-4o",
         )
         assert isinstance(result, TrajectoryScore)
 
@@ -206,6 +203,7 @@ class TestEvaluateTrajectory:
             incident_id="inc-test",
             scenario_id="my_scenario",
             client=client,
+            model="openai/gpt-4o",
         )
         assert result.incident_id == "inc-test"
         assert result.scenario_id == "my_scenario"
@@ -230,6 +228,7 @@ class TestEvaluateTrajectory:
             incident_id="i",
             scenario_id="s",
             client=client,
+            model="openai/gpt-4o",
         )
         assert result.total_score == pytest.approx(5.0)
 
@@ -241,8 +240,9 @@ class TestEvaluateTrajectory:
             incident_id="i",
             scenario_id="s",
             client=client,
+            model="openai/gpt-4o",
         )
-        call_args = client.chat.completions.create.call_args
+        call_args = client.complete.call_args
         messages = call_args.kwargs["messages"]
         system_msg = next(m for m in messages if m["role"] == "system")
         assert "triage_accuracy" in system_msg["content"]
@@ -255,25 +255,18 @@ class TestEvaluateTrajectory:
             incident_id="i",
             scenario_id="s",
             client=client,
+            model="openai/gpt-4o",
         )
-        call_args = client.chat.completions.create.call_args
+        call_args = client.complete.call_args
         messages = call_args.kwargs["messages"]
         user_msg = next(m for m in messages if m["role"] == "user")
         assert "inc-sentinel" in user_msg["content"]
 
     async def test_retries_on_json_error(self) -> None:
         """First attempt returns bad JSON, second returns valid response."""
-        bad_response = MagicMock()
-        bad_response.choices = [MagicMock()]
-        bad_response.choices[0].message.content = "NOT VALID JSON"
-
         good_content = _make_judge_response(_all_dim_scores(2.0))
-        good_response = MagicMock()
-        good_response.choices = [MagicMock()]
-        good_response.choices[0].message.content = good_content
-
         client = MagicMock()
-        client.chat.completions.create = AsyncMock(side_effect=[bad_response, good_response])
+        client.complete = AsyncMock(side_effect=["NOT VALID JSON", good_content])
 
         with patch("sentinel.eval.judge.asyncio.sleep", new_callable=AsyncMock):
             result = await evaluate_trajectory(
@@ -282,19 +275,16 @@ class TestEvaluateTrajectory:
                 incident_id="i",
                 scenario_id="s",
                 client=client,
+                model="openai/gpt-4o",
             )
 
         assert result.total_score == pytest.approx(2.0)
-        assert client.chat.completions.create.call_count == 2
+        assert client.complete.call_count == 2
 
     async def test_all_retries_fail_returns_zero_score(self) -> None:
         """All 3 attempts fail — should return a zero-scored result."""
-        bad_response = MagicMock()
-        bad_response.choices = [MagicMock()]
-        bad_response.choices[0].message.content = "INVALID"
-
         client = MagicMock()
-        client.chat.completions.create = AsyncMock(return_value=bad_response)
+        client.complete = AsyncMock(return_value="INVALID")
 
         with patch("sentinel.eval.judge.asyncio.sleep", new_callable=AsyncMock):
             result = await evaluate_trajectory(
@@ -303,6 +293,7 @@ class TestEvaluateTrajectory:
                 incident_id="i",
                 scenario_id="s",
                 client=client,
+                model="openai/gpt-4o",
             )
 
         assert result.total_score == pytest.approx(0.0)
@@ -310,7 +301,7 @@ class TestEvaluateTrajectory:
 
     async def test_api_exception_retries_then_returns_zero(self) -> None:
         client = MagicMock()
-        client.chat.completions.create = AsyncMock(side_effect=RuntimeError("Network error"))
+        client.complete = AsyncMock(side_effect=RuntimeError("Network error"))
 
         with patch("sentinel.eval.judge.asyncio.sleep", new_callable=AsyncMock):
             result = await evaluate_trajectory(
@@ -319,6 +310,7 @@ class TestEvaluateTrajectory:
                 incident_id="i",
                 scenario_id="s",
                 client=client,
+                model="openai/gpt-4o",
             )
 
         assert result.total_score == 0.0
@@ -331,6 +323,51 @@ class TestEvaluateTrajectory:
             incident_id="i",
             scenario_id="s",
             client=client,
+            model="openai/gpt-4o",
         )
-        call_kwargs = client.chat.completions.create.call_args.kwargs
+        call_kwargs = client.complete.call_args.kwargs
         assert call_kwargs.get("temperature") == 0.0
+
+
+# ── make_judge_client: the non-primary provider (§4.7, decision 2026-10-15) ───
+
+
+def _keys(**kwargs: Any) -> Settings:
+    base: dict[str, Any] = {"anthropic_api_key": "sk-ant-test", "openai_api_key": "sk-test"}
+    base.update(kwargs)
+    return Settings(_env_file=None, **base)  # type: ignore[call-arg]
+
+
+class TestMakeJudgeClient:
+    def test_primary_anthropic_judges_on_openai(self) -> None:
+        model, client = make_judge_client(_keys())
+        assert model == "openai/gpt-4o"
+        assert isinstance(client, LitellmJudgeClient)
+
+    def test_primary_openai_judges_on_anthropic(self) -> None:
+        model, _ = make_judge_client(_keys(sentinel_primary_provider="openai"))
+        assert model == "anthropic/claude-sonnet-4-6"
+
+    def test_missing_judge_key_raises_without_falling_back(self) -> None:
+        """No fallback for the judge: it would land on the agents' provider."""
+        with pytest.raises(ProviderUnavailableError, match="OPENAI_API_KEY"):
+            make_judge_client(_keys(openai_api_key=None))
+
+    async def test_client_calls_litellm_with_the_judge_key(self) -> None:
+        _, client = make_judge_client(_keys())
+        response = MagicMock()
+        response.choices[0].message.content = "{}"
+        with patch(
+            "sentinel.eval.judge.litellm.acompletion", new_callable=AsyncMock
+        ) as acompletion:
+            acompletion.return_value = response
+            text = await client.complete(
+                model="openai/gpt-4o",
+                messages=[{"role": "user", "content": "x"}],
+                temperature=0.0,
+                max_tokens=10,
+            )
+        assert text == "{}"
+        kwargs = acompletion.call_args.kwargs
+        assert kwargs["model"] == "openai/gpt-4o"
+        assert kwargs["api_key"] == "sk-test"

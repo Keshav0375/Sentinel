@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from sentinel.providers.capabilities import ProviderCapabilities, get_capabilities
+from sentinel.providers.capabilities import (
+    ProviderCapabilities,
+    common_capabilities,
+    get_capabilities,
+)
 
 # ── Structured-output-capable providers ───────────────────────────────────────
 
@@ -15,16 +19,22 @@ def test_openai_capabilities() -> None:
     assert caps.strict_schemas is True
 
 
-def test_azure_capabilities() -> None:
-    caps = get_capabilities("azure/my-gpt4o-deployment")
-    assert caps.supports_structured_outputs is True
-    assert caps.strict_schemas is True
-
-
-def test_groq_capabilities() -> None:
-    caps = get_capabilities("groq/llama-3.3-70b-versatile")
+@pytest.mark.parametrize("model", ["groq/llama-3.3-70b-versatile", "azure/gpt-4o-deployment"])
+def test_removed_providers_get_the_safe_default(model: str) -> None:
+    """§4.7 allows Anthropic and OpenAI only; any other prefix gets nothing."""
+    caps = get_capabilities(model)
     assert caps.supports_structured_outputs is False
     assert caps.strict_schemas is False
+
+
+def test_common_capabilities_is_what_both_support() -> None:
+    """An agent may fall back to the other provider, so it gets the intersection."""
+    both = common_capabilities("anthropic/claude-sonnet-4-6", "openai/gpt-4o")
+    assert both == ProviderCapabilities(supports_structured_outputs=False, strict_schemas=False)
+    only_openai = common_capabilities("openai/gpt-4o", "openai/gpt-4o-mini")
+    assert only_openai == ProviderCapabilities(
+        supports_structured_outputs=True, strict_schemas=True
+    )
 
 
 # ── Providers without structured outputs ──────────────────────────────────────
@@ -63,13 +73,13 @@ def test_empty_string_returns_safe_default() -> None:
 
 def test_capabilities_are_frozen() -> None:
     """ProviderCapabilities is a frozen dataclass — mutation must raise."""
-    caps = get_capabilities("groq/llama-3.1-8b-instant")
+    caps = get_capabilities("openai/gpt-4o-mini")
     with pytest.raises((AttributeError, TypeError)):
         caps.supports_structured_outputs = True  # type: ignore[misc]
 
 
 def test_return_type_is_provider_capabilities() -> None:
-    result = get_capabilities("groq/llama-3.1-8b-instant")
+    result = get_capabilities("openai/gpt-4o-mini")
     assert isinstance(result, ProviderCapabilities)
 
 
@@ -78,6 +88,6 @@ def test_return_type_is_provider_capabilities() -> None:
 
 def test_provider_prefix_is_case_insensitive() -> None:
     """Provider prefixes are lower-cased before lookup."""
-    caps_lower = get_capabilities("groq/llama-3.1-8b-instant")
-    caps_upper = get_capabilities("GROQ/llama-3.1-8b-instant")
+    caps_lower = get_capabilities("openai/gpt-4o-mini")
+    caps_upper = get_capabilities("OPENAI/gpt-4o-mini")
     assert caps_lower == caps_upper

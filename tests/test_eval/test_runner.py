@@ -9,7 +9,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import SecretStr
 
 from sentinel.eval.runner import (
     EvalRunResult,
@@ -83,12 +82,11 @@ def _make_stm_mock() -> MagicMock:
     return stm
 
 
-def _make_groq_client() -> MagicMock:
+def _judge() -> tuple[str, MagicMock]:
+    """What make_judge_client returns: the judge model and a mock JudgeClient."""
     client = MagicMock()
-    client.chat = MagicMock()
-    client.chat.completions = MagicMock()
-    client.chat.completions.create = AsyncMock()
-    return client
+    client.complete = AsyncMock()
+    return "openai/gpt-4o", client
 
 
 # ── scores_from_results ───────────────────────────────────────────────────────
@@ -166,10 +164,8 @@ def _fake_settings(tmp_path: Path) -> Any:
     from sentinel.config import Settings  # noqa: PLC0415
 
     return Settings(
-        groq_api_key="gsk_test",
-        sentinel_triage_model="groq/llama-3.1-8b-instant",
-        sentinel_analysis_model="groq/llama-3.3-70b-versatile",
-        sentinel_judge_model="groq/llama-3.1-8b-instant",
+        anthropic_api_key="sk-ant-test",
+        openai_api_key="sk-test",
         sentinel_db_path=tmp_path / "test.db",
     )
 
@@ -191,8 +187,8 @@ class TestRunScenarioEval:
             patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
-            patch("sentinel.eval.runner.Runner.run", new_callable=AsyncMock),
+            patch("sentinel.eval.runner.make_judge_client", return_value=_judge()),
+            patch("sentinel.eval.runner.call_with_fallback", new_callable=AsyncMock),
             patch("sentinel.eval.runner.agent_trace") as mock_trace,
             patch(
                 "sentinel.eval.runner.evaluate_trajectory",
@@ -208,7 +204,6 @@ class TestRunScenarioEval:
                 short_term_memory=stm,
                 trajectories_dir=tmp_path,
                 settings=_fake_settings(tmp_path),
-                judge_model="test-judge",
                 semantic_memory=MagicMock(),
                 episodic_memory=MagicMock(),
             )
@@ -232,9 +227,9 @@ class TestRunScenarioEval:
             patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
+            patch("sentinel.eval.runner.make_judge_client", return_value=_judge()),
             patch(
-                "sentinel.eval.runner.Runner.run",
+                "sentinel.eval.runner.call_with_fallback",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("LLM timeout"),
             ),
@@ -253,7 +248,6 @@ class TestRunScenarioEval:
                 short_term_memory=stm,
                 trajectories_dir=tmp_path,
                 settings=_fake_settings(tmp_path),
-                judge_model="test-judge",
                 semantic_memory=MagicMock(),
                 episodic_memory=MagicMock(),
             )
@@ -292,8 +286,8 @@ class TestRunScenarioEval:
             patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
-            patch("sentinel.eval.runner.Runner.run", new_callable=AsyncMock),
+            patch("sentinel.eval.runner.make_judge_client", return_value=_judge()),
+            patch("sentinel.eval.runner.call_with_fallback", new_callable=AsyncMock),
             patch("sentinel.eval.runner.agent_trace") as mock_trace,
             patch(
                 "sentinel.eval.runner.evaluate_trajectory",
@@ -309,7 +303,6 @@ class TestRunScenarioEval:
                 short_term_memory=stm,
                 trajectories_dir=tmp_path,
                 settings=_fake_settings(tmp_path),
-                judge_model="test-judge",
                 semantic_memory=MagicMock(),
                 episodic_memory=MagicMock(),
             )
@@ -332,8 +325,8 @@ class TestRunScenarioEval:
             patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
             patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
-            patch("sentinel.eval.runner.Runner.run", new_callable=AsyncMock),
+            patch("sentinel.eval.runner.make_judge_client", return_value=_judge()),
+            patch("sentinel.eval.runner.call_with_fallback", new_callable=AsyncMock),
             patch("sentinel.eval.runner.agent_trace") as mock_trace,
             patch(
                 "sentinel.eval.runner.evaluate_trajectory",
@@ -349,7 +342,6 @@ class TestRunScenarioEval:
                 short_term_memory=stm,
                 trajectories_dir=tmp_path,  # no file written
                 settings=_fake_settings(tmp_path),
-                judge_model="test-judge",
                 semantic_memory=MagicMock(),
                 episodic_memory=MagicMock(),
             )
@@ -365,12 +357,8 @@ def _settings_mock(tmp_path: Path) -> MagicMock:
     s = MagicMock()
     s.sentinel_db_path = tmp_path / "test.db"
     s.sentinel_embedding_model = "all-MiniLM-L6-v2"
-    s.groq_api_key = SecretStr("test-key")
-    s.groq_base_url = "https://api.groq.com/openai/v1"
-    s.sentinel_judge_model = "llama-3.1-8b-instant"
+    s.sentinel_primary_provider = "anthropic"
     s.sentinel_max_tool_calls = 20
-    s.sentinel_analysis_model = "llama-3.3-70b-versatile"
-    s.sentinel_triage_model = "llama-3.1-8b-instant"
     s.sentinel_log_level = "INFO"
     s.database_url = ""  # no Postgres: run_eval builds episodic memory with pool=None
     return s

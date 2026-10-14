@@ -10,8 +10,8 @@ Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](
 
 - Python 3.12+, `pyproject.toml` with hatchling
 - `openai-agents` (OpenAI Agents SDK) for orchestration + handoffs
-- `openai` for Groq-compatible LLM calls (base_url: api.groq.com/openai/v1)
-- `google-genai` for Gemini backup calls (NOT google-generativeai, deprecated)
+- `litellm` (via `openai-agents[litellm]`) for LLM calls — Anthropic and OpenAI only, routed
+  per role by `providers/router.py` (§4.7)
 - FastAPI + uvicorn for webhook API
 - Pydantic v2 for all models and tool schemas
 - `pydantic-settings` for config (env-var driven)
@@ -49,7 +49,7 @@ Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](
 - Fixtures in `conftest.py`: mock memory, mock scenario, test config
 - Test file mirrors source: `src/sentinel/tools/log_fetcher.py` → `tests/test_tools/test_log_fetcher.py`
 - The suite never depends on the caller's shell or `.env`: `tests/conftest.py` disables `.env`
-  for `Settings`, unsets `DATABASE_URL` for the session and defaults `GROQ_API_KEY` to a dummy.
+  for `Settings`, unsets `DATABASE_URL` for the session and removes the LLM provider keys.
   A test that needs `DATABASE_URL` sets it itself (`monkeypatch.setenv`) to the test database.
 - Database tests use `TEST_DATABASE_URL` only — never `DATABASE_URL` — and create/drop throwaway
   databases on that server. Without it they skip locally; with `CI=true` they fail.

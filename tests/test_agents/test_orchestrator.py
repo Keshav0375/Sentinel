@@ -20,14 +20,14 @@ from sentinel.agents.remediation import REMEDIATION_AGENT_NAME
 from sentinel.agents.triage import TRIAGE_AGENT_NAME
 from sentinel.config import Settings
 from sentinel.models.incident import IncidentSummary, Severity
-from sentinel.providers import resolve_model
+from sentinel.providers import model_for
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
 def _dummy_agent(name: str, settings: Settings) -> Agent[Any]:
     """Minimal Agent stub — no tools, no handoffs — used to verify wiring."""
-    llm = resolve_model("groq/llama-3.1-8b-instant", settings)
+    llm, _ = model_for("triage", settings)
     return Agent(name=name, instructions="dummy specialist", model=llm)
 
 
@@ -53,7 +53,6 @@ def orchestrator(
         deploy_correlator_agent=specialists["deploy_correlator"],
         remediation_agent=specialists["remediation"],
         comms_agent=specialists["comms"],
-        model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
 
@@ -269,7 +268,7 @@ def test_orchestrator_uses_litellm_model(orchestrator: Agent[IncidentSummary]) -
     assert isinstance(orchestrator.model, LitellmModel)
 
 
-def test_orchestrator_model_string_forwarded(
+def test_orchestrator_runs_on_its_role_primary_model(
     specialists: dict[str, Agent[Any]],
     fake_settings: Settings,
 ) -> None:
@@ -279,14 +278,13 @@ def test_orchestrator_model_string_forwarded(
         deploy_correlator_agent=specialists["deploy_correlator"],
         remediation_agent=specialists["remediation"],
         comms_agent=specialists["comms"],
-        model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.3-70b-versatile"
+    assert agent.model.model == "anthropic/claude-sonnet-4-6"
 
 
-def test_orchestrator_custom_model_string(
+def test_orchestrator_primary_openai_runs_openai_model(
     specialists: dict[str, Agent[Any]],
     fake_settings: Settings,
 ) -> None:
@@ -296,11 +294,10 @@ def test_orchestrator_custom_model_string(
         deploy_correlator_agent=specialists["deploy_correlator"],
         remediation_agent=specialists["remediation"],
         comms_agent=specialists["comms"],
-        model_string="groq/llama-3.1-8b-instant",
-        settings=fake_settings,
+        settings=fake_settings.model_copy(update={"sentinel_primary_provider": "openai"}),
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.1-8b-instant"
+    assert agent.model.model == "openai/gpt-4o"
 
 
 def test_orchestrator_handoffs_are_handoff_objects(

@@ -2,10 +2,11 @@
 
 The suite is independent of the caller's shell and of the developer's ``.env``:
 ``Settings`` never reads ``.env`` here, ``DATABASE_URL`` is unset for the whole session
-(a test that needs it sets it to the test database), ``GROQ_API_KEY`` gets a dummy
-default, the LangFuse keys are removed so the client is disabled and nothing is ever
-sent, and the Datadog settings are removed so ``Settings`` falls back to its defaults (a
-test that needs keys passes fakes). The only database the suite touches is
+(a test that needs it sets it to the test database), the LLM provider keys and
+``SENTINEL_PRIMARY_PROVIDER`` are removed so no test can reach a real model, the LangFuse
+keys are removed so the client is disabled and nothing is ever sent, and the Datadog
+settings are removed so ``Settings`` falls back to its defaults (a test that needs keys
+passes fakes). The only database the suite touches is
 ``TEST_DATABASE_URL``.
 """
 
@@ -39,14 +40,19 @@ _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 _LANGFUSE_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
 # Removed with the LangFuse keys: the suite never holds a real Datadog key or site.
 _DATADOG_VARS = ("DD_API_KEY", "DD_APP_KEY", "DD_SITE")
+# Removed too: the suite never holds a real LLM key, and the §4.7 default provider applies.
+_LLM_VARS = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "SENTINEL_PRIMARY_PROVIDER",
+    "SENTINEL_FAKE_LLM",
+)
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Before collection: a dummy GROQ_API_KEY (Settings boots without one, but agents
-    built from the default groq/ models need one), and no LangFuse keys — a keyless
-    langfuse client is a disabled no-op (no network)."""
-    os.environ.setdefault("GROQ_API_KEY", "fake-key-for-tests")
-    for var in (*_LANGFUSE_KEYS, *_DATADOG_VARS):
+    """Before collection: no LLM keys (a test that needs one passes a fake to Settings)
+    and no LangFuse keys — a keyless langfuse client is a disabled no-op (no network)."""
+    for var in (*_LANGFUSE_KEYS, *_DATADOG_VARS, *_LLM_VARS):
         os.environ.pop(var, None)
 
 
@@ -83,11 +89,16 @@ def make_alembic_config(dsn: str, embedding_client: EmbeddingClient | None = Non
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_environment() -> Iterator[None]:
-    """No ``.env`` for Settings, no ``DATABASE_URL`` and no LangFuse keys for the session.
+    """No ``.env`` for Settings, no ``DATABASE_URL``, LLM or LangFuse keys for the session.
 
     The keys are removed again here, after collection: importing litellm loads the
     developer's ``.env`` into ``os.environ``.
     """
+    # The LLM keys are dropped for good, not restored at teardown: the openai-agents trace
+    # exporter flushes at interpreter exit and would otherwise post the session's traces
+    # to api.openai.com with whatever OPENAI_API_KEY litellm loaded from a developer .env.
+    for var in _LLM_VARS:
+        os.environ.pop(var, None)
     with pytest.MonkeyPatch.context() as mp:
         mp.setitem(Settings.model_config, "env_file", None)
         mp.delenv("DATABASE_URL", raising=False)

@@ -40,7 +40,6 @@ def correlator_agent(
 ) -> Agent[DeployCorrelation]:
     return build_deploy_correlator_agent(
         pool,
-        model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
 
@@ -312,30 +311,28 @@ def test_deploy_correlator_agent_uses_litellm_model(
     assert isinstance(correlator_agent.model, LitellmModel)
 
 
-def test_deploy_correlator_agent_model_string_forwarded(
+def test_deploy_correlator_agent_runs_on_its_role_primary_model(
     pool: MagicMock,
     fake_settings: Settings,
 ) -> None:
     agent = build_deploy_correlator_agent(
         pool,
-        model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.1-8b-instant"
+    assert agent.model.model == "anthropic/claude-sonnet-4-6"
 
 
-def test_deploy_correlator_agent_custom_model_string(
+def test_deploy_correlator_agent_primary_openai_runs_openai_model(
     pool: MagicMock,
     fake_settings: Settings,
 ) -> None:
     agent = build_deploy_correlator_agent(
         pool,
-        model_string="groq/llama-3.3-70b-versatile",
-        settings=fake_settings,
+        settings=fake_settings.model_copy(update={"sentinel_primary_provider": "openai"}),
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.3-70b-versatile"
+    assert agent.model.model == "openai/gpt-4o"
 
 
 def test_deploy_correlator_agent_no_handoffs(
@@ -348,7 +345,6 @@ def test_deploy_correlator_agent_accepts_no_pool(fake_settings: Settings) -> Non
     """Agent constructs without a pool; get_deploy_details reports "unavailable" at call time."""
     agent = build_deploy_correlator_agent(
         None,
-        model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
     assert isinstance(agent, Agent)

@@ -29,7 +29,6 @@ def log_analyst_agent(
 ) -> Agent[LogAnalysis]:
     return build_log_analyst_agent(
         semantic_memory,
-        model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
 
@@ -158,30 +157,28 @@ def test_log_analyst_agent_uses_litellm_model(log_analyst_agent: Agent[LogAnalys
     assert isinstance(log_analyst_agent.model, LitellmModel)
 
 
-def test_log_analyst_agent_model_string_forwarded(
+def test_log_analyst_agent_runs_on_its_role_primary_model(
     semantic_memory: SemanticMemory,
     fake_settings: Settings,
 ) -> None:
     agent = build_log_analyst_agent(
         semantic_memory,
-        model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.3-70b-versatile"
+    assert agent.model.model == "anthropic/claude-sonnet-4-6"
 
 
-def test_log_analyst_agent_custom_model_string(
+def test_log_analyst_agent_primary_openai_runs_openai_model(
     semantic_memory: SemanticMemory,
     fake_settings: Settings,
 ) -> None:
     agent = build_log_analyst_agent(
         semantic_memory,
-        model_string="groq/llama-3.1-8b-instant",
-        settings=fake_settings,
+        settings=fake_settings.model_copy(update={"sentinel_primary_provider": "openai"}),
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.1-8b-instant"
+    assert agent.model.model == "openai/gpt-4o"
 
 
 def test_log_analyst_agent_no_handoffs(log_analyst_agent: Agent[LogAnalysis]) -> None:
@@ -197,7 +194,6 @@ def test_log_analyst_agent_builds_without_datadog_keys(
     assert fake_settings.dd_api_key is None
     agent = build_log_analyst_agent(
         semantic_memory,
-        model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
     assert isinstance(agent, Agent)
@@ -211,7 +207,6 @@ def test_log_analyst_agent_mock_memory(
     mock_mem = MagicMock(spec=SemanticMemory)
     agent = build_log_analyst_agent(
         mock_mem,
-        model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
     assert isinstance(agent, Agent)

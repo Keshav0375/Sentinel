@@ -18,7 +18,7 @@ from typing import Any
 
 # asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
-from agents import Runner, add_trace_processor, handoff
+from agents import add_trace_processor, handoff
 from agents import trace as agent_trace
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -29,7 +29,7 @@ from sentinel.agents.log_analyst import build_log_analyst_agent
 from sentinel.agents.orchestrator import build_orchestrator_agent
 from sentinel.agents.remediation import build_remediation_agent
 from sentinel.agents.triage import build_triage_agent
-from sentinel.api.config_view import RuntimeConfig, make_config_router
+from sentinel.api.config_view import make_config_router
 from sentinel.api.eval_report import make_eval_report_router
 from sentinel.api.events import make_events_router
 from sentinel.api.health import make_health_router
@@ -50,7 +50,7 @@ from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import AlertPayload
 from sentinel.models.incident import IncidentStatus
-from sentinel.providers import apply_sdk_defaults, get_capabilities
+from sentinel.providers import apply_sdk_defaults, call_with_fallback, role_capabilities
 
 _DASHBOARD_HTML = Path(__file__).resolve().parent / "dashboard" / "index.html"
 _EVAL_HTML = Path(__file__).resolve().parent / "dashboard" / "eval.html"
@@ -66,45 +66,25 @@ def _build_orchestrator(
 ) -> Any:
     """Build a full orchestrator pipeline with its dependencies injected.
 
-    Rebuilt per incident so each run reads the current (runtime-overridable) settings.
-    The construction cost is negligible — it's just Python object creation, not LLM
-    calls.
+    Rebuilt per incident, so provider credentials are read at use (§4.7 router), never
+    at boot. The construction cost is negligible — it's just Python object creation, not
+    LLM calls.
     """
-    triage_agent = build_triage_agent(
-        semantic_memory,
-        episodic_memory,
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    log_analyst_agent = build_log_analyst_agent(
-        semantic_memory,
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-    deploy_correlator_agent = build_deploy_correlator_agent(
-        pool,
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    remediation_agent = build_remediation_agent(
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-    comms_agent = build_comms_agent(
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
+    triage_agent = build_triage_agent(semantic_memory, episodic_memory, settings=settings)
+    log_analyst_agent = build_log_analyst_agent(semantic_memory, settings=settings)
+    deploy_correlator_agent = build_deploy_correlator_agent(pool, settings=settings)
+    remediation_agent = build_remediation_agent(settings=settings)
+    comms_agent = build_comms_agent(settings=settings)
     orchestrator = build_orchestrator_agent(
         triage_agent,
         log_analyst_agent,
         deploy_correlator_agent,
         remediation_agent,
         comms_agent,
-        model_string=settings.sentinel_analysis_model,
         settings=settings,
     )
 
-    caps = get_capabilities(settings.sentinel_analysis_model)
+    caps = role_capabilities("orchestrator", settings)
     back = handoff(orchestrator)
     back.strict_json_schema = caps.strict_schemas
     back_handoff: Any = [back]
@@ -131,11 +111,10 @@ def make_pipeline_fn(
 ) -> PipelineFn:
     """Build the async pipeline callback fired by the webhook for each new alert.
 
-    Agents are rebuilt per-incident so each run picks up the current settings.
+    Agents are rebuilt per-incident so each run reads the provider credentials at use.
 
     Args:
-        settings_fn: Callable returning current Settings (supports runtime
-            model overrides via RuntimeConfig).
+        settings_fn: Callable returning the current Settings.
         semantic_memory: Shared semantic memory for service lookups.
         episodic_memory: Shared episodic memory for past incident search.
         short_term_memory: Live STM — updated with terminal status on completion.
@@ -154,16 +133,23 @@ def make_pipeline_fn(
         logger.info("pipeline_start", incident_id=incident_id, service=alert.service)
 
         try:
-            # Built inside the try: a provider key missing at use (keys are optional at
-            # boot) escalates this incident instead of escaping the background task.
+            # Built inside the try: no provider credential at use (keys are optional at
+            # boot) raises ProviderUnavailableError, which escalates this incident instead
+            # of escaping the background task.
             orchestrator = _build_orchestrator(settings, semantic_memory, episodic_memory, pool)
             input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
             with agent_trace(
                 "incident_pipeline",
                 metadata={"incident_id": incident_id},
             ):
-                await Runner.run(orchestrator, input_text, max_turns=max_turns)
-            logger.info("pipeline_complete", incident_id=incident_id)
+                routed = await call_with_fallback(
+                    orchestrator,
+                    input_text,
+                    role="orchestrator",
+                    settings=settings,
+                    run_kwargs={"max_turns": max_turns},
+                )
+            logger.info("pipeline_complete", incident_id=incident_id, model_used=routed.model_used)
             try:
                 short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
             except KeyError:
@@ -202,10 +188,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
        is a Postgres DSN (closed again at shutdown).
     3. Seed service map and runbooks (idempotent INSERT OR REPLACE).
     4. Build memory clients (SemanticMemory, EpisodicMemory, ShortTermMemory).
-    5. Create Groq AsyncOpenAI client; set as SDK default.
-    6. Build specialist agents and orchestrator.
-    7. Wire alert deduplicator and pipeline callback.
-    8. Mount all API routers.
+    5. Apply the SDK defaults (chat-completions API, trace export key).
+    6. Wire alert deduplicator and pipeline callback (agents are built per incident).
+    7. Mount all API routers.
 
     On exit (or a failed startup) the LangFuse client is shut down (flushing pending
     spans) and the asyncpg pool is closed.
@@ -275,14 +260,11 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
     dashboard_emitter = DashboardEventEmitter(event_bus)
     add_trace_processor(dashboard_emitter)
 
-    # ── Runtime config (dashboard model switching) ─────────────────────────────
-    runtime_config = RuntimeConfig(settings)
-
     # ── API wiring ────────────────────────────────────────────────────────────
     # Agents are built per-incident inside make_pipeline_fn.
     deduplicator = AlertDeduplicator()
     pipeline_fn = make_pipeline_fn(
-        runtime_config.effective_settings,
+        lambda: settings,
         semantic_memory,
         episodic_memory,
         short_term_memory,
@@ -297,7 +279,7 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
     app.include_router(make_events_router(event_bus))
     app.include_router(make_scenarios_router())
     app.include_router(make_eval_report_router())
-    app.include_router(make_config_router(runtime_config))
+    app.include_router(make_config_router(settings))
     app.include_router(make_trajectories_router(trajectories_dir))
 
 

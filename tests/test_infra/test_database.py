@@ -34,7 +34,7 @@ from sentinel.infra.database import (
 
 
 def _settings(**kwargs: object) -> Settings:
-    return Settings(groq_api_key="test-key", **kwargs)  # type: ignore[arg-type]
+    return Settings(**kwargs)  # type: ignore[arg-type]
 
 
 def _without_password(dsn: str) -> tuple[str, str]:

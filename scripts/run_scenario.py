@@ -27,7 +27,7 @@ _SRC = _PROJECT_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from agents import Runner, add_trace_processor, handoff  # noqa: E402
+from agents import add_trace_processor, handoff  # noqa: E402
 from agents import trace as agent_trace  # noqa: E402
 
 from sentinel.agents.comms import build_comms_agent  # noqa: E402
@@ -47,7 +47,11 @@ from sentinel.memory.episodic import EpisodicMemory  # noqa: E402
 from sentinel.memory.semantic import SemanticMemory  # noqa: E402
 from sentinel.memory.short_term import ShortTermMemory  # noqa: E402
 from sentinel.models.incident import IncidentStatus  # noqa: E402
-from sentinel.providers import apply_sdk_defaults, get_capabilities  # noqa: E402
+from sentinel.providers import (  # noqa: E402
+    apply_sdk_defaults,
+    call_with_fallback,
+    role_capabilities,
+)
 
 _SEP = "=" * 62
 
@@ -154,46 +158,26 @@ async def run_scenario(
 
         # ── SDK defaults + provider layer ─────────────────────────────────────────
         apply_sdk_defaults(settings)
-        print(f"  [OK] provider: {settings.sentinel_analysis_model.split('/')[0]}")
+        print(f"  [OK] primary provider: {settings.sentinel_primary_provider}")
 
         # ── Build agents ──────────────────────────────────────────────────────────
         # The tools read Datadog and Postgres, never the scenario: only its alert is used.
-        triage_agent = build_triage_agent(
-            semantic_memory,
-            episodic_memory,
-            model_string=settings.sentinel_triage_model,
-            settings=settings,
-        )
-        log_analyst_agent = build_log_analyst_agent(
-            semantic_memory,
-            model_string=settings.sentinel_analysis_model,
-            settings=settings,
-        )
-        deploy_correlator_agent = build_deploy_correlator_agent(
-            pool,
-            model_string=settings.sentinel_triage_model,
-            settings=settings,
-        )
-        remediation_agent = build_remediation_agent(
-            model_string=settings.sentinel_analysis_model,
-            settings=settings,
-        )
-        comms_agent = build_comms_agent(
-            model_string=settings.sentinel_triage_model,
-            settings=settings,
-        )
+        triage_agent = build_triage_agent(semantic_memory, episodic_memory, settings=settings)
+        log_analyst_agent = build_log_analyst_agent(semantic_memory, settings=settings)
+        deploy_correlator_agent = build_deploy_correlator_agent(pool, settings=settings)
+        remediation_agent = build_remediation_agent(settings=settings)
+        comms_agent = build_comms_agent(settings=settings)
         orchestrator = build_orchestrator_agent(
             triage_agent,
             log_analyst_agent,
             deploy_correlator_agent,
             remediation_agent,
             comms_agent,
-            model_string=settings.sentinel_analysis_model,
             settings=settings,
         )
 
         # Wire handoff-back so specialists return control to the orchestrator.
-        caps = get_capabilities(settings.sentinel_analysis_model)
+        caps = role_capabilities("orchestrator", settings)
         back = handoff(orchestrator)
         back.strict_json_schema = caps.strict_schemas
         for specialist in [
@@ -222,13 +206,15 @@ async def run_scenario(
 
         try:
             with agent_trace("incident_pipeline", metadata={"incident_id": incident_id}):
-                await Runner.run(
+                routed = await call_with_fallback(
                     orchestrator,
                     input_text,
-                    max_turns=settings.sentinel_max_tool_calls + 5,
+                    role="orchestrator",
+                    settings=settings,
+                    run_kwargs={"max_turns": settings.sentinel_max_tool_calls + 5},
                 )
             elapsed = (datetime.now(UTC) - start).total_seconds()
-            print(f"\n  [OK] pipeline completed in {elapsed:.1f}s")
+            print(f"\n  [OK] pipeline completed in {elapsed:.1f}s on {routed.model_used}")
             try:
                 short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
             except KeyError:

@@ -10,17 +10,18 @@ from sentinel.agents.loader import load_prompt
 from sentinel.config import Settings
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.log_entry import LogAnalysis
-from sentinel.providers import get_capabilities, resolve_model
+from sentinel.providers import Role, model_for, role_capabilities
 from sentinel.tools.log_fetcher import make_log_fetcher_tool
 from sentinel.tools.service_lookup import make_service_lookup_tool
 
 LOG_ANALYST_AGENT_NAME = "log_analyst_agent"
+# The §4.7 role whose model pair this agent runs on (providers/router.py).
+_ROLE: Role = "analysis"
 
 
 def build_log_analyst_agent(
     semantic_memory: SemanticMemory,
     *,
-    model_string: str,
     settings: Settings,
 ) -> Agent[LogAnalysis]:
     """Create a configured Log Analyst Agent with injected dependencies.
@@ -34,22 +35,19 @@ def build_log_analyst_agent(
     Args:
         semantic_memory: Service map lookups used to understand dependency
             topology when errors may propagate from upstream services.
-        model_string: Provider/model string (e.g. 'groq/llama-3.3-70b-versatile').
-        settings: Validated Settings instance for API key lookup; also supplies the
-            Datadog keys and site ``fetch_logs`` reads at call time.
+        settings: Validated Settings — selects the primary provider and supplies its key;
+            also the Datadog keys and site ``fetch_logs`` reads at call time.
 
     Returns:
         Configured Agent that produces a ``LogAnalysis`` as structured output
         when the provider supports it, or plain text otherwise.
     """
-    llm = resolve_model(model_string, settings)
-    caps = get_capabilities(model_string)
+    llm, _ = model_for(_ROLE, settings)
+    caps = role_capabilities(_ROLE, settings)
 
     kwargs: dict[str, Any] = {}
     if caps.supports_structured_outputs:
         kwargs["output_type"] = LogAnalysis
-    if caps.default_model_settings:
-        kwargs["model_settings"] = caps.default_model_settings
 
     return Agent(
         name=LOG_ANALYST_AGENT_NAME,

@@ -9,15 +9,16 @@ from agents import Agent, Tool
 from sentinel.agents.loader import load_prompt
 from sentinel.config import Settings
 from sentinel.models.remediation import RemediationPlan
-from sentinel.providers import get_capabilities, resolve_model
+from sentinel.providers import Role, model_for, role_capabilities
 from sentinel.tools.remediation_tools import make_remediation_tools
 
 REMEDIATION_AGENT_NAME = "remediation_agent"
+# The §4.7 role whose model pair this agent runs on (providers/router.py).
+_ROLE: Role = "resolution"
 
 
 def build_remediation_agent(
     *,
-    model_string: str,
     settings: Settings,
 ) -> Agent[RemediationPlan]:
     """Create a configured Remediation Agent.
@@ -32,15 +33,14 @@ def build_remediation_agent(
     closes it. The agent has no tool that opens, merges or approves anything.
 
     Args:
-        model_string: Provider/model string (e.g. 'groq/llama-3.3-70b-versatile').
-        settings: Validated Settings instance for API key lookup.
+        settings: Validated Settings — selects the primary provider and supplies its key.
 
     Returns:
         Configured Agent that produces a ``RemediationPlan`` as structured output
         when the provider supports it.
     """
-    llm = resolve_model(model_string, settings)
-    caps = get_capabilities(model_string)
+    llm, _ = model_for(_ROLE, settings)
+    caps = role_capabilities(_ROLE, settings)
 
     # make_remediation_tools() returns [prepare_rollback_spec, format_escalation]
     tools: list[Tool] = [*make_remediation_tools()]
@@ -48,8 +48,6 @@ def build_remediation_agent(
     kwargs: dict[str, Any] = {}
     if caps.supports_structured_outputs:
         kwargs["output_type"] = RemediationPlan
-    if caps.default_model_settings:
-        kwargs["model_settings"] = caps.default_model_settings
 
     return Agent(
         name=REMEDIATION_AGENT_NAME,

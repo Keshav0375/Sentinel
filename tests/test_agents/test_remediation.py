@@ -21,7 +21,6 @@ from sentinel.models.remediation import RemediationAction, RemediationPlan
 @pytest.fixture()
 def remediation_agent(fake_settings: Settings) -> Agent[RemediationPlan]:
     return build_remediation_agent(
-        model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
 
@@ -190,22 +189,20 @@ def test_remediation_agent_uses_litellm_model(remediation_agent: Agent[Remediati
     assert isinstance(remediation_agent.model, LitellmModel)
 
 
-def test_remediation_agent_model_string_forwarded(fake_settings: Settings) -> None:
+def test_remediation_agent_runs_on_its_role_primary_model(fake_settings: Settings) -> None:
     agent = build_remediation_agent(
-        model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.3-70b-versatile"
+    assert agent.model.model == "anthropic/claude-sonnet-4-6"
 
 
-def test_remediation_agent_custom_model_string(fake_settings: Settings) -> None:
+def test_remediation_agent_primary_openai_runs_openai_model(fake_settings: Settings) -> None:
     agent = build_remediation_agent(
-        model_string="groq/llama-3.1-8b-instant",
-        settings=fake_settings,
+        settings=fake_settings.model_copy(update={"sentinel_primary_provider": "openai"}),
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.1-8b-instant"
+    assert agent.model.model == "openai/gpt-4o"
 
 
 def test_remediation_agent_no_handoffs(remediation_agent: Agent[RemediationPlan]) -> None:

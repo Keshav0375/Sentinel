@@ -9,9 +9,11 @@ from agents import Agent, Handoff, handoff
 from sentinel.agents.loader import load_prompt
 from sentinel.config import Settings
 from sentinel.models.incident import IncidentSummary
-from sentinel.providers import get_capabilities, resolve_model
+from sentinel.providers import Role, model_for, role_capabilities
 
 ORCHESTRATOR_AGENT_NAME = "incident_orchestrator"
+# The §4.7 role whose model pair this agent runs on (providers/router.py).
+_ROLE: Role = "orchestrator"
 
 SPECIALIST_ORDER = (
     "triage_agent",
@@ -39,7 +41,6 @@ def build_orchestrator_agent(
     remediation_agent: Agent[Any],
     comms_agent: Agent[Any],
     *,
-    model_string: str,
     settings: Settings,
 ) -> Agent[IncidentSummary]:
     """Create a configured Orchestrator Agent wired to all five specialists.
@@ -55,21 +56,18 @@ def build_orchestrator_agent(
         deploy_correlator_agent: Pre-built Deploy Correlator (deploy ranking).
         remediation_agent: Pre-built Remediation Agent (drafts a rollback spec or escalation).
         comms_agent: Pre-built Comms Agent (writes the incident summary; sends nothing).
-        model_string: Provider/model string (e.g. 'groq/llama-3.3-70b-versatile').
-        settings: Validated Settings instance for API key lookup.
+        settings: Validated Settings — selects the primary provider and supplies its key.
 
     Returns:
         Configured Orchestrator Agent that produces an ``IncidentSummary``
         after coordinating all specialist handoffs.
     """
-    llm = resolve_model(model_string, settings)
-    caps = get_capabilities(model_string)
+    llm, _ = model_for(_ROLE, settings)
+    caps = role_capabilities(_ROLE, settings)
 
     kwargs: dict[str, Any] = {}
     if caps.supports_structured_outputs:
         kwargs["output_type"] = IncidentSummary
-    if caps.default_model_settings:
-        kwargs["model_settings"] = caps.default_model_settings
 
     specialists = [
         triage_agent,
