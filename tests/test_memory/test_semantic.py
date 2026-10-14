@@ -17,6 +17,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
+from unittest.mock import MagicMock
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -27,6 +28,7 @@ from pgvector import Vector
 
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra.database import create_pool
+from sentinel.memory import semantic
 from sentinel.memory.base import MemoryStore
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.semantic import SemanticMemory, _parse_runbook_steps
@@ -264,6 +266,46 @@ async def test_invalid_tier_raises_memory_error(mem: SemanticMemory, pool: async
     await _insert_service(pool, "odd-tier", tier="gold")
     with pytest.raises(SentinelMemoryError, match="invalid tier"):
         await mem.get_service("odd-tier")
+
+
+async def test_null_tier_reads_as_standard_with_a_warning(
+    mem: SemanticMemory, pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = MagicMock()
+    monkeypatch.setattr(semantic, "logger", log)
+    await _insert_service(pool, "untiered", tier=None)
+
+    svc = await mem.get_service("untiered")
+
+    assert svc.tier is ServiceTier.STANDARD
+    log.warning.assert_called_once()
+    assert log.warning.call_args.kwargs["service"] == "untiered"
+
+
+async def test_search_one_bad_row_never_fails_the_others(
+    mem: SemanticMemory, pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = MagicMock()
+    monkeypatch.setattr(semantic, "logger", log)
+    await _insert_service(pool, "good-svc", tier="critical", embedding=_one_hot(0))
+    await _insert_service(pool, "untiered-svc", tier=None, embedding=_one_hot(1))
+    await _insert_service(pool, "gold-svc", tier="gold", embedding=_one_hot(2))
+    await _reindex(pool)
+
+    query = [0.0] * DIMS
+    query[0], query[1], query[2] = 0.6, 0.5, 0.4
+    results = await mem.search_services(query, top_k=3)
+
+    # NULL tier is served as standard; the invalid (non-NULL) tier row is skipped.
+    assert [(svc.name, svc.tier) for svc, _ in results] == [
+        ("good-svc", ServiceTier.CRITICAL),
+        ("untiered-svc", ServiceTier.STANDARD),
+    ]
+    warned = {c.kwargs["service"] for c in log.warning.call_args_list}
+    assert warned == {"untiered-svc", "gold-svc"}
+    # get_service still reports the invalid tier rather than hiding it.
+    with pytest.raises(SentinelMemoryError, match="invalid tier"):
+        await mem.get_service("gold-svc")
 
 
 async def test_unknown_service_raises_key_error(mem: SemanticMemory) -> None:

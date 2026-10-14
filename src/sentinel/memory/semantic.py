@@ -10,6 +10,8 @@ Mapping (decision 2026-10-12, "Phase-1 models ↔ §5.3 schema", item 4):
 ``repo`` is present. Runbooks have no table of their own: each service holds one markdown
 runbook in ``services.runbook``, read back as a :class:`Runbook` whose steps are the
 markdown's numbered or bulleted items (the whole text as one step if it has none).
+``services.tier`` is nullable: a NULL tier reads as ``ServiceTier.STANDARD`` (a warning
+names the service); only a non-NULL value outside the enum is an error.
 
 With no pool (no ``DATABASE_URL``) every lookup raises
 :class:`~sentinel.exceptions.SentinelMemoryError` — there are no silent empty results. A
@@ -29,9 +31,12 @@ from pgvector import Vector
 
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra import database
+from sentinel.infra.logging import get_logger
 from sentinel.memory.base import MemoryStore
 from sentinel.models.memory import Runbook, SemanticRecord
 from sentinel.models.service import ServiceMetadata, ServiceTier
+
+logger = get_logger("sentinel.memory.semantic")
 
 # IVFFlat only searches `probes` of the index's lists; at the default of 1 a small or
 # freshly built table can miss its nearest rows. Probing every list (= lists of
@@ -77,9 +82,12 @@ class SemanticMemory:
     async def get_service(self, name: str) -> ServiceMetadata:
         """Return service metadata for the named service.
 
+        A NULL ``tier`` reads as ``ServiceTier.STANDARD`` (logged as a warning).
+
         Raises:
             KeyError: If the service is not in the database.
-            SentinelMemoryError: no database, or the query failed.
+            SentinelMemoryError: no database, the query failed, or the row's tier is a
+                non-NULL value outside ``ServiceTier``.
         """
         self._require_pool()
         cached = self._cached_service(name)
@@ -132,7 +140,9 @@ class SemanticMemory:
 
         ``ORDER BY embedding <=> $1 LIMIT $2`` inside a transaction that first sets
         ``ivfflat.probes``; similarity is ``1 - cosine distance``. Services without an
-        embedding, or whose distance is undefined (a zero vector), are left out.
+        embedding, or whose distance is undefined (a zero vector), are left out. One bad
+        row never fails the search: a NULL tier reads as ``ServiceTier.STANDARD``, and a
+        row whose tier is outside ``ServiceTier`` is skipped with a warning.
 
         Args:
             embedding: Query vector — 384 floats for the §5.3 schema.
@@ -165,7 +175,12 @@ class SemanticMemory:
             distance = float(row["distance"])
             if math.isnan(distance):
                 continue
-            results.append((_row_to_service(row), 1.0 - distance))
+            try:
+                service = _row_to_service(row)
+            except SentinelMemoryError as exc:
+                logger.warning("service_row_skipped", service=row["name"], error=str(exc))
+                continue
+            results.append((service, 1.0 - distance))
         return results
 
     # ── MemoryStore protocol ──────────────────────────────────────────────────
@@ -268,16 +283,24 @@ def _json(raw: str | None) -> Any:
 def _row_to_service(row: asyncpg.Record) -> ServiceMetadata:
     """Convert a ``services`` row to ServiceMetadata (decision 2026-10-12, item 4).
 
+    ``tier`` is a nullable column: NULL means "not classified" and reads as
+    ``ServiceTier.STANDARD``, with a warning naming the service.
+
     Raises:
-        SentinelMemoryError: the row's tier is not one of the §5.3 values.
+        SentinelMemoryError: the row's tier is non-NULL and not one of the §5.3 values.
     """
     name: str = row["name"]
-    try:
-        tier = ServiceTier(row["tier"])
-    except ValueError:
-        raise SentinelMemoryError(
-            f"service {name!r} has an invalid tier {row['tier']!r} in the services table"
-        ) from None
+    raw_tier: str | None = row["tier"]
+    if raw_tier is None:
+        logger.warning("service_tier_null", service=name, defaulted_to=ServiceTier.STANDARD.value)
+        tier = ServiceTier.STANDARD
+    else:
+        try:
+            tier = ServiceTier(raw_tier)
+        except ValueError:
+            raise SentinelMemoryError(
+                f"service {name!r} has an invalid tier {raw_tier!r} in the services table"
+            ) from None
 
     loaded_meta = _json(row["metadata"])
     metadata: dict[str, Any] = loaded_meta if isinstance(loaded_meta, dict) else {}  # pyright: ignore[reportUnknownVariableType]
