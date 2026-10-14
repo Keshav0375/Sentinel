@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     dd_site: str = "us5.datadoghq.com"
 
     # ── GitHub (get_deploy_details — §4.8) ────────────────────────────────────
-    # Read-only fine-grained PAT on Keshav0375/Sentinel-deployment (Contents + PRs read).
+    # Read-only fine-grained PAT on Keshav0375/Sentinel-deployment ("Pull requests: read" only).
     github_api_token: SecretStr | None = None
 
     # ── Validators ────────────────────────────────────────────────────────────
