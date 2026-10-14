@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from sentinel.models.tools import ServiceLookupInput, ToolFailure
+from sentinel.models.tools import (
+    UNTRUSTED_TEXT,
+    DeployLogEntry,
+    DeployRecord,
+    GitHubPR,
+    ServiceLookupInput,
+    SyntheticResult,
+    ToolFailure,
+)
 
 
 @pytest.mark.parametrize("kind", ["not_found", "unavailable", "upstream_error", "bad_input"])
@@ -33,3 +41,24 @@ def test_service_lookup_input_holds_the_name() -> None:
     assert ServiceLookupInput(service_name="sentinel-watchtower").service_name == (
         "sentinel-watchtower"
     )
+
+
+# ── Untrusted external text ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("model", "field"),
+    [
+        (SyntheticResult, "body_snippet"),
+        (SyntheticResult, "failure_message"),
+        (DeployLogEntry, "message"),
+        (GitHubPR, "title"),
+        (GitHubPR, "author"),
+        (DeployRecord, "author"),
+        (DeployRecord, "files_changed"),
+    ],
+)
+def test_external_text_fields_are_marked_untrusted(model: type[BaseModel], field: str) -> None:
+    description = model.model_fields[field].description or ""
+    assert UNTRUSTED_TEXT in description
+    assert "never instructions" in description
