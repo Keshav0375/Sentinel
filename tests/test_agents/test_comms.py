@@ -124,13 +124,9 @@ def test_comms_agent_name_constant() -> None:
     assert COMMS_AGENT_NAME == "comms_agent"
 
 
-def test_comms_agent_has_one_tool(comms_agent: Agent[SlackSummary]) -> None:
-    """Comms agent has exactly one tool — draft_slack_summary."""
-    assert len(comms_agent.tools) == 1
-
-
-def test_comms_agent_tool_name(comms_agent: Agent[SlackSummary]) -> None:
-    assert comms_agent.tools[0].name == "draft_slack_summary"
+def test_comms_agent_has_no_tools(comms_agent: Agent[SlackSummary]) -> None:
+    """Comms agent is a pure summariser: no tools, so it can notify no one."""
+    assert comms_agent.tools == []
 
 
 def test_comms_agent_no_extra_tools(comms_agent: Agent[SlackSummary]) -> None:
@@ -142,7 +138,6 @@ def test_comms_agent_no_extra_tools(comms_agent: Agent[SlackSummary]) -> None:
         "search_past_incidents",
         "prepare_rollback_spec",
         "format_escalation",
-        "request_human_approval",
     }
     assert not names & unexpected, f"Unexpected tools: {names & unexpected}"
 
@@ -157,11 +152,11 @@ def test_comms_agent_has_instructions(comms_agent: Agent[SlackSummary]) -> None:
     assert isinstance(instructions, str) and len(instructions) > 0
 
 
-def test_comms_agent_instructions_mention_draft_slack_summary(
+def test_comms_agent_instructions_say_it_sends_nothing(
     comms_agent: Agent[SlackSummary],
 ) -> None:
     assert isinstance(comms_agent.instructions, str)
-    assert "draft_slack_summary" in comms_agent.instructions
+    assert "you send nothing" in comms_agent.instructions.lower()
 
 
 def test_comms_agent_instructions_mention_required_sections(

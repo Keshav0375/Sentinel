@@ -152,7 +152,6 @@ def test_triage_agent_no_extra_tools(triage_agent: Agent[TriageResult]) -> None:
         "get_deploy_details",
         "prepare_rollback_spec",
         "format_escalation",
-        "request_human_approval",
     }
     assert not names & unexpected, f"Unexpected tools in triage agent: {names & unexpected}"
 

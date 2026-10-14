@@ -110,13 +110,22 @@ def test_build_tools_non_empty(deps: ToolDeps) -> None:
     assert len(tools) > 0
 
 
-def test_build_tools_has_expected_tool_count(deps: ToolDeps) -> None:
-    # 4.2 get_service_metadata + 4.3 fetch_logs + 4.4 get_deploy_details
-    # + 4.5 search_past_incidents + 4.6 prepare_rollback_spec, format_escalation
-    # + 4.7 draft_slack_summary
-    # + 4.8 request_human_approval = 8 tools total
-    tools = build_tools(deps)
-    assert len(tools) == 8
+def test_build_tools_is_exactly_the_six_phase_2_tools(deps: ToolDeps) -> None:
+    """Decision 2026-10-14: four read-only lookups + two output-only drafts, nothing else.
+
+    No notification tool, no approval tool, no execute tool: the revert PR a human
+    merges on GitHub is the only gate (backend.md §3.3).
+    """
+    names = [t.name for t in build_tools(deps)]
+    assert len(names) == 6
+    assert set(names) == {
+        "get_service_metadata",
+        "search_past_incidents",
+        "fetch_logs",
+        "get_deploy_details",
+        "prepare_rollback_spec",
+        "format_escalation",
+    }
 
 
 def test_build_tools_each_tool_has_name(deps: ToolDeps) -> None:
@@ -167,18 +176,6 @@ def test_build_tools_contains_format_escalation(deps: ToolDeps) -> None:
     tools = build_tools(deps)
     names = {t.name for t in tools}
     assert "format_escalation" in names
-
-
-def test_build_tools_contains_draft_slack_summary(deps: ToolDeps) -> None:
-    tools = build_tools(deps)
-    names = {t.name for t in tools}
-    assert "draft_slack_summary" in names
-
-
-def test_build_tools_contains_request_human_approval(deps: ToolDeps) -> None:
-    tools = build_tools(deps)
-    names = {t.name for t in tools}
-    assert "request_human_approval" in names
 
 
 def test_build_tools_each_tool_has_description(deps: ToolDeps) -> None:

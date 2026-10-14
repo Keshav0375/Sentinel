@@ -1,10 +1,8 @@
 """Tests for sentinel.agents.remediation — RemediationPlan model and agent structure.
 
-Critical safety invariant verified here:
-  ``request_human_approval`` MUST be present in the remediation agent's tool list.
-  Without it, the agent could theoretically propose destructive actions without
-  a human in the loop. This is the structural half of the HITL contract;
-  the system-prompt half is enforced in test_prompts.py.
+Critical safety invariant verified here: the remediation agent holds exactly the two
+output-only drafting tools. HITL is the revert PR a human merges on GitHub
+(backend.md §3.3), so the agent has no approval tool and nothing that acts on the world.
 """
 
 from __future__ import annotations
@@ -15,12 +13,7 @@ from agents.extensions.models.litellm_model import LitellmModel
 
 from sentinel.agents.remediation import REMEDIATION_AGENT_NAME, build_remediation_agent
 from sentinel.config import Settings
-from sentinel.models.remediation import (
-    ApprovalStatus,
-    RemediationAction,
-    RemediationPlan,
-    RiskLevel,
-)
+from sentinel.models.remediation import RemediationAction, RemediationPlan
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -120,21 +113,6 @@ def test_remediation_plan_serialization() -> None:
     assert data["deploy_id"] is None
 
 
-# ── Risk level and approval status enums ─────────────────────────────────────
-
-
-def test_risk_level_values() -> None:
-    assert RiskLevel.HIGH == "high"
-    assert RiskLevel.MEDIUM == "medium"
-    assert RiskLevel.LOW == "low"
-
-
-def test_approval_status_values() -> None:
-    assert ApprovalStatus.APPROVED == "approved"
-    assert ApprovalStatus.REJECTED == "rejected"
-    assert ApprovalStatus.TIMEOUT == "timeout"
-
-
 # ── build_remediation_agent — structural tests ────────────────────────────────
 
 
@@ -152,38 +130,19 @@ def test_remediation_agent_name_constant() -> None:
     assert REMEDIATION_AGENT_NAME == "remediation_agent"
 
 
-def test_remediation_agent_has_three_tools(remediation_agent: Agent[RemediationPlan]) -> None:
-    assert len(remediation_agent.tools) == 3
-
-
 def test_remediation_agent_tool_names(remediation_agent: Agent[RemediationPlan]) -> None:
-    names = {t.name for t in remediation_agent.tools}
-    assert "prepare_rollback_spec" in names
-    assert "format_escalation" in names
-    assert "request_human_approval" in names
+    """CRITICAL: exactly the two output-only drafting tools — nothing that acts or approves."""
+    names = [t.name for t in remediation_agent.tools]
+    assert names == ["prepare_rollback_spec", "format_escalation"]
 
 
 # ── CRITICAL SAFETY TEST ──────────────────────────────────────────────────────
 
 
-def test_remediation_agent_hitl_gate_present(remediation_agent: Agent[RemediationPlan]) -> None:
-    """CRITICAL: request_human_approval MUST be in the remediation agent's tool list.
-
-    This is the structural half of the HITL safety contract. The agent cannot
-    propose a destructive action without calling this tool first. If this test
-    fails, the safety boundary has been broken — fix it before merging.
-    """
-    tool_names = {t.name for t in remediation_agent.tools}
-    assert "request_human_approval" in tool_names, (
-        "SAFETY VIOLATION: request_human_approval is missing from remediation agent tools. "
-        "No destructive action can be proposed without a human in the loop."
-    )
-
-
 def test_remediation_agent_no_direct_execution_tools(
     remediation_agent: Agent[RemediationPlan],
 ) -> None:
-    """Agent must only have draft tools + HITL gate — no direct-execute tools."""
+    """Agent must only have draft tools — no direct-execute tools."""
     names = {t.name for t in remediation_agent.tools}
     # These would be dangerous if they existed — verify they don't
     forbidden = {
@@ -207,30 +166,16 @@ def test_remediation_agent_has_instructions(remediation_agent: Agent[Remediation
     assert isinstance(instructions, str) and len(instructions) > 0
 
 
-def test_remediation_agent_instructions_mention_hitl(
+def test_remediation_agent_instructions_say_a_human_merges_the_pr(
     remediation_agent: Agent[RemediationPlan],
 ) -> None:
-    """System prompt must explicitly mandate HITL — structural + prompt contract."""
-    assert isinstance(remediation_agent.instructions, str)
-    assert "request_human_approval" in remediation_agent.instructions
-
-
-def test_remediation_agent_hitl_required_for_all_paths(
-    remediation_agent: Agent[RemediationPlan],
-) -> None:
-    """HITL must be required for ALL paths including escalation.
-
-    The prompt must NOT contain language that allows skipping HITL for the
-    escalation path (e.g. 'null for escalate' in approval_status).
-    """
+    """The prompt says the backend only drafts and a human merges the revert PR on GitHub."""
     assert isinstance(remediation_agent.instructions, str)
     prompt = remediation_agent.instructions.lower()
-    assert "every path" in prompt or "and escalate" in prompt or "zero exceptions" in prompt, (
-        "SAFETY: prompt must require HITL for ALL paths including escalation"
-    )
-    assert "null for escalate" not in prompt, (
-        "SAFETY: prompt must not allow null approval for escalation path"
-    )
+    assert "only draft" in prompt
+    assert "human merges" in prompt
+    assert "github" in prompt
+    assert "approval" not in prompt
 
 
 def test_remediation_agent_instructions_name_the_drafting_tools(
@@ -265,20 +210,3 @@ def test_remediation_agent_custom_model_string(fake_settings: Settings) -> None:
 
 def test_remediation_agent_no_handoffs(remediation_agent: Agent[RemediationPlan]) -> None:
     assert len(remediation_agent.handoffs) == 0
-
-
-def test_remediation_agent_custom_approval_fn(fake_settings: Settings) -> None:
-    """Agent must accept an injectable approval_fn for test/Phase 2 use."""
-
-    async def mock_approval(display: str) -> tuple[str, str | None]:
-        return "approve", "auto-approved in test"
-
-    agent = build_remediation_agent(
-        model_string="groq/llama-3.3-70b-versatile",
-        settings=fake_settings,
-        approval_fn=mock_approval,
-    )
-    assert isinstance(agent, Agent)
-    # HITL tool still present even with custom approval function
-    names = {t.name for t in agent.tools}
-    assert "request_human_approval" in names

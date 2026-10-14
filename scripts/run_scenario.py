@@ -9,7 +9,7 @@ Usage::
 Run from the project root so that ``src/`` and ``data/`` are importable.
 The script builds the full agent pipeline, injects the scenario into the
 log/deploy tools so they return synthetic data, then runs the orchestrator
-and prints the full timeline. HITL approval prompts appear inline.
+and prints the full timeline. The pipeline only drafts: nothing is approved or executed.
 """
 
 from __future__ import annotations
@@ -93,22 +93,11 @@ def _print_timeline(stm: ShortTermMemory, incident_id: str) -> None:
         _safe_print(f"        -> {summary}")
 
 
-async def _auto_approval(display: str) -> tuple[str, str | None]:
-    """Auto-approve HITL gate for non-interactive runs."""
-    import sys  # noqa: PLC0415
-
-    sys.stdout.buffer.write(display.encode("utf-8", errors="replace"))
-    sys.stdout.buffer.write(b"\n>>> AUTO-APPROVED (--auto-approve flag)\n")
-    sys.stdout.buffer.flush()
-    return ("approve", "auto-approved for demo/test run")
-
-
 async def run_scenario(
     scenario_id: str,
     *,
     db_path: Path | None = None,
     trajectories_dir: Path | None = None,
-    auto_approve: bool = False,
 ) -> None:
     """Build the full pipeline, run it against a scenario, print the trajectory.
 
@@ -119,10 +108,9 @@ async def run_scenario(
         scenario_id: Scenario to run (e.g. ``"bad_deploy_01"``).
         db_path: Override the SQLite path from Settings.
         trajectories_dir: Override the trajectory output directory.
-        auto_approve: If True, auto-approve all HITL gates (for CI/demo).
     """
     settings = get_settings()
-    # Keep INFO logs quiet during the demo — HITL prompts go to stdout directly.
+    # Keep INFO logs quiet during the demo.
     configure_logging("WARNING")
 
     resolved_db = db_path or settings.sentinel_db_path
@@ -186,11 +174,9 @@ async def run_scenario(
             model_string=settings.sentinel_triage_model,
             settings=settings,
         )
-        approval_fn = _auto_approval if auto_approve else None
         remediation_agent = build_remediation_agent(
             model_string=settings.sentinel_analysis_model,
             settings=settings,
-            approval_fn=approval_fn,
         )
         comms_agent = build_comms_agent(
             model_string=settings.sentinel_triage_model,
@@ -230,11 +216,6 @@ async def run_scenario(
 
         # ── Run pipeline ───────────────────────────────────────────────────────────
         _print_header(f"Running pipeline  [{incident_id}]")
-        if auto_approve:
-            print("  HITL gates will be AUTO-APPROVED (--auto-approve flag).\n")
-        else:
-            print("  HITL approval prompts will appear when the Remediation Agent runs.")
-            print("  Type 'approve' or 'reject' and press Enter.\n")
 
         input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
         start = datetime.now(UTC)
@@ -286,13 +267,10 @@ async def run_scenario(
 def _usage() -> None:
     print(
         "Usage:\n"
-        "  python scripts/run_scenario.py <scenario_id> [--auto-approve]\n"
+        "  python scripts/run_scenario.py <scenario_id>\n"
         "  python scripts/run_scenario.py --list\n\n"
-        "Options:\n"
-        "  --auto-approve   Auto-approve all HITL gates (for CI/demo)\n\n"
         "Examples:\n"
         "  python scripts/run_scenario.py bad_deploy_01\n"
-        "  python scripts/run_scenario.py bad_deploy_01 --auto-approve\n"
         "  python scripts/run_scenario.py db_pool_01\n"
     )
 
@@ -315,9 +293,8 @@ def main() -> None:
         return
 
     scenario_id = args[0]
-    auto_approve = "--auto-approve" in args
     try:
-        asyncio.run(run_scenario(scenario_id, auto_approve=auto_approve))
+        asyncio.run(run_scenario(scenario_id))
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         print("\nAvailable scenarios:", file=sys.stderr)

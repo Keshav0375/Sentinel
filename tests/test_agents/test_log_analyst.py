@@ -127,7 +127,6 @@ def test_log_analyst_agent_no_extra_tools(log_analyst_agent: Agent[LogAnalysis])
         "search_past_incidents",
         "prepare_rollback_spec",
         "format_escalation",
-        "request_human_approval",
     }
     assert not names & unexpected, f"Unexpected tools: {names & unexpected}"
 

@@ -62,12 +62,6 @@ class EvalRunResult:
     trajectory_missing: bool = False
 
 
-async def _auto_approve(display: str) -> tuple[str, str | None]:
-    """HITL approval function for automated eval — always approves immediately."""
-    logger.debug("eval_auto_approve", preview=display[:80])
-    return ("approve", "Auto-approved by eval runner")
-
-
 async def run_scenario_eval(
     scenario: Scenario,
     *,
@@ -84,8 +78,6 @@ async def run_scenario_eval(
 
     Builds a fresh agent set, runs the pipeline on the scenario's alert, reads the
     trajectory written by SentinelTracer, and calls the LLM judge.
-
-    HITL is auto-approved so the batch runs without human intervention.
 
     Args:
         scenario: Loaded scenario (with ground truth).
@@ -132,7 +124,6 @@ async def run_scenario_eval(
     remediation_agent = build_remediation_agent(
         model_string=settings.sentinel_analysis_model,
         settings=settings,
-        approval_fn=_auto_approve,
     )
     comms_agent = build_comms_agent(
         model_string=settings.sentinel_triage_model,
@@ -259,7 +250,7 @@ async def run_eval(
     """Run the full eval suite and return per-scenario results.
 
     Iterates over all scenarios (or a specified subset). Each scenario:
-    1. Runs the full agent pipeline with auto-approve HITL
+    1. Runs the full agent pipeline
     2. Reads the trajectory JSON written by SentinelTracer
     3. Calls the LLM judge (evaluate_trajectory)
 

@@ -76,8 +76,9 @@ def build_tools(deps: ToolDeps) -> list[FunctionTool]:
     """Create all function tools with their dependencies injected via closure.
 
     Returns a flat list of ``FunctionTool`` instances ready to be passed to
-    an ``Agent``. The list grows as tasks 4.2–4.8 are implemented — each
-    adds an import block and a ``tools.append`` call below.
+    an ``Agent``: exactly the six Phase-2 tools (decision 2026-10-14) —
+    four read-only lookups and two output-only drafts. No tool notifies,
+    approves or acts on the world (backend.md §3.3).
 
     Args:
         deps: The bundled dependencies for this request context.
@@ -111,15 +112,5 @@ def build_tools(deps: ToolDeps) -> list[FunctionTool]:
     from sentinel.tools.remediation_tools import make_remediation_tools
 
     tools.extend(make_remediation_tools())
-
-    # ── 4.7 — draft_slack_summary ────────────────────────────────────────────
-    from sentinel.tools.comms_tools import make_comms_tools
-
-    tools.extend(make_comms_tools())
-
-    # ── 4.8 — request_human_approval (HITL gate) ─────────────────────────────
-    from sentinel.tools.hitl import make_hitl_tool
-
-    tools.append(make_hitl_tool())
 
     return tools

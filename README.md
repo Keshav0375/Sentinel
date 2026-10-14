@@ -188,10 +188,10 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 ## Features
 
 - **Multi-agent pipeline** — 5 specialist agents (Triage, Log Analyst, Deploy Correlator, Remediation, Comms) orchestrated via OpenAI Agents SDK handoffs
-- **HITL safety gate** — `request_human_approval` is the only path to destructive actions; no agent can bypass it
+- **HITL safety gate** — the backend only drafts a rollback spec or an escalation; GitHub Actions opens the revert PR and a human merges or closes it on GitHub. No agent has a tool that acts on the world
 - **Episodic memory** — past incidents embedded and stored in SQLite; similar incidents surface automatically during triage
 - **Semantic memory** — service map, dependency graph, and runbooks loaded from seed data
-- **Live incident dashboard** — real-time SSE stream of agent activity at `http://localhost:8000/`; approve/reject HITL from the browser
+- **Live incident dashboard** — real-time SSE stream of agent activity at `http://localhost:8000/`
 - **Trajectory eval** — LLM-as-judge scores every incident across 6 dimensions (0–5), with a Markdown and JSON report
 - **Eval results dashboard** — browse per-scenario scores at `http://localhost:8000/eval`
 - **10 synthetic scenarios** — 5 failure classes (bad deploy, DB pool, downstream outage, memory leak, config regression)
@@ -287,9 +287,8 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 
 1. Select `bad_deploy_01` from the dropdown — a critical API gateway alert fires
 2. Watch the five agent cards light up in sequence as each specialist completes its analysis
-3. An amber HITL overlay appears when the Remediation Agent requests rollback approval
-4. Click ✅ Approve — the pipeline continues and the incident resolves
-5. Switch to `/eval` to see the LLM judge's per-dimension scores
+3. The Remediation Agent drafts a rollback spec (or an escalation) and the incident resolves — nothing is approved or executed from the dashboard
+4. Switch to `/eval` to see the LLM judge's per-dimension scores
 
 ---
 
@@ -340,10 +339,10 @@ Pass threshold: **3.0 / 5.0** (60%)
 sentinel/
 ├── src/sentinel/
 │   ├── agents/          # 5 specialist agents + orchestrator
-│   ├── tools/           # Tool implementations (fetch_logs, draft_rollback_pr, …)
+│   ├── tools/           # Tool implementations (fetch_logs, prepare_rollback_spec, …)
 │   ├── memory/          # Episodic (SQLite + embeddings), semantic, short-term
 │   ├── eval/            # Rubric, LLM-as-judge, batch runner, report generator
-│   ├── api/             # FastAPI routes (webhooks, SSE, HITL, incidents, scenarios)
+│   ├── api/             # FastAPI routes (webhooks, SSE, incidents, scenarios)
 │   ├── infra/           # DB, logging, tracing, event bus, dashboard emitter
 │   ├── models/          # Pydantic domain models
 │   ├── generator/       # Synthetic alert + log + deploy data
@@ -365,7 +364,7 @@ sentinel/
 
 **Why multi-agent, not single agent?** Each specialist has a focused system prompt and constrained tool set. This makes each agent independently testable and improvable — changing the Log Analyst's prompt doesn't risk breaking Triage.
 
-**Why HITL at the tool level, not the prompt level?** There is no "execute rollback" tool — only `draft_rollback_pr` + `request_human_approval`. An agent can't bypass approval by ignoring a prompt instruction; it literally has no tool that acts without human sign-off.
+**Why HITL at the tool level, not the prompt level?** There is no "execute rollback" tool — only `prepare_rollback_spec` and `format_escalation`, which draft and return. An agent can't bypass the gate by ignoring a prompt instruction: it has no tool that acts, and the revert PR a human merges on GitHub is the only path to a rollback.
 
 **Why SQLite for episodic memory?** Zero infrastructure cost for the MVP. The embedding + cosine similarity approach works well at 10–100 incidents. Phase 2 swaps to Cosmos DB with a vector index for scale.
 

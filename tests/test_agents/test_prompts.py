@@ -131,17 +131,14 @@ def test_deploy_correlator_output_fields() -> None:
         assert field in text, f"deploy_correlator.txt must reference output field {field!r}"
 
 
-def test_remediation_hitl_is_mandatory() -> None:
-    """Remediation prompt must make HITL non-negotiable and name the tool."""
-    text = load_prompt("remediation.txt")
-    assert "request_human_approval" in text, (
-        "remediation.txt must explicitly name the request_human_approval tool"
-    )
-    # Must communicate that bypassing HITL is forbidden
-    lower = text.lower()
-    assert "non-negotiable" in lower or "must" in lower, (
-        "remediation.txt must make HITL mandatory (use 'must' or 'non-negotiable')"
-    )
+def test_remediation_hitl_is_the_revert_pr() -> None:
+    """Remediation prompt: the backend only drafts; a human merges the revert PR on GitHub."""
+    lower = load_prompt("remediation.txt").lower()
+    assert "non-negotiable" in lower
+    assert "only drafts" in lower
+    assert "a human merges it" in lower
+    assert "github" in lower
+    assert "approval" not in lower
 
 
 def test_remediation_names_the_output_only_tools() -> None:
@@ -158,10 +155,11 @@ def test_remediation_decision_tree_thresholds() -> None:
     assert "escalate" in text.lower(), "remediation.txt must mention escalation path"
 
 
-def test_comms_mentions_draft_slack_summary() -> None:
-    """Comms prompt must instruct use of draft_slack_summary."""
-    text = load_prompt("comms.txt")
-    assert "draft_slack_summary" in text
+def test_comms_has_no_tools_and_sends_nothing() -> None:
+    """Comms prompt: the agent writes the summary itself and sends nothing."""
+    lower = load_prompt("comms.txt").lower()
+    assert "you have no tools" in lower
+    assert "you send nothing" in lower
 
 
 def test_comms_required_sections() -> None:

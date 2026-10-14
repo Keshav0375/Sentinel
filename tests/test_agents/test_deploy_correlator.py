@@ -198,7 +198,6 @@ def test_deploy_correlator_agent_no_extra_tools(
         "search_past_incidents",
         "prepare_rollback_spec",
         "format_escalation",
-        "request_human_approval",
     }
     assert not names & unexpected, f"Unexpected tools: {names & unexpected}"
 

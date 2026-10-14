@@ -13,7 +13,6 @@ from pydantic import SecretStr
 
 from sentinel.eval.runner import (
     EvalRunResult,
-    _auto_approve,
     run_eval,
     run_scenario_eval,
     scores_from_results,
@@ -90,23 +89,6 @@ def _make_groq_client() -> MagicMock:
     client.chat.completions = MagicMock()
     client.chat.completions.create = AsyncMock()
     return client
-
-
-# ── _auto_approve ─────────────────────────────────────────────────────────────
-
-
-class TestAutoApprove:
-    async def test_returns_approve(self) -> None:
-        decision, comment = await _auto_approve("Roll back deploy-abc123")
-        assert decision == "approve"
-
-    async def test_comment_is_string_or_none(self) -> None:
-        _, comment = await _auto_approve("some action")
-        assert comment is None or isinstance(comment, str)
-
-    async def test_does_not_raise_on_empty_display(self) -> None:
-        decision, _ = await _auto_approve("")
-        assert decision == "approve"
 
 
 # ── scores_from_results ───────────────────────────────────────────────────────
