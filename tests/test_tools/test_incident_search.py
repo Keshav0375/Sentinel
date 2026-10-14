@@ -294,13 +294,13 @@ async def test_result_contains_severity(seeded_mem: EpisodicMemory) -> None:
 @pytest.mark.asyncio
 async def test_result_contains_root_cause(seeded_mem: EpisodicMemory) -> None:
     result = await _search_past_incidents(seeded_mem, "connection pool", 3)
-    assert "root_cause" in result
+    assert "Root cause (model-generated, unverified):" in result
 
 
 @pytest.mark.asyncio
 async def test_result_contains_resolution(seeded_mem: EpisodicMemory) -> None:
     result = await _search_past_incidents(seeded_mem, "connection pool", 3)
-    assert "resolution" in result
+    assert "Resolution (model-generated, unverified):" in result
 
 
 @pytest.mark.asyncio
@@ -381,10 +381,32 @@ def test_format_contains_all_fields() -> None:
     assert "service:" in result
     assert "severity:" in result
     assert "symptoms:" in result
-    assert "root_cause:" in result
-    assert "resolution:" in result
+    assert "Root cause (model-generated, unverified): bad deploy" in result
+    assert "Resolution (model-generated, unverified): rollback" in result
     assert "mttr:" in result
     assert "similarity:" in result
+
+
+def test_format_labels_recalled_conclusions_as_unverified() -> None:
+    records = [
+        EpisodicRecord(
+            id=f"inc-00{i}",
+            service_name="payment-service",
+            severity="P1",
+            symptoms="connection pool exhausted",
+            root_cause=f"leak #{i}",
+            resolution=f"restart #{i}",
+        )
+        for i in (1, 2)
+    ]
+    result = _format_results(MemoryQueryResult(records=records, similarity_scores=[0.9, 0.8]))
+
+    for i in (1, 2):
+        assert f"Root cause (model-generated, unverified): leak #{i}" in result
+        assert f"Resolution (model-generated, unverified): restart #{i}" in result
+    # No unlabelled root cause / resolution line anywhere.
+    assert "root_cause:" not in result
+    assert "resolution:" not in result
 
 
 def test_format_similarity_score_formatted() -> None:

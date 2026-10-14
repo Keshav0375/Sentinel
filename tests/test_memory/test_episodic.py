@@ -258,7 +258,7 @@ async def test_full_round_trip(pool: asyncpg.Pool) -> None:
     assert record.mttr_seconds == 300
     assert record.created_at == inc.created_at
     assert "payment-service" in record.symptoms
-    assert "connection leak in checkout handler" in record.symptoms
+    assert "connection leak in checkout handler" not in record.symptoms  # agent output
     expected = await client.embed(record.symptoms)
     assert len(record.embedding) == DIMS
     assert record.embedding == pytest.approx(expected, abs=1e-6)
@@ -269,6 +269,10 @@ async def test_full_round_trip(pool: asyncpg.Pool) -> None:
         "triage",
         "log_analyst",
     ]
+    provenance = record.raw_timeline["provenance"]
+    assert provenance["root_cause_by"] == "log_analyst"
+    assert provenance["resolution_by"] == "unknown"  # no remediation agent in the timeline
+    assert provenance["model_generated"] is True
 
 
 async def test_row_columns_follow_the_schema_mapping(
@@ -287,7 +291,7 @@ async def test_row_columns_follow_the_schema_mapping(
     assert row["resolved_at"] == inc.resolved_at
     assert row["mttr_seconds"] == 42
     trajectory = json.loads(row["trajectory"])
-    assert set(trajectory) == {"symptoms", "timeline"}
+    assert set(trajectory) == {"symptoms", "timeline", "provenance"}
     assert trajectory["symptoms"].startswith("Service api-gateway error_rate")
     # Columns the Phase-1 model cannot supply stay NULL / default.
     for column in (
@@ -337,6 +341,86 @@ async def test_store_upserts_on_same_id(mem: EpisodicMemory) -> None:
     record = await mem.get_incident(inc.id)
     assert record is not None
     assert record.resolution == "rollback"
+
+
+# ── Provenance: stored conclusions are marked as model output ─────────────────
+
+
+async def test_provenance_names_the_agents_from_the_timeline(mem: EpisodicMemory) -> None:
+    inc = _make_incident("payment-service", "db_connection_pool")
+    inc.deploy_correlation = {"evidence": "deploy v2.3 introduced the leak"}
+    inc.remediation_plan = {"action_type": "rollback"}
+    inc.timeline = [
+        TimelineEntry(
+            agent_name="incident_orchestrator",
+            action="handoff → deploy_correlator_agent",
+            result_summary="Transferred control to deploy_correlator_agent",
+        ),
+        TimelineEntry(agent_name="remediation_agent", action="propose", result_summary="ok"),
+    ]
+
+    await mem.store_incident(inc)
+    record = await mem.get_incident(inc.id)
+
+    assert record is not None
+    assert record.root_cause == "deploy v2.3 introduced the leak"
+    assert record.raw_timeline is not None
+    provenance = record.raw_timeline["provenance"]
+    assert provenance["root_cause_by"] == "deploy_correlator_agent"
+    assert provenance["resolution_by"] == "remediation_agent"
+    assert provenance["model_generated"] is True
+    stored_at = datetime.fromisoformat(provenance["stored_at"])
+    assert abs(datetime.now(UTC) - stored_at) < timedelta(minutes=1)
+
+
+async def test_provenance_is_unknown_without_conclusions(mem: EpisodicMemory) -> None:
+    inc = _make_incident("api-gateway", "error_rate")
+    await mem.store_incident(inc)
+    record = await mem.get_incident(inc.id)
+
+    assert record is not None and record.raw_timeline is not None
+    provenance = record.raw_timeline["provenance"]
+    assert provenance["root_cause_by"] == "unknown"
+    assert provenance["resolution_by"] == "unknown"
+    assert provenance["model_generated"] is True
+
+
+async def test_embedded_symptoms_hold_only_observed_alert_data(
+    pool: asyncpg.Pool,
+) -> None:
+    client = EmbeddingClient(_SpreadFakeModel())
+    mem = EpisodicMemory(pool, client)
+    inc = _make_incident("payment-service", "db_connection_pool")
+    inc.alert.metadata = {
+        "title": "Checkout errors above SLO",
+        "description": "p99 latency 4s on /checkout",
+        "scenario_id": "bad_deploy_01",
+    }
+    inc.affected_service = "orders-db"  # triage's conclusion
+    inc.log_analysis = {"hypothesis": "connection leak in checkout handler"}
+    inc.deploy_correlation = {"evidence": "deploy v2.3"}
+    inc.remediation_plan = {"justification": "revert to stable"}
+
+    await mem.store_incident(inc)
+    record = await mem.get_incident(inc.id)
+
+    assert record is not None
+    symptoms = record.symptoms
+    for observed in (
+        "payment-service",
+        "db_connection_pool",
+        "95.0",
+        "80.0",
+        "critical",
+        "Checkout errors above SLO",
+        "p99 latency 4s on /checkout",
+    ):
+        assert observed in symptoms, observed
+    for model_output in ("orders-db", "connection leak", "deploy v2.3", "revert to stable"):
+        assert model_output not in symptoms, model_output
+    assert "bad_deploy_01" not in symptoms
+    # The stored vector is the embedding of exactly that observed text.
+    assert record.embedding == pytest.approx(await client.embed(symptoms), abs=1e-6)
 
 
 async def test_store_rejects_a_non_uuid_id(mem: EpisodicMemory) -> None:

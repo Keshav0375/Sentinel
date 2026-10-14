@@ -6,10 +6,18 @@ is ``ORDER BY embedding <=> $1`` (cosine distance) in PostgreSQL, served by the
 
 Mapping (decision 2026-10-12, "Phase-1 models ↔ §5.3 schema"): the symptom text and the
 timeline have no columns of their own and live in ``trajectory`` JSONB as
-``{"symptoms": <text>, "timeline": <raw_timeline>}``. Columns an :class:`Incident` cannot
-supply (correlation_id, dd_event_id, langfuse_trace_id, pr_*, eval_score, …) stay
-NULL/default until the phase-4 pipeline writes them; ``resolved_at`` is written when the
-incident has one, since ``mttr_seconds`` is derived from it.
+``{"symptoms": <text>, "timeline": <raw_timeline>, "provenance": {...}}``. Columns an
+:class:`Incident` cannot supply (correlation_id, dd_event_id, langfuse_trace_id, pr_*,
+eval_score, …) stay NULL/default until the phase-4 pipeline writes them; ``resolved_at`` is
+written when the incident has one, since ``mttr_seconds`` is derived from it.
+
+Provenance: ``root_cause`` and ``resolution`` are agent output, not verified fact. The
+stored ``provenance`` records ``root_cause_by`` / ``resolution_by`` (the agent, from the
+incident timeline, else ``"unknown"``), ``model_generated: true`` and ``stored_at``; it
+reads back inside ``EpisodicRecord.raw_timeline["provenance"]``. The embedded symptom text
+holds only what was observed (the alert: service, metric, value, threshold, severity, and a
+title/description when the alert metadata carries one) — never an agent's hypothesis or
+root cause, so recall is not keyed on earlier model output.
 
 With no pool (no ``DATABASE_URL``) every method raises
 :class:`~sentinel.exceptions.SentinelMemoryError` — there are no silent empty results.
@@ -20,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 # asyncpg ships no type stubs (see infra/database.py); only its types are named here.
@@ -65,7 +74,7 @@ class EpisodicMemory:
     # ── Domain-specific API ───────────────────────────────────────────────────
 
     async def store_incident(self, incident: Incident) -> None:
-        """Embed the incident's symptoms and upsert its row into ``incidents``.
+        """Embed the incident's observed symptoms and upsert its row into ``incidents``.
 
         Storing an incident with the same ID again overwrites the mapped columns; the
         columns this model does not supply are left as they are.
@@ -88,12 +97,23 @@ class EpisodicMemory:
         if incident.resolved_at and incident.created_at:
             mttr_seconds = int((incident.resolved_at - incident.created_at).total_seconds())
 
+        root_cause, root_cause_role = _root_cause_with_source(incident)
+        resolution, resolution_role = _resolution_with_source(incident)
         raw_timeline: dict[str, Any] = {
             "id": incident.id,
             "status": incident.status.value,
             "timeline": [e.model_dump(mode="json") for e in incident.timeline],
         }
-        trajectory = {"symptoms": symptoms, "timeline": raw_timeline}
+        trajectory = {
+            "symptoms": symptoms,
+            "timeline": raw_timeline,
+            "provenance": {
+                "root_cause_by": _agent_for_role(incident, root_cause_role),
+                "resolution_by": _agent_for_role(incident, resolution_role),
+                "model_generated": True,
+                "stored_at": datetime.now(UTC).isoformat(),
+            },
+        }
 
         async with database.acquire(pool) as conn:
             await conn.execute(
@@ -120,8 +140,8 @@ class EpisodicMemory:
                 severity,
                 service,
                 incident.status.value,
-                _extract_root_cause(incident),
-                _extract_resolution(incident),
+                root_cause,
+                resolution,
                 json.dumps(trajectory),
                 incident.created_at,
                 incident.resolved_at,
@@ -310,47 +330,76 @@ def _as_uuid(value: str) -> uuid.UUID | None:
 
 
 def _build_symptom_text(incident: Incident) -> str:
-    """Build a natural language symptom string from an incident for embedding."""
+    """The text embedded for similarity search: only what the alert observed.
+
+    Service, metric, current value vs threshold, severity, and the alert's title /
+    description when its metadata carries them. Agent output (triage's affected service,
+    the log analyst's hypothesis, any root cause) is deliberately left out.
+    """
     alert = incident.alert
     parts: list[str] = [
         f"Service {alert.service} {alert.metric}",
         f"current {alert.current_value} threshold {alert.threshold}",
         f"severity {alert.severity}",
     ]
-    if incident.affected_service and incident.affected_service != alert.service:
-        parts.append(f"affected {incident.affected_service}")
-    if incident.log_analysis:
-        hypothesis = incident.log_analysis.get("hypothesis")
-        if hypothesis:
-            parts.append(str(hypothesis))
+    for key in ("title", "description"):
+        value = alert.metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
     return " ".join(parts)
 
 
-def _extract_root_cause(incident: Incident) -> str:
-    """Extract a root cause string from available incident analysis results."""
+# Agent roles, matched against the agent names in the incident timeline.
+_LOG_ANALYST = "log_analyst"
+_DEPLOY_CORRELATOR = "deploy_correlator"
+_REMEDIATION = "remediation"
+_COMMS = "comms"
+_HANDOFF_PREFIX = "handoff → "
+
+
+def _root_cause_with_source(incident: Incident) -> tuple[str, str | None]:
+    """The root cause from the analysis results, and the role of the agent that produced it."""
     if incident.log_analysis:
         hypothesis = incident.log_analysis.get("hypothesis")
         if hypothesis:
-            return str(hypothesis)
+            return str(hypothesis), _LOG_ANALYST
     if incident.deploy_correlation:
         evidence = incident.deploy_correlation.get("evidence")
         if evidence:
-            return str(evidence)
-    return "unknown"
+            return str(evidence), _DEPLOY_CORRELATOR
+    return "unknown", None
 
 
-def _extract_resolution(incident: Incident) -> str:
-    """Extract a resolution string from available incident analysis results."""
+def _resolution_with_source(incident: Incident) -> tuple[str, str | None]:
+    """The resolution from the analysis results, and the role of the agent that produced it."""
     if incident.remediation_plan:
         justification = incident.remediation_plan.get("justification")
         if justification:
-            return str(justification)
+            return str(justification), _REMEDIATION
         action_type = incident.remediation_plan.get("action_type")
         if action_type:
-            return str(action_type)
+            return str(action_type), _REMEDIATION
     if incident.comms_summary:
-        return incident.comms_summary
-    return "unresolved"
+        return incident.comms_summary, _COMMS
+    return "unresolved", None
+
+
+def _agent_for_role(incident: Incident, role: str | None) -> str:
+    """The timeline's name for the agent in *role* (latest entry wins), else "unknown".
+
+    An agent shows up as an entry's ``agent_name`` or as the target of a handoff
+    (``"handoff → <agent>"``).
+    """
+    if role is None:
+        return "unknown"
+    for entry in reversed(incident.timeline):
+        if role in entry.agent_name:
+            return entry.agent_name
+        if entry.action.startswith(_HANDOFF_PREFIX):
+            target = entry.action.removeprefix(_HANDOFF_PREFIX).strip()
+            if role in target:
+                return target
+    return "unknown"
 
 
 def _row_to_record(row: asyncpg.Record) -> EpisodicRecord:
@@ -358,6 +407,7 @@ def _row_to_record(row: asyncpg.Record) -> EpisodicRecord:
 
     Rows written by other writers (the phase-4 pipeline, GHA) may lack the trajectory
     or the analysis columns; those read back as empty text / "unknown" / "unresolved".
+    The trajectory's ``provenance`` is exposed as ``raw_timeline["provenance"]``.
     """
     trajectory_raw: str | None = row["trajectory"]
     trajectory: dict[str, Any] = {}
@@ -368,6 +418,9 @@ def _row_to_record(row: asyncpg.Record) -> EpisodicRecord:
 
     timeline = trajectory.get("timeline")
     raw_timeline: dict[str, Any] | None = timeline if isinstance(timeline, dict) else None  # pyright: ignore[reportUnknownVariableType]
+    provenance = trajectory.get("provenance")
+    if isinstance(provenance, dict):
+        raw_timeline = {**(raw_timeline or {}), "provenance": provenance}
 
     vector: Vector | None = row["embedding"]
     fields: dict[str, Any] = {
