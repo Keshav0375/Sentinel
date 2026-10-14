@@ -213,18 +213,50 @@ def _settings(token: str | None = TOKEN) -> Settings:
     return Settings(github_api_token=token)
 
 
+class Sleeps:
+    """Records the requested sleeps instead of sleeping."""
+
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
 async def _details(
     pool: asyncpg.Pool | None,
     gh: FakeGitHub | None = None,
     settings: Settings | None = None,
+    sleeps: Sleeps | None = None,
     **request: Any,
 ) -> list[DeployRecord] | ToolFailure:
     request.setdefault("service", SERVICE)
     fake = gh or FakeGitHub()
     async with fake.client() as client:
         return await _get_deploy_details(
-            pool, settings or _settings(None), DeployQuery(**request), http_client=client
+            pool,
+            settings or _settings(None),
+            DeployQuery(**request),
+            http_client=client,
+            sleep=sleeps or Sleeps(),
         )
+
+
+def _then_ok(*first: Fault) -> Fault:
+    """A fault that answers with *first*, in turn, then serves the PR normally."""
+    queue = list(first)
+
+    def fault(request: httpx.Request) -> httpx.Response:
+        if queue:
+            return queue.pop(0)(request)
+        number = int(request.url.path.rsplit("/", 1)[1])
+        return httpx.Response(200, json=_pr_body(number), request=request)
+
+    return fault
+
+
+def _timeout(request: httpx.Request) -> httpx.Response:
+    raise httpx.ReadTimeout("timed out", request=request)
 
 
 async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> str:
@@ -594,6 +626,82 @@ async def test_failed_lookup_keeps_the_record(
     assert failed.github is None
     assert failed.github_note == f"GitHub lookup of PR #43 failed: {reason}"
     assert ok.github is not None and ok.github.title == "Change #42"
+
+
+# ── GitHub retry ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("first", "wait"),
+    [
+        (lambda r: httpx.Response(503, request=r), 1.0),
+        (lambda r: httpx.Response(500, request=r), 1.0),
+        (lambda r: httpx.Response(429, headers={"Retry-After": "3"}, request=r), 3.0),
+        (lambda r: httpx.Response(429, headers={"Retry-After": "5"}, request=r), 5.0),
+        (lambda r: httpx.Response(502, headers={"Retry-After": "soon"}, request=r), 1.0),
+        (_timeout, 1.0),
+    ],
+)
+async def test_a_transient_github_failure_is_retried_once(
+    pool: asyncpg.Pool, gh: FakeGitHub, first: Fault, wait: float
+) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), pr=42)
+    gh.faults[42] = _then_ok(first)
+    sleeps = Sleeps()
+    [record] = _records(await _details(pool, gh, settings=_settings(), sleeps=sleeps))
+    assert record.github is not None and record.github.title == "Change #42"
+    assert record.github_note is None
+    assert gh.numbers() == [42, 42]
+    assert sleeps.calls == [wait]
+
+
+async def test_a_second_transient_failure_gives_a_note_not_a_failure(
+    pool: asyncpg.Pool, gh: FakeGitHub
+) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), pr=42)
+    gh.faults[42] = lambda r: httpx.Response(503, request=r)
+    sleeps = Sleeps()
+    [record] = _records(await _details(pool, gh, settings=_settings(), sleeps=sleeps))
+    assert record.github is None
+    assert record.github_note == "GitHub lookup of PR #42 failed: HTTP 503"
+    assert gh.numbers() == [42, 42]  # one retry, no more
+    assert sleeps.calls == [1.0]
+
+
+async def test_a_retry_after_over_5_seconds_is_not_waited_for(
+    pool: asyncpg.Pool, gh: FakeGitHub
+) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), pr=42)
+    gh.faults[42] = _then_ok(
+        lambda r: httpx.Response(429, headers={"Retry-After": "60"}, request=r)
+    )
+    sleeps = Sleeps()
+    [record] = _records(await _details(pool, gh, settings=_settings(), sleeps=sleeps))
+    assert record.github_note == "GitHub lookup of PR #42 failed: HTTP 429"
+    assert gh.numbers() == [42]
+    assert sleeps.calls == []
+
+
+@pytest.mark.parametrize("code", [401, 403, 404, 422])
+async def test_a_client_error_is_not_retried(pool: asyncpg.Pool, gh: FakeGitHub, code: int) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), pr=42)
+    gh.faults[42] = _then_ok(lambda r: httpx.Response(code, request=r))
+    sleeps = Sleeps()
+    [record] = _records(await _details(pool, gh, settings=_settings(), sleeps=sleeps))
+    assert record.github_note == f"GitHub lookup of PR #42 failed: HTTP {code}"
+    assert gh.numbers() == [42]
+    assert sleeps.calls == []
+
+
+async def test_the_tool_passes_its_sleep_to_the_retry(pool: asyncpg.Pool, gh: FakeGitHub) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), pr=42)
+    gh.faults[42] = _then_ok(lambda r: httpx.Response(503, request=r))
+    sleeps = Sleeps()
+    async with gh.client() as client:
+        tool = make_deploy_checker_tool(pool, _settings(), http_client=client, sleep=sleeps)
+        [item] = json.loads(await _invoke(tool, {"request": {"service": SERVICE}}))
+    assert item["github"]["title"] == "Change #42"
+    assert sleeps.calls == [1.0]
 
 
 async def test_transport_error_keeps_the_record(pool: asyncpg.Pool, gh: FakeGitHub) -> None:

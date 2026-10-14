@@ -10,8 +10,10 @@ The ``deployments.incident_id`` backfill is not a tool action.
 
 GitHub enrichment is optional. Only with ``settings.github_api_token`` set, the newest
 few rows with a PR number get ``GET /repos/{repo}/pulls/{n}``, where ``repo`` is the
-service's ``services.metadata.repo`` — never a model argument. A lookup that fails leaves
-``github`` None with a ``github_note`` and never fails the call. The token is read only
+service's ``services.metadata.repo`` — never a model argument. A 5xx, 429 or timeout is
+retried once (after Retry-After when it is at most 5 s, else 1 s; a longer Retry-After
+is not waited for). A lookup that still fails leaves ``github`` None with a
+``github_note`` and never fails the call. The token is read only
 when the request headers are built and is never logged.
 """
 
@@ -20,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from typing import Any, cast
 
@@ -43,6 +45,8 @@ from sentinel.tools.output import tool_json
 
 logger = get_logger("sentinel.tools.deploy_checker")
 
+SleepFn = Callable[[float], Awaitable[None]]
+
 _TOOL_NAME = "get_deploy_details"
 
 # ── Bounds ────────────────────────────────────────────────────────────────────
@@ -57,6 +61,8 @@ _GITHUB_API = "https://api.github.com"
 _GITHUB_API_VERSION = "2022-11-28"
 _GITHUB_TIMEOUT = httpx.Timeout(5.0)
 _TITLE_CHARS = 200
+_GITHUB_RETRY_DELAY = 1.0  # before the one retry, when GitHub sends no Retry-After
+_GITHUB_MAX_RETRY_AFTER = 5.0  # a longer Retry-After is not waited for
 
 # ── Payload caps (the result goes to the model, so it stays small) ───────────
 _AUTHOR_CHARS = 100
@@ -86,6 +92,7 @@ def make_deploy_checker_tool(
     settings: Settings,
     *,
     http_client: httpx.AsyncClient | None = None,
+    sleep: SleepFn = asyncio.sleep,
 ) -> FunctionTool:
     """Create the get_deploy_details tool with the pool and settings injected.
 
@@ -96,6 +103,7 @@ def make_deploy_checker_tool(
             GitHub enrichment.
         http_client: Client for the GitHub requests (tests pass one over a mock
             transport). None → a short-lived client per call.
+        sleep: Awaited before the one GitHub retry (tests pass a recorder).
 
     Returns:
         FunctionTool that agents can call to list a service's recent deploys.
@@ -120,7 +128,7 @@ def make_deploy_checker_tool(
             request: The service, the window in hours, and how many deploys to return.
         """
         return tool_json(
-            await _get_deploy_details(pool, settings, request, http_client=http_client)
+            await _get_deploy_details(pool, settings, request, http_client=http_client, sleep=sleep)
         )
 
     return get_deploy_details
@@ -132,6 +140,7 @@ async def _get_deploy_details(
     request: DeployQuery,
     *,
     http_client: httpx.AsyncClient | None = None,
+    sleep: SleepFn = asyncio.sleep,
 ) -> list[DeployRecord] | ToolFailure:
     """Read the service's recent deploys, or return a ToolFailure — never raise.
 
@@ -166,7 +175,7 @@ async def _get_deploy_details(
 
     records = [_record(row) for row in rows]
     if enrich:
-        records = await _enrich(records, settings, service, repo, http_client)
+        records = await _enrich(records, settings, service, repo, http_client, sleep)
     else:
         records = _noted(records, range(len(records)), "not looked up: GITHUB_API_TOKEN not set")
 
@@ -246,6 +255,7 @@ async def _enrich(
     service: str,
     repo: str | None,
     http_client: httpx.AsyncClient | None,
+    sleep: SleepFn,
 ) -> list[DeployRecord]:
     """Attach the PR to the newest ``_MAX_ENRICHED`` records with a PR number.
 
@@ -265,9 +275,9 @@ async def _enrich(
     headers = _github_headers(settings)
     if http_client is None:
         async with httpx.AsyncClient(timeout=_GITHUB_TIMEOUT) as client:
-            found = await _fetch_prs(client, repo, numbers, headers)
+            found = await _fetch_prs(client, repo, numbers, headers, sleep)
     else:
-        found = await _fetch_prs(http_client, repo, numbers, headers)
+        found = await _fetch_prs(http_client, repo, numbers, headers, sleep)
 
     enriched = list(records)
     for i in looked_up:
@@ -288,26 +298,31 @@ def _github_headers(settings: Settings) -> dict[str, str]:
 
 
 async def _fetch_prs(
-    client: httpx.AsyncClient, repo: str, numbers: list[int], headers: dict[str, str]
+    client: httpx.AsyncClient,
+    repo: str,
+    numbers: list[int],
+    headers: dict[str, str],
+    sleep: SleepFn,
 ) -> dict[int, GitHubPR | str]:
     """Each PR by number, or the note saying why it could not be read."""
-    results = await asyncio.gather(*(_fetch_pr(client, repo, n, headers) for n in numbers))
+    results = await asyncio.gather(*(_fetch_pr(client, repo, n, headers, sleep) for n in numbers))
     return dict(zip(numbers, results, strict=True))
 
 
 async def _fetch_pr(
-    client: httpx.AsyncClient, repo: str, number: int, headers: dict[str, str]
+    client: httpx.AsyncClient,
+    repo: str,
+    number: int,
+    headers: dict[str, str],
+    sleep: SleepFn,
 ) -> GitHubPR | str:
     """GET one PR; a GitHub problem becomes a note naming PR and reason, never the token."""
     what = f"GitHub lookup of PR #{number} failed"
-    try:
-        response = await client.get(
-            f"{_GITHUB_API}/repos/{repo}/pulls/{number}",
-            headers=headers,
-            timeout=_GITHUB_TIMEOUT,
-        )
-    except httpx.HTTPError as exc:
-        return _lookup_failed(number, f"{what}: {type(exc).__name__}")
+    response = await _get_once_retried(
+        client, f"{_GITHUB_API}/repos/{repo}/pulls/{number}", headers, sleep, what, number
+    )
+    if isinstance(response, str):
+        return _lookup_failed(number, response)
     if not response.is_success:
         return _lookup_failed(number, f"{what}: HTTP {response.status_code}")
     try:
@@ -316,6 +331,47 @@ async def _fetch_pr(
         return _lookup_failed(number, f"{what}: non-JSON body")
     pr = _github_pr(data)
     return pr if pr is not None else _lookup_failed(number, f"{what}: unexpected body")
+
+
+async def _get_once_retried(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    sleep: SleepFn,
+    what: str,
+    number: int,
+) -> httpx.Response | str:
+    """GET *url*, retrying a 5xx, 429 or timeout once; the response, or why it failed."""
+    retried = False
+    while True:
+        try:
+            response = await client.get(url, headers=headers, timeout=_GITHUB_TIMEOUT)
+        except httpx.TimeoutException as exc:
+            reason, delay = f"{what}: {type(exc).__name__}", _GITHUB_RETRY_DELAY
+        except httpx.HTTPError as exc:
+            return f"{what}: {type(exc).__name__}"
+        else:
+            status = response.status_code
+            if status != 429 and status < 500:
+                return response
+            reason, delay = f"{what}: HTTP {status}", _retry_delay(response)
+        if retried or delay is None:
+            return reason
+        logger.warning("github_pr_lookup_retry", pr_number=number, reason=reason, delay=delay)
+        await sleep(delay)
+        retried = True
+
+
+def _retry_delay(response: httpx.Response) -> float | None:
+    """Seconds to wait before the retry; None when GitHub asks for longer than 5 s."""
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        return _GITHUB_RETRY_DELAY
+    try:
+        wait = max(float(raw), 0.0)
+    except ValueError:
+        return _GITHUB_RETRY_DELAY
+    return wait if wait <= _GITHUB_MAX_RETRY_AFTER else None
 
 
 def _lookup_failed(number: int, note: str) -> str:
