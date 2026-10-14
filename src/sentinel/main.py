@@ -10,6 +10,7 @@ The app must be launched from the project root so that the ``data`` package
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -260,7 +261,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("sentinel_ready")
         yield
     finally:
-        shutdown_traces()  # never raises, so the pool below is always closed
+        # Flushing can block on network I/O: off the loop. Never raises, so the pool
+        # below is always closed.
+        await asyncio.to_thread(shutdown_traces)
         await close_pool()
         logger.info("sentinel_shutdown")
 

@@ -6,9 +6,12 @@ real client is the disabled no-op; tests that need a live client mock ``get_clie
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -489,6 +492,64 @@ async def test_load_prompt_raises_when_langfuse_and_file_both_fail(
         await load_prompt("no_such_agent")
 
 
+async def test_load_prompt_fetches_off_the_event_loop_thread(mock_client: MagicMock) -> None:
+    loop_thread = threading.get_ident()
+    fetch_threads: list[int] = []
+
+    def _get_prompt(*args: Any, **kwargs: Any) -> MagicMock:
+        fetch_threads.append(threading.get_ident())
+        return MagicMock(name="TextPromptClient")
+
+    mock_client.get_prompt.side_effect = _get_prompt
+    await load_prompt("triage")
+
+    assert len(fetch_threads) == 1
+    assert fetch_threads[0] != loop_thread
+
+
+async def _ticks_during(coro: Any) -> tuple[Any, int]:
+    """Run *coro* beside a 10 ms ticker; return its result and how often the ticker ran."""
+    ticks = 0
+    done = asyncio.Event()
+
+    async def _ticker() -> None:
+        nonlocal ticks
+        while not done.is_set():
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    ticker = asyncio.create_task(_ticker())
+    try:
+        result = await coro
+    finally:
+        done.set()
+        await ticker
+    return result, ticks
+
+
+@pytest.mark.parametrize("unreachable", [False, True], ids=["slow", "unreachable"])
+async def test_slow_langfuse_does_not_block_other_coroutines(
+    mock_client: MagicMock, unreachable: bool
+) -> None:
+    prompt = MagicMock(name="TextPromptClient")
+
+    def _blocking_get_prompt(*args: Any, **kwargs: Any) -> MagicMock:
+        time.sleep(0.3)  # the SDK's synchronous HTTP call, retries included
+        if unreachable:
+            raise ConnectionError("connection refused")
+        return prompt
+
+    mock_client.get_prompt.side_effect = _blocking_get_prompt
+    result, ticks = await _ticks_during(load_prompt("triage"))
+
+    if unreachable:
+        assert result == (_PROMPTS_DIR / "triage.txt").read_text(encoding="utf-8")
+    else:
+        assert result is prompt
+    # A blocked loop would let the ticker run once; ~30 ticks fit in 0.3 s.
+    assert ticks >= 10
+
+
 def test_push_score_calls_create_score_with_exact_kwargs(mock_client: MagicMock) -> None:
     push_score("0123456789abcdef0123456789abcdef", "triage_accuracy", 0.8)
 
@@ -565,6 +626,66 @@ def test_trace_incident_truncates_attributes_to_200_chars(
     assert kwargs["tags"] == ["incident", "s" * 200]
 
 
+# ── observe: input/output capture is opt-in ────────────────────────────────────
+
+
+@pytest.fixture
+def observe_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """The client langfuse's decorator resolves internally, as a mock."""
+    from langfuse._client import observe as langfuse_observe_module  # noqa: PLC0415
+
+    client = MagicMock()
+    monkeypatch.setattr(langfuse_observe_module, "get_client", lambda **_: client)
+    return client
+
+
+def _span(client: MagicMock) -> MagicMock:
+    return client.start_as_current_observation.return_value.__enter__.return_value
+
+
+def _output_updates(client: MagicMock) -> list[Any]:
+    return [c for c in _span(client).update.call_args_list if "output" in c.kwargs]
+
+
+async def test_observe_does_not_capture_input_or_output_by_default(
+    observe_client: MagicMock,
+) -> None:
+    @observe(name="fetch-logs", as_type="tool")
+    async def fetch_logs(query: str) -> str:
+        return f"raw log lines for {query}"
+
+    assert await fetch_logs("payment-service") == "raw log lines for payment-service"
+
+    kwargs = observe_client.start_as_current_observation.call_args.kwargs
+    assert kwargs["name"] == "fetch-logs"
+    assert kwargs["as_type"] == "tool"
+    assert kwargs["input"] is None
+    assert _output_updates(observe_client) == []
+
+
+def test_bare_observe_does_not_capture_either(observe_client: MagicMock) -> None:
+    @observe
+    def summarise(text: str) -> str:
+        return text.upper()
+
+    assert summarise("prompt text") == "PROMPT TEXT"
+    assert observe_client.start_as_current_observation.call_args.kwargs["input"] is None
+    assert _output_updates(observe_client) == []
+
+
+async def test_observe_captures_when_a_function_opts_in(observe_client: MagicMock) -> None:
+    @observe(name="triage-agent", as_type="agent", capture_input=True, capture_output=True)
+    async def run_triage(service: str) -> str:
+        return f"P1 for {service}"
+
+    await run_triage("payment-service")
+
+    assert observe_client.start_as_current_observation.call_args.kwargs["input"] is not None
+    assert [c.kwargs["output"] for c in _output_updates(observe_client)] == [
+        "P1 for payment-service"
+    ]
+
+
 # ── No keys: the real (disabled) client — no crash, no network, no log noise ──
 
 
@@ -632,10 +753,15 @@ def light_lifespan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MagicMock
 async def test_lifespan_shuts_down_langfuse_on_exit(
     light_lifespan: MagicMock, mock_client: MagicMock
 ) -> None:
+    loop_thread = threading.get_ident()
+    shutdown_threads: list[int] = []
+    mock_client.shutdown.side_effect = lambda: shutdown_threads.append(threading.get_ident())
+
     async with main.lifespan(FastAPI()):
         mock_client.shutdown.assert_not_called()
 
     mock_client.shutdown.assert_called_once_with()
+    assert shutdown_threads != [loop_thread]  # flushed off the event loop
 
 
 async def test_lifespan_shuts_down_langfuse_after_failed_startup(

@@ -18,8 +18,14 @@ LangFuse (langfuse v3, backend §6) — the surface the agent pipeline uses::
     prompt = await load_prompt("triage")      # TextPromptClient, or the prompts/ file text
     push_score(trace_id, "triage_accuracy", 0.9)
 
-- ``observe`` / ``propagate_attributes`` / ``get_client`` are re-exported from ``langfuse``.
+- ``propagate_attributes`` / ``get_client`` are re-exported from ``langfuse``. ``observe`` is
+  langfuse's decorator with the same signature, but ``capture_input`` and ``capture_output``
+  default to False: function arguments and return values here are raw logs, alert payloads
+  and prompts, and none of that is sent to LangFuse unless a function opts in explicitly
+  (``@observe(name=..., capture_output=True)``). Spans still carry name, timing and errors.
   An ``@observe`` root call can instead take ``langfuse_trace_id=incident_trace_id(...)``.
+- ``load_prompt`` runs the SDK's synchronous ``get_prompt`` in a worker thread, so a slow or
+  unreachable LangFuse never blocks the event loop.
 - ``shutdown_traces()`` runs in the FastAPI lifespan on exit; CLI/eval entry points call
   ``flush_traces()`` before returning. Neither raises.
 - The client reads ``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY`` / ``LANGFUSE_BASE_URL``
@@ -47,14 +53,15 @@ The tracer then:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast, overload
 from uuid import UUID
 
 from agents import (
@@ -64,14 +71,11 @@ from agents import (
     Trace,
     TracingProcessor,
 )
+from langfuse import get_client, propagate_attributes
 
 # langfuse types observe's transform_to_string as Callable[[Iterable], str] — a bare
 # Iterable, which pyright reports as partially unknown.
-from langfuse import (
-    get_client,
-    observe,  # pyright: ignore[reportUnknownVariableType]
-    propagate_attributes,
-)
+from langfuse import observe as _langfuse_observe  # pyright: ignore[reportUnknownVariableType]
 from langfuse.model import TextPromptClient
 
 from sentinel.infra.logging import get_logger
@@ -143,6 +147,63 @@ def langfuse_enabled() -> bool:
 configure_langfuse()
 
 
+# The v3 observation types accepted by @observe (backend §6.2).
+type ObservationType = Literal[
+    "span",
+    "generation",
+    "embedding",
+    "agent",
+    "tool",
+    "chain",
+    "retriever",
+    "evaluator",
+    "guardrail",
+]
+
+
+@overload
+def observe[F: Callable[..., Any]](func: F) -> F: ...
+
+
+@overload
+def observe[F: Callable[..., Any]](
+    func: None = None,
+    *,
+    name: str | None = None,
+    as_type: ObservationType | None = None,
+    capture_input: bool = False,
+    capture_output: bool = False,
+    transform_to_string: Callable[[Iterable[Any]], str] | None = None,
+) -> Callable[[F], F]: ...
+
+
+def observe[F: Callable[..., Any]](
+    func: F | None = None,
+    *,
+    name: str | None = None,
+    as_type: ObservationType | None = None,
+    capture_input: bool = False,
+    capture_output: bool = False,
+    transform_to_string: Callable[[Iterable[Any]], str] | None = None,
+) -> F | Callable[[F], F]:
+    """langfuse's ``@observe``, with input/output capture off unless a function opts in.
+
+    Same signature and behaviour as ``langfuse.observe`` (``@observe`` or
+    ``@observe(name=..., as_type=...)``, the reserved ``langfuse_trace_id=`` kwarg), except
+    that ``capture_input`` / ``capture_output`` default to False instead of on: Sentinel's
+    agent and tool arguments are raw logs, alert payloads and prompts, which are not sent
+    to LangFuse by default.
+    """
+    decorator: Callable[[F], F] = _langfuse_observe(
+        name=name,
+        as_type=as_type,
+        capture_input=capture_input,
+        capture_output=capture_output,
+        transform_to_string=transform_to_string,
+    )
+    return decorator if func is None else decorator(func)
+
+
 def incident_trace_id(incident_id: UUID | str) -> str:
     """The LangFuse trace id for an incident: the UUID as 32 lowercase hex (W3C, §4.5)."""
     return UUID(str(incident_id)).hex
@@ -181,11 +242,17 @@ async def load_prompt(agent_name: str) -> TextPromptClient | str:
     disabled client raises in ``get_prompt``. Raises ``FileNotFoundError`` only when both fail.
     """
     try:
-        return get_client().get_prompt(agent_name, cache_ttl_seconds=_PROMPT_CACHE_TTL_SECONDS)
+        # get_prompt is synchronous and, on a cache miss, does network I/O with retries:
+        # run it off the event loop so concurrent incidents keep going meanwhile.
+        return await asyncio.to_thread(_fetch_prompt, agent_name)
     except Exception as exc:
         log = logger.warning if langfuse_enabled() else logger.debug
         log("prompt_fallback_to_file", agent_name=agent_name, error=str(exc))
         return (_PROMPTS_DIR / f"{agent_name}.txt").read_text(encoding="utf-8")
+
+
+def _fetch_prompt(agent_name: str) -> TextPromptClient:
+    return get_client().get_prompt(agent_name, cache_ttl_seconds=_PROMPT_CACHE_TTL_SECONDS)
 
 
 def push_score(trace_id: str, name: str, value: float) -> None:
