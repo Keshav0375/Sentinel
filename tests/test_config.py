@@ -287,6 +287,7 @@ def test_app_lifespan_boots_without_any_secret(
     monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
     monkeypatch.setattr(main, "EmbeddingClient", MagicMock())
     monkeypatch.setattr(main, "add_trace_processor", MagicMock())
+    monkeypatch.setattr(main, "register_generation_bridge", MagicMock())
 
     with TestClient(main.create_app()) as client:
         response = client.get("/health")

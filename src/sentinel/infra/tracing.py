@@ -33,7 +33,13 @@ LangFuse (langfuse v3, backend §6) — the surface the agent pipeline uses::
   are no-ops, ``load_prompt`` serves the file, nothing touches the network. A blank key is
   treated as absent, and the SDK's per-call "client will be disabled" warning is muted —
   the lifespan reports the state once (``configure_langfuse()`` → ``langfuse_enabled``).
-- LLM generations (tokens, model, cost) are not captured here (R14, §6.2 gap).
+- LLM generations (R14, decision 2026-10-15): ``LangfuseGenerationBridge`` is an add-only
+  openai-agents ``TracingProcessor`` that turns each generation span into a LangFuse
+  ``generation`` observation carrying the model, token usage and the agent's registered
+  ``TextPromptClient`` (``use_agent_prompts``) — never inputs or outputs. Register it once
+  with ``register_generation_bridge()``. It also sums usage into the incident's
+  ``track_incident_tokens`` accumulator, which logs ``incident_token_budget_exceeded``
+  past 50K tokens.
 
 Agent trace capture (openai-agents ``TracingProcessor``) — unchanged::
 
@@ -57,21 +63,26 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 from uuid import UUID
 
 from agents import (
+    AgentSpanData,
     FunctionSpanData,
+    GenerationSpanData,
     HandoffSpanData,
     Span,
     Trace,
     TracingProcessor,
+    add_trace_processor,
 )
-from langfuse import get_client, propagate_attributes
+from langfuse import LangfuseGeneration, get_client, propagate_attributes
 
 # langfuse types observe's transform_to_string as Callable[[Iterable], str] — a bare
 # Iterable, which pyright reports as partially unknown.
@@ -83,9 +94,13 @@ from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.incident import TimelineEntry
 
 __all__ = [
+    "INCIDENT_TOKEN_BUDGET",
     "PIPELINE_TRACE_NAME",
+    "IncidentTokens",
+    "LangfuseGenerationBridge",
     "SentinelTracer",
     "configure_langfuse",
+    "current_incident_tokens",
     "flush_traces",
     "get_client",
     "incident_trace_id",
@@ -94,8 +109,11 @@ __all__ = [
     "observe",
     "propagate_attributes",
     "push_score",
+    "register_generation_bridge",
     "shutdown_traces",
     "trace_incident",
+    "track_incident_tokens",
+    "use_agent_prompts",
 ]
 
 logger = get_logger("sentinel.infra.tracing")
@@ -274,6 +292,191 @@ def shutdown_traces() -> None:
         get_client().shutdown()
     except Exception as exc:
         logger.warning("langfuse_shutdown_failed", error=str(exc))
+
+
+# ── LLM generations → LangFuse (R14) and per-incident token totals ────────────
+
+# §6.1 Cost Tracking: alert when a single incident exceeds 50K tokens. The sink is not yet
+# named by the architecture, so the alert is a structured warning (decision 2026-10-15).
+INCIDENT_TOKEN_BUDGET = 50_000
+
+
+@dataclass
+class IncidentTokens:
+    """Token usage summed over every LLM call of one incident (fallback re-runs included)."""
+
+    incident_id: str
+    budget: int = INCIDENT_TOKEN_BUDGET
+    input_tokens: int = 0
+    output_tokens: int = 0
+    _warned: bool = field(default=False, repr=False)
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def add(self, input_tokens: int, output_tokens: int) -> None:
+        """Add one call's usage; warns once when the total first exceeds the budget."""
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        if self.total_tokens > self.budget and not self._warned:
+            self._warned = True
+            logger.warning(
+                "incident_token_budget_exceeded",
+                incident_id=self.incident_id,
+                total_tokens=self.total_tokens,
+                input_tokens=self.input_tokens,
+                output_tokens=self.output_tokens,
+                budget=self.budget,
+            )
+
+
+_INCIDENT_TOKENS: ContextVar[IncidentTokens | None] = ContextVar(
+    "sentinel_incident_tokens", default=None
+)
+_AGENT_PROMPTS: ContextVar[Mapping[str, TextPromptClient]] = ContextVar(
+    "sentinel_agent_prompts", default={}
+)
+
+
+@contextmanager
+def track_incident_tokens(
+    incident_id: str, *, budget: int = INCIDENT_TOKEN_BUDGET
+) -> Generator[IncidentTokens]:
+    """Sum the usage of every LLM generation run inside this block (and its tasks)."""
+    tokens = IncidentTokens(incident_id=incident_id, budget=budget)
+    reset = _INCIDENT_TOKENS.set(tokens)
+    try:
+        yield tokens
+    finally:
+        _INCIDENT_TOKENS.reset(reset)
+
+
+def current_incident_tokens() -> IncidentTokens | None:
+    """The accumulator of the enclosing :func:`track_incident_tokens`, if any."""
+    return _INCIDENT_TOKENS.get()
+
+
+@contextmanager
+def use_agent_prompts(prompts: Mapping[str, TextPromptClient]) -> Generator[None]:
+    """Link generations of the named agents to their LangFuse prompt versions (§6.3).
+
+    Keys are openai-agents agent names; values the ``TextPromptClient`` that agent's
+    instructions were compiled from (``load_prompt``). Nested blocks extend the mapping.
+    """
+    reset = _AGENT_PROMPTS.set({**_AGENT_PROMPTS.get(), **prompts})
+    try:
+        yield
+    finally:
+        _AGENT_PROMPTS.reset(reset)
+
+
+@dataclass
+class _OpenGeneration:
+    observation: LangfuseGeneration | None
+    prompt: TextPromptClient | None
+
+
+class LangfuseGenerationBridge(TracingProcessor):
+    """openai-agents generation spans → LangFuse ``generation`` observations (R14).
+
+    On a generation span's start it opens a LangFuse generation named after the calling
+    agent, with the model; on its end it sets ``usage_details`` {input, output} and the
+    agent's prompt (if one is registered via :func:`use_agent_prompts`) and ends it. No
+    input or output is ever sent: tool results and logs never reach LangFuse. With
+    LangFuse disabled it makes no client call at all. Either way the usage is added to the
+    current :func:`track_incident_tokens` accumulator.
+
+    Add-only: registered with ``add_trace_processor`` (``register_generation_bridge``),
+    never ``set_trace_processors``, so SentinelTracer and the dashboard emitter keep firing.
+    A LangFuse failure is logged and never reaches the agent run.
+    """
+
+    def __init__(self) -> None:
+        self._agent_names: dict[str, str] = {}  # agent span id → agent name
+        self._open: dict[str, _OpenGeneration] = {}  # generation span id → observation
+
+    def on_trace_start(self, trace: Trace) -> None:
+        pass
+
+    def on_trace_end(self, trace: Trace) -> None:
+        pass
+
+    def on_span_start(self, span: Span[Any]) -> None:
+        data = span.span_data
+        if isinstance(data, AgentSpanData):
+            self._agent_names[span.span_id] = data.name
+            return
+        if not isinstance(data, GenerationSpanData):
+            return
+        agent_name = self._agent_names.get(span.parent_id or "")
+        prompt = _AGENT_PROMPTS.get().get(agent_name) if agent_name else None
+        observation: LangfuseGeneration | None = None
+        if langfuse_enabled():
+            try:
+                observation = get_client().start_observation(
+                    as_type="generation",
+                    name=agent_name or "llm-generation",
+                    model=data.model,
+                )
+            except Exception as exc:
+                logger.warning("langfuse_generation_failed", stage="start", error=str(exc))
+        self._open[span.span_id] = _OpenGeneration(observation=observation, prompt=prompt)
+
+    def on_span_end(self, span: Span[Any]) -> None:
+        data = span.span_data
+        if isinstance(data, AgentSpanData):
+            self._agent_names.pop(span.span_id, None)
+            return
+        if not isinstance(data, GenerationSpanData):
+            return
+        generation = self._open.pop(span.span_id, None)
+        input_tokens, output_tokens = _usage_tokens(data.usage)
+
+        tokens = _INCIDENT_TOKENS.get()
+        if tokens is not None:
+            tokens.add(input_tokens, output_tokens)
+
+        if generation is None or generation.observation is None:
+            return
+        try:
+            update: dict[str, Any] = {
+                "usage_details": {"input": input_tokens, "output": output_tokens}
+            }
+            if generation.prompt is not None:
+                update["prompt"] = generation.prompt
+            if span.error is not None:
+                update["level"] = "ERROR"
+            generation.observation.update(**update)
+            generation.observation.end()
+        except Exception as exc:
+            logger.warning("langfuse_generation_failed", stage="end", error=str(exc))
+
+    def shutdown(self) -> None:
+        self._agent_names.clear()
+        self._open.clear()
+
+    def force_flush(self) -> None:
+        pass  # The LangFuse client batches and flushes on its own (flush_traces).
+
+
+def _usage_tokens(usage: Mapping[str, Any] | None) -> tuple[int, int]:
+    """(input, output) tokens from a generation span's usage, 0 where absent."""
+    if not usage:
+        return 0, 0
+    return int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
+
+
+_bridge: LangfuseGenerationBridge | None = None
+
+
+def register_generation_bridge() -> LangfuseGenerationBridge:
+    """Add the :class:`LangfuseGenerationBridge` to openai-agents tracing, once per process."""
+    global _bridge
+    if _bridge is None:
+        _bridge = LangfuseGenerationBridge()
+        add_trace_processor(_bridge)
+    return _bridge
 
 
 class SentinelTracer(TracingProcessor):

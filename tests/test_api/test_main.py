@@ -98,6 +98,7 @@ def lifespan_env(pg_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("SENTINEL_DB_POOL_MAX", "2")
     monkeypatch.setattr(main, "apply_sdk_defaults", MagicMock())
     monkeypatch.setattr(main, "add_trace_processor", MagicMock())
+    monkeypatch.setattr(main, "register_generation_bridge", MagicMock())
     return pg_dsn
 
 

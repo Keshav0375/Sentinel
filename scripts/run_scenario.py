@@ -41,7 +41,7 @@ from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_sc
 from sentinel.infra.database import close_pool, init_pool_from_settings  # noqa: E402
 from sentinel.infra.db import create_tables  # noqa: E402
 from sentinel.infra.logging import configure_logging  # noqa: E402
-from sentinel.infra.tracing import SentinelTracer, flush_traces  # noqa: E402
+from sentinel.infra.tracing import SentinelTracer, register_generation_bridge, flush_traces  # noqa: E402
 from sentinel.memory.embeddings import EmbeddingClient  # noqa: E402
 from sentinel.memory.episodic import EpisodicMemory  # noqa: E402
 from sentinel.memory.semantic import SemanticMemory  # noqa: E402
@@ -195,6 +195,7 @@ async def run_scenario(
         incident_id = f"smoke-{alert.alert_id[:8]}"
         tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
         add_trace_processor(tracer)
+        register_generation_bridge()
         short_term_memory.create(incident_id, alert)
         print(f"  [OK] incident: {incident_id}")
 

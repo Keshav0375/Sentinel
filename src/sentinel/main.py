@@ -43,7 +43,13 @@ from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.db import create_tables
 from sentinel.infra.event_bus import EventBus
 from sentinel.infra.logging import configure_logging, get_logger
-from sentinel.infra.tracing import SentinelTracer, configure_langfuse, shutdown_traces
+from sentinel.infra.tracing import (
+    SentinelTracer,
+    configure_langfuse,
+    register_generation_bridge,
+    shutdown_traces,
+    track_incident_tokens,
+)
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
@@ -138,9 +144,9 @@ def make_pipeline_fn(
             # of escaping the background task.
             orchestrator = _build_orchestrator(settings, semantic_memory, episodic_memory, pool)
             input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
-            with agent_trace(
-                "incident_pipeline",
-                metadata={"incident_id": incident_id},
+            with (
+                track_incident_tokens(incident_id) as tokens,
+                agent_trace("incident_pipeline", metadata={"incident_id": incident_id}),
             ):
                 routed = await call_with_fallback(
                     orchestrator,
@@ -149,7 +155,12 @@ def make_pipeline_fn(
                     settings=settings,
                     run_kwargs={"max_turns": max_turns},
                 )
-            logger.info("pipeline_complete", incident_id=incident_id, model_used=routed.model_used)
+            logger.info(
+                "pipeline_complete",
+                incident_id=incident_id,
+                model_used=routed.model_used,
+                tokens_used=tokens.total_tokens,
+            )
             try:
                 short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
             except KeyError:
@@ -255,6 +266,8 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
     trajectories_dir = Path("reports/trajectories")
     tracer = SentinelTracer(short_term_memory, trajectories_dir=trajectories_dir)
     add_trace_processor(tracer)
+    # LLM generations → LangFuse (model, usage, prompt version; no inputs/outputs — R14).
+    register_generation_bridge()
 
     # ── Dashboard event emitter ───────────────────────────────────────────────
     dashboard_emitter = DashboardEventEmitter(event_bus)
