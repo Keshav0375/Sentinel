@@ -2,31 +2,32 @@
 
 Unit tests: no database. The tool is exercised against an in-memory stand-in for
 EpisodicMemory (ranked by the same keyword-cluster embeddings), and against a real
-EpisodicMemory with no pool for the "memory unavailable" path. The pgvector ranking
-itself is covered by tests/test_memory/test_episodic.py.
+EpisodicMemory with no pool for the "memory unavailable" path. The tool over the real
+pgvector ranking is covered in tests/test_memory/test_episodic.py.
 """
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
 import pytest
 from agents import FunctionTool
+from agents.tool_context import ToolContext
+from pydantic import ValidationError
 
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
-from sentinel.models.incident import Incident, IncidentStatus, Severity
 from sentinel.models.memory import EpisodicRecord, MemoryQueryResult
-from sentinel.tools.incident_search import (
-    _format_results,
-    _search_past_incidents,
-    make_incident_search_tool,
-)
+from sentinel.models.tools import RECALL_NOTE, IncidentSearchInput, SimilarIncident, ToolFailure
+from sentinel.tools.incident_search import _search_past_incidents, make_incident_search_tool
+from sentinel.tools.output import tool_json
 
 DIMS = 4
+_UNVERIFIED = "model-generated, unverified"
 
 
 class _KeywordFakeModel:
@@ -58,32 +59,34 @@ class _KeywordFakeModel:
 class _InMemoryEpisodic(EpisodicMemory):
     """EpisodicMemory stand-in: keeps records in a list, ranks by dot product.
 
-    Only store_incident and query are overridden — the two calls the tool path uses.
+    Only query is overridden — the call the tool makes.
     """
 
     def __init__(self, client: EmbeddingClient) -> None:
         super().__init__(None, client)
         self._client = client
-        self._records: list[EpisodicRecord] = []
+        self.records: list[EpisodicRecord] = []
+        self.queries: list[tuple[str, int]] = []
 
-    async def store_incident(self, incident: Incident) -> None:
-        symptoms = f"Service {incident.alert.service} {incident.alert.metric}"
-        self._records.append(
+    async def add(self, record_id: str, service: str, symptoms: str, **fields: Any) -> None:
+        self.records.append(
             EpisodicRecord(
-                id=incident.id,
-                service_name=incident.alert.service,
-                severity=incident.severity.value if incident.severity else "P3",
+                id=record_id,
+                service_name=service,
+                severity="P1",
                 symptoms=symptoms,
-                root_cause="unknown",
-                resolution="unresolved",
+                root_cause=fields.pop("root_cause", f"root cause of {record_id}"),
+                resolution=fields.pop("resolution", f"resolution of {record_id}"),
                 embedding=await self._client.embed(symptoms),
+                **fields,
             )
         )
 
     async def query(self, query_input: Any, *, top_k: int = 5) -> MemoryQueryResult:
+        self.queries.append((str(query_input), top_k))
         q = await self._client.embed(str(query_input))
         scored = sorted(
-            ((sum(a * b for a, b in zip(q, r.embedding)), r) for r in self._records),
+            ((sum(a * b for a, b in zip(q, r.embedding)), r) for r in self.records),
             key=lambda pair: pair[0],
             reverse=True,
         )[:top_k]
@@ -99,27 +102,25 @@ class _FailingEpisodic(EpisodicMemory):
         raise SentinelMemoryError("database operation failed: ConnectionDoesNotExistError")
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+def _search(symptoms: str, k: int = 5) -> IncidentSearchInput:
+    return IncidentSearchInput(symptom_text=symptoms, k=k)
 
 
-def _make_incident(
-    service: str,
-    metric: str,
-    severity: AlertSeverity = AlertSeverity.CRITICAL,
-) -> Incident:
-    alert = AlertPayload(
-        source=AlertSource.DATADOG,
-        service=service,
-        metric=metric,
-        threshold=80.0,
-        current_value=95.0,
-        severity=severity,
-    )
-    inc = Incident(alert=alert)
-    inc.affected_service = service
-    inc.severity = Severity.P1
-    inc.status = IncidentStatus.RESOLVED
-    return inc
+def _incidents(result: list[SimilarIncident] | ToolFailure) -> list[SimilarIncident]:
+    assert isinstance(result, list), result
+    return result
+
+
+async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> str:
+    """Call the tool the way the Runner does: JSON arguments through on_invoke_tool.
+
+    Returns the text the model reads back — compact JSON, never a Python repr.
+    """
+    raw = json.dumps(arguments)
+    ctx = ToolContext(context=None, tool_name=tool.name, tool_call_id="call-1", tool_arguments=raw)
+    text = await tool.on_invoke_tool(ctx, raw)
+    assert isinstance(text, str), text
+    return text
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -131,19 +132,25 @@ def client() -> EmbeddingClient:
 
 
 @pytest.fixture()
-def mem(client: EmbeddingClient) -> EpisodicMemory:
+def mem(client: EmbeddingClient) -> _InMemoryEpisodic:
     return _InMemoryEpisodic(client)
 
 
+_OPENED = datetime(2026, 10, 14, 9, 30, tzinfo=UTC)
+
+
 @pytest.fixture()
-async def seeded_mem(mem: EpisodicMemory) -> EpisodicMemory:
-    """Memory with 3 stored incidents in different clusters."""
-    inc_db = _make_incident("payment-service", "db_connection_pool")
-    inc_deploy = _make_incident("api-gateway", "null_pointer_deploy")
-    inc_mem = _make_incident("analytics-pipeline", "memory_leak_oom")
-    await mem.store_incident(inc_db)
-    await mem.store_incident(inc_deploy)
-    await mem.store_incident(inc_mem)
+async def seeded_mem(mem: _InMemoryEpisodic) -> _InMemoryEpisodic:
+    """Memory with 3 incidents in different symptom clusters."""
+    await mem.add(
+        "inc-db",
+        "payment-service",
+        "db connection pool exhausted",
+        resolution_type="config_change",
+        created_at=_OPENED,
+    )
+    await mem.add("inc-deploy", "api-gateway", "null pointer after deploy")
+    await mem.add("inc-mem", "analytics-pipeline", "memory leak oom")
     return mem
 
 
@@ -151,323 +158,215 @@ async def seeded_mem(mem: EpisodicMemory) -> EpisodicMemory:
 
 
 def test_make_returns_function_tool(mem: EpisodicMemory) -> None:
-    tool = make_incident_search_tool(mem)
-    assert isinstance(tool, FunctionTool)
+    assert isinstance(make_incident_search_tool(mem), FunctionTool)
 
 
 def test_tool_name_is_search_past_incidents(mem: EpisodicMemory) -> None:
-    tool = make_incident_search_tool(mem)
-    assert tool.name == "search_past_incidents"
+    assert make_incident_search_tool(mem).name == "search_past_incidents"
 
 
-def test_tool_has_description(mem: EpisodicMemory) -> None:
-    tool = make_incident_search_tool(mem)
-    assert tool.description and len(tool.description) > 10
+def test_tool_description_marks_recall_unverified(mem: EpisodicMemory) -> None:
+    description = make_incident_search_tool(mem).description
+    assert description.startswith("Search past incidents by symptom similarity")
+    assert _UNVERIFIED in " ".join(description.split())
 
 
-def test_tool_schema_has_symptom_query(mem: EpisodicMemory) -> None:
-    tool = make_incident_search_tool(mem)
-    assert "symptom_query" in str(tool.params_json_schema)
-
-
-def test_tool_schema_has_top_k(mem: EpisodicMemory) -> None:
-    tool = make_incident_search_tool(mem)
-    assert "top_k" in str(tool.params_json_schema)
+def test_tool_input_is_incident_search_input(mem: EpisodicMemory) -> None:
+    schema = make_incident_search_tool(mem).params_json_schema
+    assert schema["required"] == ["request"]
+    fields = schema["$defs"]["IncidentSearchInput"]
+    assert set(fields["properties"]) == {"symptom_text", "k"}
+    assert fields["required"] == ["symptom_text"]
+    assert fields["properties"]["k"]["default"] == 5
 
 
 def test_tool_memory_not_in_schema(mem: EpisodicMemory) -> None:
     """Injected memory dep must NOT appear in the LLM-visible schema."""
-    tool = make_incident_search_tool(mem)
-    assert "memory" not in str(tool.params_json_schema)
+    assert "memory" not in str(make_incident_search_tool(mem).params_json_schema)
 
 
-# ── _search_past_incidents — error handling ──────────────────────────────────
+# ── SimilarIncident — the unverified marking ─────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_none_memory_returns_error() -> None:
-    result = await _search_past_incidents(None, "connection pool", 3)
-    assert "ERROR" in result
+def _similar(**fields: Any) -> SimilarIncident:
+    base: dict[str, Any] = {
+        "id": "inc-001",
+        "service": "payment-service",
+        "created_at": _OPENED,
+        "root_cause": "pool leak",
+        "resolution": "restart",
+        "similarity": 0.92,
+    }
+    return SimilarIncident(**{**base, **fields})
 
 
-@pytest.mark.asyncio
-async def test_none_memory_does_not_raise() -> None:
-    result = await _search_past_incidents(None, "connection pool", 3)
-    assert isinstance(result, str)
+def test_similar_incident_is_model_generated_by_default() -> None:
+    incident = _similar()
+    assert incident.model_generated is True
+    assert incident.resolution_type is None
 
 
-@pytest.mark.asyncio
-async def test_empty_query_returns_error(mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(mem, "", 3)
-    assert "ERROR" in result
+def test_similar_incident_cannot_be_marked_verified() -> None:
+    """model_generated is Literal[True]: no caller can claim a recall is ground truth."""
+    with pytest.raises(ValidationError):
+        _similar(model_generated=False)
+    schema = SimilarIncident.model_json_schema()["properties"]["model_generated"]
+    assert schema["const"] is True
 
 
-@pytest.mark.asyncio
-async def test_whitespace_query_returns_error(mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(mem, "   ", 3)
-    assert "ERROR" in result
+@pytest.mark.parametrize("field", ["root_cause", "resolution", "model_generated"])
+def test_similar_incident_field_descriptions_mark_unverified(field: str) -> None:
+    description = SimilarIncident.model_fields[field].description
+    assert description is not None
+    assert _UNVERIFIED in description
 
 
-@pytest.mark.asyncio
-async def test_zero_top_k_returns_error(mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(mem, "connection pool", 0)
-    assert "ERROR" in result
+def test_similar_incident_docstring_marks_unverified() -> None:
+    assert _UNVERIFIED in " ".join((SimilarIncident.__doc__ or "").split())
 
 
-@pytest.mark.asyncio
-async def test_negative_top_k_returns_error(mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(mem, "connection pool", -1)
-    assert "ERROR" in result
+def test_similar_incident_json_labels_recalled_fields() -> None:
+    """The JSON the model reads opens with the unverified label and keeps the flag."""
+    data = json.loads(tool_json(_similar(root_cause="pool leak", resolution="restart")))
+    assert next(iter(data)) == "_note"
+    assert _UNVERIFIED in data["_note"]
+    assert "root_cause" in data["_note"] and "resolution" in data["_note"]
+    assert (data["root_cause"], data["resolution"]) == ("pool leak", "restart")
+    assert data["model_generated"] is True
+    assert "resolution_type" not in data  # None fields are left out
 
 
-# ── _search_past_incidents — memory unavailable ──────────────────────────────
+def test_similar_incident_list_json_labels_every_item() -> None:
+    """Every recalled incident in the array carries its own label."""
+    text = tool_json([_similar(id="a", root_cause="leak #1"), _similar(id="b")])
+    items = json.loads(text)
+    assert [item["id"] for item in items] == ["a", "b"]
+    assert all(_UNVERIFIED in item["_note"] and item["model_generated"] for item in items)
+    assert text.count(_UNVERIFIED) == 2
 
 
-@pytest.mark.asyncio
+# ── _search_past_incidents — failures ────────────────────────────────────────
+
+
 async def test_unconfigured_memory_reports_unavailable(client: EmbeddingClient) -> None:
-    """No DATABASE_URL (pool None): a clear tool result, not a crash or an empty hit list."""
-    result = await _search_past_incidents(EpisodicMemory(None, client), "connection pool", 3)
-    assert result.startswith("ERROR: memory unavailable")
-    assert "no database configured" in result
-    assert "No similar past incidents found" not in result
+    """No DATABASE_URL (pool None): unavailable, not a crash and not an empty hit list."""
+    result = await _search_past_incidents(
+        EpisodicMemory(None, client), _search("connection pool", 3)
+    )
+    assert isinstance(result, ToolFailure)
+    assert result.tool == "search_past_incidents"
+    assert result.kind == "unavailable"
+    assert "no database configured" in result.message
 
 
-@pytest.mark.asyncio
 async def test_database_failure_reports_unavailable(client: EmbeddingClient) -> None:
-    result = await _search_past_incidents(_FailingEpisodic(None, client), "connection pool", 3)
-    assert result.startswith("ERROR: memory unavailable")
-    assert "ConnectionDoesNotExistError" in result
-
-
-# ── _search_past_incidents — successful retrieval ────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_returns_string(seeded_mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(seeded_mem, "connection pool", 3)
-    assert isinstance(result, str)
-
-
-@pytest.mark.asyncio
-async def test_empty_db_returns_no_incidents(mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(mem, "connection pool", 3)
-    assert "No similar past incidents found" in result
-
-
-@pytest.mark.asyncio
-async def test_matching_incident_appears_in_results(
-    seeded_mem: EpisodicMemory,
-) -> None:
-    result = await _search_past_incidents(seeded_mem, "database connection pool", 3)
-    assert "payment-service" in result
-
-
-@pytest.mark.asyncio
-async def test_top_result_is_most_similar(seeded_mem: EpisodicMemory) -> None:
-    """Query for 'connection pool' should rank the DB incident first."""
-    result = await _search_past_incidents(seeded_mem, "database connection pool", 3)
-    payment_pos = result.find("payment-service")
-    api_pos = result.find("api-gateway")
-    analytics_pos = result.find("analytics-pipeline")
-    assert payment_pos < api_pos or api_pos == -1
-    assert payment_pos < analytics_pos or analytics_pos == -1
-
-
-@pytest.mark.asyncio
-async def test_top_k_limits_results(seeded_mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(seeded_mem, "connection pool", 1)
-    assert "Found 1" in result
-
-
-@pytest.mark.asyncio
-async def test_result_contains_found_count(seeded_mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(seeded_mem, "connection pool", 5)
-    assert "Found" in result
-
-
-@pytest.mark.asyncio
-async def test_result_contains_severity(seeded_mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(seeded_mem, "connection pool", 3)
-    assert "severity" in result
-
-
-@pytest.mark.asyncio
-async def test_result_contains_root_cause(seeded_mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(seeded_mem, "connection pool", 3)
-    assert "Root cause (model-generated, unverified):" in result
-
-
-@pytest.mark.asyncio
-async def test_result_contains_resolution(seeded_mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(seeded_mem, "connection pool", 3)
-    assert "Resolution (model-generated, unverified):" in result
-
-
-@pytest.mark.asyncio
-async def test_result_contains_similarity_score(seeded_mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(seeded_mem, "connection pool", 3)
-    assert "similarity" in result
-
-
-@pytest.mark.asyncio
-async def test_result_contains_mttr(seeded_mem: EpisodicMemory) -> None:
-    result = await _search_past_incidents(seeded_mem, "connection pool", 3)
-    assert "mttr" in result
-
-
-@pytest.mark.asyncio
-async def test_deploy_query_finds_deploy_incident(
-    seeded_mem: EpisodicMemory,
-) -> None:
-    """Query about deploys should find the api-gateway deploy incident."""
-    result = await _search_past_incidents(seeded_mem, "null pointer deploy", 3)
-    assert "api-gateway" in result
-
-
-@pytest.mark.asyncio
-async def test_memory_query_finds_memory_incident(
-    seeded_mem: EpisodicMemory,
-) -> None:
-    """Query about memory leaks should find the analytics OOM incident."""
-    result = await _search_past_incidents(seeded_mem, "memory leak oom", 3)
-    assert "analytics-pipeline" in result
-
-
-# ── _format_results ──────────────────────────────────────────────────────────
-
-
-def test_format_empty_returns_no_incidents() -> None:
-    result = _format_results(MemoryQueryResult())
-    assert "No similar past incidents found" in result
-
-
-def test_format_header_contains_count() -> None:
-    record = EpisodicRecord(
-        id="inc-001",
-        service_name="api-gateway",
-        severity="P1",
-        symptoms="error spike",
-        root_cause="bad deploy",
-        resolution="rollback",
+    result = await _search_past_incidents(
+        _FailingEpisodic(None, client), _search("connection pool", 3)
     )
-    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.95]))
-    assert "Found 1" in result
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "unavailable"
+    assert "ConnectionDoesNotExistError" in result.message
 
 
-def test_format_contains_incident_id() -> None:
-    record = EpisodicRecord(
-        id="inc-001",
-        service_name="api-gateway",
-        severity="P1",
-        symptoms="error spike",
-        root_cause="bad deploy",
-        resolution="rollback",
+@pytest.mark.parametrize("symptoms", ["", "   \n"])
+async def test_blank_symptoms_is_bad_input(mem: _InMemoryEpisodic, symptoms: str) -> None:
+    result = await _search_past_incidents(mem, _search(symptoms))
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "bad_input"
+    assert mem.queries == []
+
+
+@pytest.mark.parametrize("k", [0, -1])
+async def test_non_positive_k_is_bad_input(mem: _InMemoryEpisodic, k: int) -> None:
+    result = await _search_past_incidents(mem, _search("connection pool", k))
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "bad_input"
+    assert mem.queries == []
+
+
+# ── _search_past_incidents — retrieval ───────────────────────────────────────
+
+
+async def test_empty_memory_returns_empty_list(mem: EpisodicMemory) -> None:
+    assert await _search_past_incidents(mem, _search("connection pool")) == []
+
+
+async def test_results_are_nearest_first(seeded_mem: EpisodicMemory) -> None:
+    result = await _search_past_incidents(seeded_mem, _search("database connection pool", 3))
+    assert isinstance(result, list)
+    assert [r.id for r in result][0] == "inc-db"
+    assert result[0].similarity == pytest.approx(1.0)
+    assert [r.similarity for r in result] == sorted((r.similarity for r in result), reverse=True)
+
+
+async def test_k_is_respected(seeded_mem: _InMemoryEpisodic) -> None:
+    result = await _search_past_incidents(seeded_mem, _search("connection pool", 1))
+    assert isinstance(result, list)
+    assert [r.id for r in result] == ["inc-db"]
+    assert seeded_mem.queries == [("connection pool", 1)]
+
+
+async def test_default_k_is_five(mem: _InMemoryEpisodic) -> None:
+    for i in range(7):
+        await mem.add(f"inc-{i}", "payment-service", "connection pool exhausted")
+    result = await _search_past_incidents(mem, IncidentSearchInput(symptom_text="pool"))
+    assert isinstance(result, list)
+    assert len(result) == 5
+
+
+async def test_result_maps_every_field(seeded_mem: EpisodicMemory) -> None:
+    result = await _search_past_incidents(seeded_mem, _search("connection pool", 1))
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert result[0].model_dump(exclude={"similarity"}) == {
+        "id": "inc-db",
+        "service": "payment-service",
+        "created_at": _OPENED,
+        "root_cause": "root cause of inc-db",
+        "resolution": "resolution of inc-db",
+        "resolution_type": "config_change",
+        "model_generated": True,
+        "_note": RECALL_NOTE,
+    }
+    assert result[0].similarity == pytest.approx(1.0)
+
+
+async def test_long_recalled_text_is_cut_to_500_characters(mem: _InMemoryEpisodic) -> None:
+    await mem.add(
+        "inc-long", "api-gateway", "memory leak", root_cause="r" * 2000, resolution="s" * 501
     )
-    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.95]))
-    assert "inc-001" in result
+    [incident] = _incidents(await _search_past_incidents(mem, _search("memory leak", 1)))
+    assert len(incident.root_cause) == 500 and incident.root_cause.endswith("…")
+    assert len(incident.resolution) == 500 and incident.resolution.endswith("…")
+    assert incident.root_cause.startswith("r" * 499)
 
 
-def test_format_contains_all_fields() -> None:
-    record = EpisodicRecord(
-        id="inc-001",
-        service_name="api-gateway",
-        severity="P1",
-        symptoms="error spike",
-        root_cause="bad deploy",
-        resolution="rollback",
-        mttr_seconds=300,
-    )
-    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.95]))
-    assert "service:" in result
-    assert "severity:" in result
-    assert "symptoms:" in result
-    assert "Root cause (model-generated, unverified): bad deploy" in result
-    assert "Resolution (model-generated, unverified): rollback" in result
-    assert "mttr:" in result
-    assert "similarity:" in result
+async def test_recalled_text_at_the_cap_is_kept_whole(mem: _InMemoryEpisodic) -> None:
+    await mem.add("inc-500", "api-gateway", "memory leak", root_cause="r" * 500)
+    [incident] = _incidents(await _search_past_incidents(mem, _search("memory leak", 1)))
+    assert incident.root_cause == "r" * 500
 
 
-def test_format_labels_recalled_conclusions_as_unverified() -> None:
-    records = [
-        EpisodicRecord(
-            id=f"inc-00{i}",
-            service_name="payment-service",
-            severity="P1",
-            symptoms="connection pool exhausted",
-            root_cause=f"leak #{i}",
-            resolution=f"restart #{i}",
-        )
-        for i in (1, 2)
-    ]
-    result = _format_results(MemoryQueryResult(records=records, similarity_scores=[0.9, 0.8]))
-
-    for i in (1, 2):
-        assert f"Root cause (model-generated, unverified): leak #{i}" in result
-        assert f"Resolution (model-generated, unverified): restart #{i}" in result
-    # No unlabelled root cause / resolution line anywhere.
-    assert "root_cause:" not in result
-    assert "resolution:" not in result
+async def test_symptoms_are_stripped(seeded_mem: _InMemoryEpisodic) -> None:
+    await _search_past_incidents(seeded_mem, _search("  memory leak \n", 2))
+    assert seeded_mem.queries == [("memory leak", 2)]
 
 
-def test_format_similarity_score_formatted() -> None:
-    record = EpisodicRecord(
-        id="inc-001",
-        service_name="api-gateway",
-        severity="P1",
-        symptoms="error spike",
-        root_cause="bad deploy",
-        resolution="rollback",
-    )
-    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.9512]))
-    assert "0.951" in result
+# ── The FunctionTool as the Runner calls it ──────────────────────────────────
 
 
-def test_format_mttr_unknown_when_none() -> None:
-    record = EpisodicRecord(
-        id="inc-001",
-        service_name="api-gateway",
-        severity="P1",
-        symptoms="error spike",
-        root_cause="bad deploy",
-        resolution="rollback",
-        mttr_seconds=None,
-    )
-    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.9]))
-    assert "unknown" in result
+async def test_invoked_tool_returns_labelled_incidents(seeded_mem: EpisodicMemory) -> None:
+    tool = make_incident_search_tool(seeded_mem)
+    result = await _invoke(tool, {"request": {"symptom_text": "memory leak oom", "k": 2}})
+    items = json.loads(result)
+    assert isinstance(items, list) and len(items) == 2
+    assert items[0]["id"] == "inc-mem"
+    assert items[0]["root_cause"] == "root cause of inc-mem"
+    assert _UNVERIFIED in items[0]["_note"]
+    assert [SimilarIncident.model_validate(item).id for item in items] == ["inc-mem", "inc-db"]
 
 
-def test_format_mttr_shown_when_present() -> None:
-    record = EpisodicRecord(
-        id="inc-001",
-        service_name="api-gateway",
-        severity="P1",
-        symptoms="error spike",
-        root_cause="bad deploy",
-        resolution="rollback",
-        mttr_seconds=600,
-    )
-    result = _format_results(MemoryQueryResult(records=[record], similarity_scores=[0.9]))
-    assert "600s" in result
-
-
-def test_format_multiple_records_all_shown() -> None:
-    r1 = EpisodicRecord(
-        id="inc-001",
-        service_name="api-gateway",
-        severity="P1",
-        symptoms="error spike",
-        root_cause="bad deploy",
-        resolution="rollback",
-    )
-    r2 = EpisodicRecord(
-        id="inc-002",
-        service_name="payment-service",
-        severity="P2",
-        symptoms="timeout",
-        root_cause="pool exhaustion",
-        resolution="scale up",
-    )
-    result = _format_results(MemoryQueryResult(records=[r1, r2], similarity_scores=[0.95, 0.72]))
-    assert "inc-001" in result
-    assert "inc-002" in result
-    assert "Found 2" in result
+async def test_invoked_tool_uses_default_k(seeded_mem: _InMemoryEpisodic) -> None:
+    tool = make_incident_search_tool(seeded_mem)
+    await _invoke(tool, {"request": {"symptom_text": "null pointer"}})
+    assert seeded_mem.queries == [("null pointer", 5)]

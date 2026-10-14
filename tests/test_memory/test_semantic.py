@@ -34,7 +34,8 @@ from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.semantic import SemanticMemory, _parse_runbook_steps
 from sentinel.models.memory import Runbook, SemanticRecord
 from sentinel.models.service import ServiceMetadata, ServiceTier
-from sentinel.tools.service_lookup import _build_service_response
+from sentinel.models.tools import ServiceLookupInput, ToolFailure
+from sentinel.tools.service_lookup import _lookup_service
 
 DIMS = 384
 SEED = "sentinel-watchtower"
@@ -559,20 +560,37 @@ async def test_search_rejects_non_positive_top_k(mem: SemanticMemory) -> None:
 
 
 async def test_service_lookup_tool_reports_memory_unavailable() -> None:
-    result = await _build_service_response(SemanticMemory(None), SEED)
-    assert result.startswith("ERROR: memory unavailable")
-    assert "no database configured" in result
-    assert "not found" not in result
+    result = await _lookup_service(SemanticMemory(None), ServiceLookupInput(service_name=SEED))
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "unavailable"
+    assert "no database configured" in result.message
 
 
 async def test_service_lookup_tool_reports_service_not_found(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, "no-such-service")
-    assert result == "ERROR: Service 'no-such-service' not found in the service map."
+    result = await _lookup_service(mem, ServiceLookupInput(service_name="no-such-service"))
+    assert result == ToolFailure(
+        tool="get_service_metadata",
+        kind="not_found",
+        message="service 'no-such-service' is not in the service map",
+    )
 
 
-async def test_service_lookup_tool_formats_the_seeded_service(mem: SemanticMemory) -> None:
-    result = await _build_service_response(mem, SEED)
-    assert f"name: {SEED}" in result
-    assert "tier: standard" in result
-    assert "repo_url: https://github.com/Keshav0375/Sentinel-deployment" in result
-    assert "[general] Identify the culprit merge" in result
+async def test_service_lookup_tool_returns_the_seeded_service(mem: SemanticMemory) -> None:
+    result = await _lookup_service(mem, ServiceLookupInput(service_name=SEED))
+    assert isinstance(result, SemanticRecord)
+    assert result.service.name == SEED
+    assert result.service.tier is ServiceTier.STANDARD
+    assert result.service.repo_url == "https://github.com/Keshav0375/Sentinel-deployment"
+    assert [rb.failure_class for rb in result.runbooks] == ["general"]
+    assert result.runbooks[0].steps[0].startswith("Identify the culprit merge")
+
+
+async def test_service_lookup_tool_reads_null_tier_as_standard(
+    mem: SemanticMemory, pool: asyncpg.Pool
+) -> None:
+    await _insert_service(pool, "untiered", tier=None, dependencies=["sentinel-watchtower"])
+    result = await _lookup_service(mem, ServiceLookupInput(service_name="untiered"))
+    assert isinstance(result, SemanticRecord)
+    assert result.service.tier is ServiceTier.STANDARD
+    assert result.service.dependencies == ["sentinel-watchtower"]
+    assert result.runbooks == []

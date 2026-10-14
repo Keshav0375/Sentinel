@@ -10,8 +10,6 @@ from agents.extensions.models.litellm_model import LitellmModel
 
 from sentinel.agents.log_analyst import LOG_ANALYST_AGENT_NAME, build_log_analyst_agent
 from sentinel.config import Settings
-from sentinel.generator.alert_gen import load_scenario
-from sentinel.generator.scenarios import Scenario
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.log_entry import LogAnalysis, LogEntry, LogLevel
 
@@ -25,19 +23,12 @@ def semantic_memory() -> SemanticMemory:
 
 
 @pytest.fixture()
-def scenario() -> Scenario:
-    return load_scenario("bad_deploy_01")
-
-
-@pytest.fixture()
 def log_analyst_agent(
     semantic_memory: SemanticMemory,
-    scenario: Scenario,
     fake_settings: Settings,
 ) -> Agent[LogAnalysis]:
     return build_log_analyst_agent(
         semantic_memory,
-        scenario,
         model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
@@ -132,10 +123,10 @@ def test_log_analyst_agent_no_extra_tools(log_analyst_agent: Agent[LogAnalysis])
     """Log analyst must not have deploy/remediation tools — scope is narrow."""
     names = {t.name for t in log_analyst_agent.tools}
     unexpected = {
-        "list_recent_deploys",
+        "get_deploy_details",
         "search_past_incidents",
-        "draft_rollback_pr",
-        "request_human_approval",
+        "prepare_rollback_spec",
+        "format_escalation",
     }
     assert not names & unexpected, f"Unexpected tools: {names & unexpected}"
 
@@ -169,12 +160,10 @@ def test_log_analyst_agent_uses_litellm_model(log_analyst_agent: Agent[LogAnalys
 
 def test_log_analyst_agent_model_string_forwarded(
     semantic_memory: SemanticMemory,
-    scenario: Scenario,
     fake_settings: Settings,
 ) -> None:
     agent = build_log_analyst_agent(
         semantic_memory,
-        scenario,
         model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
@@ -184,12 +173,10 @@ def test_log_analyst_agent_model_string_forwarded(
 
 def test_log_analyst_agent_custom_model_string(
     semantic_memory: SemanticMemory,
-    scenario: Scenario,
     fake_settings: Settings,
 ) -> None:
     agent = build_log_analyst_agent(
         semantic_memory,
-        scenario,
         model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
@@ -202,14 +189,14 @@ def test_log_analyst_agent_no_handoffs(log_analyst_agent: Agent[LogAnalysis]) ->
     assert len(log_analyst_agent.handoffs) == 0
 
 
-def test_log_analyst_agent_accepts_none_scenario(
+def test_log_analyst_agent_builds_without_datadog_keys(
     semantic_memory: SemanticMemory,
     fake_settings: Settings,
 ) -> None:
-    """Agent constructs with no scenario; fetch_logs returns error at call time."""
+    """No Datadog keys: the agent still builds; fetch_logs fails at call time instead."""
+    assert fake_settings.dd_api_key is None
     agent = build_log_analyst_agent(
         semantic_memory,
-        None,
         model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )
@@ -218,14 +205,12 @@ def test_log_analyst_agent_accepts_none_scenario(
 
 
 def test_log_analyst_agent_mock_memory(
-    scenario: Scenario,
     fake_settings: Settings,
 ) -> None:
     """Agent should construct with a mocked SemanticMemory."""
     mock_mem = MagicMock(spec=SemanticMemory)
     agent = build_log_analyst_agent(
         mock_mem,
-        scenario,
         model_string="groq/llama-3.3-70b-versatile",
         settings=fake_settings,
     )

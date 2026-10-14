@@ -337,13 +337,13 @@ def test_full_incident_lifecycle(stm: ShortTermMemory) -> None:
     stm.add_timeline_entry(INC, _make_entry("deploy_correlator", "list_deploys"))
     stm.update_context(INC, deploy_correlation={"suspect_deploy": "deploy-abc"})
 
-    # Remediation + HITL step
+    # Remediation step
     stm.add_timeline_entry(INC, _make_entry("remediation", "draft_rollback"))
     stm.update_context(INC, status=IncidentStatus.PENDING_APPROVAL)
 
     # Resolution
     stm.update_context(INC, status=IncidentStatus.RESOLVED, slack_summary="Resolved.")
-    stm.add_timeline_entry(INC, _make_entry("comms", "draft_slack_summary"))
+    stm.add_timeline_entry(INC, _make_entry("comms", "summary_written"))
 
     # Eval reads full context
     ctx = stm.get_context(INC)

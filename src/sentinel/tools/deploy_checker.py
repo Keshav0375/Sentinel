@@ -1,143 +1,407 @@
-"""list_recent_deploys tool — deploy history from scenario data (MVP)."""
+"""get_deploy_details tool — what deployed to a service, from ``deployments`` (backend.md §4.8).
+
+The deploy↔incident correlation source (decision 2026-10-14, "Backend phase 3 (tools)
+contract"): the rows the deploy pipeline's record stage writes (ci_app_deployment.yml,
+one per attempt), newest first, ``failed`` attempts included — they are the correlation
+targets.
+
+Read-only: a SELECT on ``deployments`` (and on ``services`` for the repo when enriching).
+The ``deployments.incident_id`` backfill is not a tool action.
+
+GitHub enrichment is optional. Only with ``settings.github_api_token`` set, the newest
+few rows with a PR number get ``GET /repos/{repo}/pulls/{n}``, where ``repo`` is the
+service's ``services.metadata.repo`` — never a model argument. A 5xx, 429 or timeout is
+retried once (after Retry-After when it is at most 5 s, else 1 s; a longer Retry-After
+is not waited for). A lookup that still fails leaves ``github`` None with a
+``github_note`` and never fails the call. The token is read only
+when the request headers are built and is never logged.
+"""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import asyncio
+import json
+import re
+from collections.abc import Awaitable, Callable, Iterable
+from datetime import datetime
+from typing import Any, cast
 
+import asyncpg  # pyright: ignore[reportMissingTypeStubs]
+import httpx
 from agents import FunctionTool, function_tool
 
-from sentinel.generator.deploy_gen import generate_deploys
-from sentinel.generator.scenarios import Scenario
-from sentinel.models.deploy import Deploy
+from sentinel.config import Settings, secret_value
+from sentinel.exceptions import SentinelMemoryError
+from sentinel.infra import database
+from sentinel.infra.logging import get_logger
+from sentinel.models.tools import (
+    DeployQuery,
+    DeployRecord,
+    GitHubPR,
+    ToolFailure,
+    ToolFailureKind,
+)
+from sentinel.tools.output import tool_json
+
+logger = get_logger("sentinel.tools.deploy_checker")
+
+SleepFn = Callable[[float], Awaitable[None]]
+
+_TOOL_NAME = "get_deploy_details"
+
+# ── Bounds ────────────────────────────────────────────────────────────────────
+_MIN_WINDOW_HOURS = 1
+_MAX_WINDOW_HOURS = 168
+_MIN_LIMIT = 1
+_MAX_LIMIT = 50
+
+# ── GitHub enrichment ─────────────────────────────────────────────────────────
+_MAX_ENRICHED = 5  # newest rows with a PR number that are looked up per call
+_GITHUB_API = "https://api.github.com"
+_GITHUB_API_VERSION = "2022-11-28"
+_GITHUB_TIMEOUT = httpx.Timeout(5.0)
+_TITLE_CHARS = 200
+_GITHUB_RETRY_DELAY = 1.0  # before the one retry, when GitHub sends no Retry-After
+_GITHUB_MAX_RETRY_AFTER = 5.0  # a longer Retry-After is not waited for
+
+# ── Payload caps (the result goes to the model, so it stays small) ───────────
+_AUTHOR_CHARS = 100
+_MAX_FILES = 20  # files_changed entries per record; files_changed_total has the count
+
+# The service is a bind parameter, but a non-name is refused before it reaches the DB.
+_SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+# ``owner/name`` as GitHub allows them; the repo is spliced into the request path, so a
+# "." or ".." name (a path traversal, never a real repo) is refused.
+_REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$")
+
+_DEPLOYS_SQL = """
+    SELECT pr_number, commit_sha, author, deploy_status, deployed_at, files_changed,
+           metadata->>'failed_stage' AS failed_stage,
+           metadata->>'version' AS version,
+           gha_run_id
+    FROM deployments
+    WHERE service = $1 AND deployed_at >= now() - make_interval(hours => $2)
+    ORDER BY deployed_at DESC
+    LIMIT $3
+"""
+
+_REPO_SQL = "SELECT metadata->>'repo' FROM services WHERE name = $1"
 
 
-def make_deploy_checker_tool(scenario: Scenario | None) -> FunctionTool:
-    """Create the list_recent_deploys tool with scenario data injected.
-
-    In the MVP, deploy history comes from the pre-loaded scenario rather than
-    a real deployment API (GitHub / Argo). The scenario is captured via closure
-    so the tool signature stays clean for the LLM.
+def make_deploy_checker_tool(
+    pool: asyncpg.Pool | None,
+    settings: Settings,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+    sleep: SleepFn = asyncio.sleep,
+) -> FunctionTool:
+    """Create the get_deploy_details tool with the pool and settings injected.
 
     Args:
-        scenario: Active scenario providing synthetic deploy records. None
-            when no scenario is loaded (tool will return an error message).
+        pool: asyncpg pool holding ``deployments``; None (no ``DATABASE_URL``) makes
+            every call return a ToolFailure ("unavailable"), never an empty list.
+        settings: Supplies ``github_api_token``, read at call time; unset → no
+            GitHub enrichment.
+        http_client: Client for the GitHub requests (tests pass one over a mock
+            transport). None → a short-lived client per call.
+        sleep: Awaited before the one GitHub retry (tests pass a recorder).
 
     Returns:
-        FunctionTool that agents can call to retrieve deploy history.
+        FunctionTool that agents can call to list a service's recent deploys.
     """
 
     @function_tool(strict_mode=False)
-    async def list_recent_deploys(service_name: str, hours_back: int) -> str:
-        """List deploys to a service within the last N hours, newest first.
+    async def get_deploy_details(request: DeployQuery) -> str:
+        """List what deployed to a service in the last window_hours, newest first.
 
-        Use this to find which deploy is most likely responsible for the
-        incident. Rank candidates by timing (proximity to alert), author,
-        and scope of changes (files_changed).
+        One entry per deploy attempt the CI pipeline recorded, failed ones included:
+        deploy_status (succeeded | failed | rolled_back), failed_stage (build, deploy,
+        verify, or "none"), PR number, commit SHA, author, deploy time (UTC), files
+        changed (the first 20, with files_changed_total), version ("pr-<n>-<sha>") and
+        the GitHub Actions run id. When GitHub is
+        configured the newest few deploys also carry their PR (title, link, merge time,
+        author) in ``github``; otherwise ``github`` is null and ``github_note`` says
+        why. Returns a JSON array; an empty array means nothing was deployed in the
+        window. A failure ("error": true, kind "unavailable") means the deploy history
+        could not be read — no finding either way.
 
         Args:
-            service_name: Service to check (e.g. "payment-service").
-            hours_back: How far back to look. Start with 2; expand to 4–24
-                if no recent deploys are found.
+            request: The service, the window in hours, and how many deploys to return.
         """
-        return await _list_recent_deploys(scenario, service_name, hours_back)
-
-    return list_recent_deploys
-
-
-async def _list_recent_deploys(
-    scenario: Scenario | None,
-    service_name: str,
-    hours_back: int,
-) -> str:
-    """List recent deploys for a service from scenario data.
-
-    Extracted from the tool decorator so unit tests can call this directly
-    without constructing a ToolContext.
-
-    Args:
-        scenario: The loaded scenario supplying synthetic deploy data.
-        service_name: Service name to filter on.
-        hours_back: Look-back window in hours relative to the incident time.
-
-    Returns:
-        Human-readable deploy summary or an error string.
-    """
-    if scenario is None:
-        return "ERROR: No scenario loaded. Cannot list deploys without scenario data."
-
-    if not service_name:
-        return "ERROR: 'service_name' parameter is required."
-
-    if hours_back <= 0:
-        return "ERROR: 'hours_back' must be a positive integer."
-
-    reference_time = _get_reference_time(scenario)
-    window_start = reference_time - timedelta(hours=hours_back)
-
-    all_deploys = generate_deploys(scenario)
-    filtered = _filter_deploys(all_deploys, service_name, window_start, reference_time)
-    return _format_deploys(filtered, service_name, hours_back, reference_time)
-
-
-def _get_reference_time(scenario: Scenario) -> datetime:
-    """Derive the incident reference time from the scenario.
-
-    Returns the latest timestamp across all log entries and deploy records.
-    This approximates when the incident was active, so that hours_back is
-    measured from the right point in time rather than from datetime.now().
-    """
-    candidates: list[datetime] = []
-
-    if scenario.logs:
-        candidates.append(max(entry.ts for entry in scenario.logs))
-
-    if scenario.deploys:
-        candidates.append(max(d.ts for d in scenario.deploys))
-
-    return max(candidates) if candidates else datetime.now(UTC)
-
-
-def _filter_deploys(
-    deploys: list[Deploy],
-    service_name: str,
-    window_start: datetime,
-    reference_time: datetime,
-) -> list[Deploy]:
-    """Keep deploys for the named service within the look-back window."""
-    result = [d for d in deploys if d.service == service_name]
-    result = [d for d in result if window_start <= d.timestamp <= reference_time]
-    return result  # generate_deploys already sorts newest-first
-
-
-def _format_deploys(
-    deploys: list[Deploy],
-    service_name: str,
-    hours_back: int,
-    reference_time: datetime,
-) -> str:
-    """Render the deploy list as a compact, LLM-readable string."""
-    if not deploys:
-        return (
-            f"No deploys found for '{service_name}' "
-            f"in the last {hours_back} hour(s) before the incident."
+        return tool_json(
+            await _get_deploy_details(pool, settings, request, http_client=http_client, sleep=sleep)
         )
 
-    ref_ts = reference_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-    header = (
-        f"Found {len(deploys)} deploy(s) for '{service_name}' "
-        f"in the last {hours_back} hour(s) (before {ref_ts}):\n"
+    return get_deploy_details
+
+
+async def _get_deploy_details(
+    pool: asyncpg.Pool | None,
+    settings: Settings,
+    request: DeployQuery,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+    sleep: SleepFn = asyncio.sleep,
+) -> list[DeployRecord] | ToolFailure:
+    """Read the service's recent deploys, or return a ToolFailure — never raise.
+
+    Separated from the tool decorator so tests can call it without a ToolContext.
+    """
+    service = request.service.strip()
+    if not _SERVICE_RE.fullmatch(service):
+        return _failure("bad_input", f"service {service!r} is not a service name")
+    hours = request.window_hours
+    if not _MIN_WINDOW_HOURS <= hours <= _MAX_WINDOW_HOURS:
+        return _failure(
+            "bad_input",
+            f"window_hours must be {_MIN_WINDOW_HOURS}-{_MAX_WINDOW_HOURS}, got {hours}",
+        )
+    limit = request.limit
+    if not _MIN_LIMIT <= limit <= _MAX_LIMIT:
+        return _failure("bad_input", f"limit must be {_MIN_LIMIT}-{_MAX_LIMIT}, got {limit}")
+
+    if pool is None:
+        # An empty list here would read as "nothing deployed" — a different, false finding.
+        return _failure("unavailable", "deploy history cannot be read: no database is configured")
+    enrich = settings.github_api_token is not None
+    try:
+        async with database.acquire(pool) as conn:
+            rows: list[asyncpg.Record] = await conn.fetch(_DEPLOYS_SQL, service, hours, limit)
+            repo: str | None = None
+            if enrich and any(_pr_number(row["pr_number"]) for row in rows):
+                repo = await conn.fetchval(_REPO_SQL, service)
+    except SentinelMemoryError as exc:
+        logger.warning("deploy_details_db_unavailable", service=service, error=str(exc))
+        return _failure("unavailable", f"deploy history cannot be read: {exc}")
+
+    records = [_record(row) for row in rows]
+    if enrich:
+        records = await _enrich(records, settings, service, repo, http_client, sleep)
+    else:
+        records = _noted(records, range(len(records)), "not looked up: GITHUB_API_TOKEN not set")
+
+    logger.info(
+        "deploy_details_done",
+        service=service,
+        window_hours=hours,
+        deploys=len(records),
+        enriched=sum(record.github is not None for record in records),
+    )
+    return records
+
+
+def _failure(kind: ToolFailureKind, message: str) -> ToolFailure:
+    return ToolFailure(tool=_TOOL_NAME, kind=kind, message=message)
+
+
+# ── Rows ──────────────────────────────────────────────────────────────────────
+
+
+def _record(row: asyncpg.Record) -> DeployRecord:
+    """A ``deployments`` row → DeployRecord (failed_stage/version come from ``metadata``)."""
+    files = _files(row["files_changed"])
+    return DeployRecord(
+        pr_number=_pr_number(row["pr_number"]),
+        commit_sha=row["commit_sha"],
+        author=_author(row["author"]),
+        deploy_status=row["deploy_status"],
+        deployed_at=row["deployed_at"],
+        files_changed=files[:_MAX_FILES],
+        files_changed_total=len(files),
+        failed_stage=row["failed_stage"],
+        version=row["version"],
+        gha_run_id=row["gha_run_id"],
     )
 
-    blocks: list[str] = []
-    for deploy in deploys:
-        ts = deploy.timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
-        blocks.append(
-            f"deploy_id:     {deploy.id}\n"
-            f"  timestamp:     {ts}\n"
-            f"  author:        {deploy.author}\n"
-            f"  commit_sha:    {deploy.commit_sha}\n"
-            f"  files_changed: {deploy.files_changed}\n"
-            f"  description:   {deploy.description or 'none'}"
-        )
 
-    return header + "\n\n".join(blocks)
+def _author(value: object) -> str | None:
+    """An author name or login within ``_AUTHOR_CHARS``."""
+    return value[:_AUTHOR_CHARS] if isinstance(value, str) else None
+
+
+def _pr_number(value: object) -> int | None:
+    """The PR number; the pipeline records 0 for a direct push (no PR)."""
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def _files(raw: object) -> list[str]:
+    """``files_changed`` JSONB (asyncpg returns it as text) → its string items."""
+    if not isinstance(raw, str):
+        return []
+    try:
+        data: object = json.loads(raw)
+    except ValueError:
+        return []
+    items = cast(list[object], data) if isinstance(data, list) else []
+    return [item for item in items if isinstance(item, str)]
+
+
+def _noted(records: list[DeployRecord], indexes: Iterable[int], note: str) -> list[DeployRecord]:
+    """*records* with *note* on each listed record that has a PR number."""
+    chosen = set(indexes)
+    return [
+        record.model_copy(update={"github_note": note})
+        if i in chosen and record.pr_number is not None
+        else record
+        for i, record in enumerate(records)
+    ]
+
+
+# ── GitHub ────────────────────────────────────────────────────────────────────
+
+
+async def _enrich(
+    records: list[DeployRecord],
+    settings: Settings,
+    service: str,
+    repo: str | None,
+    http_client: httpx.AsyncClient | None,
+    sleep: SleepFn,
+) -> list[DeployRecord]:
+    """Attach the PR to the newest ``_MAX_ENRICHED`` records with a PR number.
+
+    Never raises for a GitHub problem: a failed lookup becomes that record's note.
+    """
+    with_pr = [i for i, record in enumerate(records) if record.pr_number is not None]
+    if not with_pr:
+        return records
+    if repo is None or not _REPO_RE.fullmatch(repo):
+        return _noted(records, with_pr, f"not looked up: no GitHub repo recorded for {service}")
+
+    looked_up, skipped = with_pr[:_MAX_ENRICHED], with_pr[_MAX_ENRICHED:]
+    records = _noted(
+        records, skipped, f"not looked up: only the newest {_MAX_ENRICHED} PRs are fetched"
+    )
+    numbers = list(dict.fromkeys(cast(int, records[i].pr_number) for i in looked_up))
+    headers = _github_headers(settings)
+    if http_client is None:
+        async with httpx.AsyncClient(timeout=_GITHUB_TIMEOUT) as client:
+            found = await _fetch_prs(client, repo, numbers, headers, sleep)
+    else:
+        found = await _fetch_prs(http_client, repo, numbers, headers, sleep)
+
+    enriched = list(records)
+    for i in looked_up:
+        result = found[cast(int, records[i].pr_number)]
+        update = {"github": result} if isinstance(result, GitHubPR) else {"github_note": result}
+        enriched[i] = records[i].model_copy(update=update)
+    return enriched
+
+
+def _github_headers(settings: Settings) -> dict[str, str]:
+    """The GitHub request headers — the only place the token value is read."""
+    token = secret_value(settings.github_api_token, "GITHUB_API_TOKEN")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": _GITHUB_API_VERSION,
+    }
+
+
+async def _fetch_prs(
+    client: httpx.AsyncClient,
+    repo: str,
+    numbers: list[int],
+    headers: dict[str, str],
+    sleep: SleepFn,
+) -> dict[int, GitHubPR | str]:
+    """Each PR by number, or the note saying why it could not be read."""
+    results = await asyncio.gather(*(_fetch_pr(client, repo, n, headers, sleep) for n in numbers))
+    return dict(zip(numbers, results, strict=True))
+
+
+async def _fetch_pr(
+    client: httpx.AsyncClient,
+    repo: str,
+    number: int,
+    headers: dict[str, str],
+    sleep: SleepFn,
+) -> GitHubPR | str:
+    """GET one PR; a GitHub problem becomes a note naming PR and reason, never the token."""
+    what = f"GitHub lookup of PR #{number} failed"
+    response = await _get_once_retried(
+        client, f"{_GITHUB_API}/repos/{repo}/pulls/{number}", headers, sleep, what, number
+    )
+    if isinstance(response, str):
+        return _lookup_failed(number, response)
+    if not response.is_success:
+        return _lookup_failed(number, f"{what}: HTTP {response.status_code}")
+    try:
+        data: object = response.json()
+    except ValueError:
+        return _lookup_failed(number, f"{what}: non-JSON body")
+    pr = _github_pr(data)
+    return pr if pr is not None else _lookup_failed(number, f"{what}: unexpected body")
+
+
+async def _get_once_retried(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    sleep: SleepFn,
+    what: str,
+    number: int,
+) -> httpx.Response | str:
+    """GET *url*, retrying a 5xx, 429 or timeout once; the response, or why it failed."""
+    retried = False
+    while True:
+        try:
+            response = await client.get(url, headers=headers, timeout=_GITHUB_TIMEOUT)
+        except httpx.TimeoutException as exc:
+            reason, delay = f"{what}: {type(exc).__name__}", _GITHUB_RETRY_DELAY
+        except httpx.HTTPError as exc:
+            return f"{what}: {type(exc).__name__}"
+        else:
+            status = response.status_code
+            if status != 429 and status < 500:
+                return response
+            reason, delay = f"{what}: HTTP {status}", _retry_delay(response)
+        if retried or delay is None:
+            return reason
+        logger.warning("github_pr_lookup_retry", pr_number=number, reason=reason, delay=delay)
+        await sleep(delay)
+        retried = True
+
+
+def _retry_delay(response: httpx.Response) -> float | None:
+    """Seconds to wait before the retry; None when GitHub asks for longer than 5 s."""
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        return _GITHUB_RETRY_DELAY
+    try:
+        wait = max(float(raw), 0.0)
+    except ValueError:
+        return _GITHUB_RETRY_DELAY
+    return wait if wait <= _GITHUB_MAX_RETRY_AFTER else None
+
+
+def _lookup_failed(number: int, note: str) -> str:
+    logger.warning("github_pr_lookup_failed", pr_number=number, reason=note)
+    return note
+
+
+def _github_pr(data: object) -> GitHubPR | None:
+    """A pulls API body → GitHubPR (title, html_url, merged_at, user.login)."""
+    if not isinstance(data, dict):
+        return None
+    body = cast(dict[str, Any], data)
+    title, html_url = body.get("title"), body.get("html_url")
+    if not isinstance(title, str) or not isinstance(html_url, str):
+        return None
+    user: object = body.get("user")
+    login = cast(dict[str, Any], user).get("login") if isinstance(user, dict) else None
+    return GitHubPR(
+        title=title[:_TITLE_CHARS],
+        html_url=html_url,
+        merged_at=_parse_time(body.get("merged_at")),
+        author=_author(login),
+    )
+
+
+def _parse_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None

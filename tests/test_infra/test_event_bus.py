@@ -32,10 +32,10 @@ class TestPipelineEvent:
 
     def test_serialization_roundtrip(self) -> None:
         event = PipelineEvent(
-            type=EventType.HITL_REQUESTED,
+            type=EventType.TOOL_RESULT,
             agent_name="remediation_agent",
             incident_id="inc-002",
-            data={"action": "rollback", "risk": "high"},
+            data={"tool": "prepare_rollback_spec", "result": "spec"},
         )
         json_str = event.model_dump_json()
         restored = PipelineEvent.model_validate_json(json_str)
@@ -49,8 +49,6 @@ class TestPipelineEvent:
             "agent_completed",
             "tool_called",
             "tool_result",
-            "hitl_requested",
-            "hitl_resolved",
             "incident_resolved",
         }
         actual = {e.value for e in EventType}

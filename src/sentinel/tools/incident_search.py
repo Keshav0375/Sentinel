@@ -1,4 +1,4 @@
-"""search_past_incidents tool — episodic memory similarity search."""
+"""search_past_incidents tool — episodic memory similarity search (§5.3 ``incidents``)."""
 
 from __future__ import annotations
 
@@ -7,9 +7,15 @@ from agents import FunctionTool, function_tool
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra.logging import get_logger
 from sentinel.memory.episodic import EpisodicMemory
-from sentinel.models.memory import MemoryQueryResult
+from sentinel.models.tools import IncidentSearchInput, SimilarIncident, ToolFailure
+from sentinel.tools.output import tool_json
 
 logger = get_logger("sentinel.tools.incident_search")
+
+_TOOL_NAME = "search_past_incidents"
+
+# A recalled root cause or resolution longer than this is cut (ending in "…").
+_MAX_RECALL_CHARS = 500
 
 
 def make_incident_search_tool(memory: EpisodicMemory) -> FunctionTool:
@@ -17,8 +23,7 @@ def make_incident_search_tool(memory: EpisodicMemory) -> FunctionTool:
 
     This is the key tool that gives Sentinel its learning capability. By
     searching past incidents with similar symptom descriptions, the Triage
-    Agent can skip directly to the most likely root cause rather than
-    starting from scratch every time.
+    Agent can start from the most likely root cause rather than from scratch.
 
     Args:
         memory: EpisodicMemory instance for similarity search.
@@ -28,76 +33,70 @@ def make_incident_search_tool(memory: EpisodicMemory) -> FunctionTool:
     """
 
     @function_tool(strict_mode=False)
-    async def search_past_incidents(symptom_query: str, top_k: int) -> str:
+    async def search_past_incidents(request: IncidentSearchInput) -> str:
         """Search past incidents by symptom similarity using vector embeddings.
 
-        Returns the top-k most similar resolved incidents, with their root
-        cause and resolution. Those were produced by earlier agent runs and are
-        unverified: treat them as hypotheses to check, not facts. Use this during
-        triage to inform your severity classification and root cause hypothesis.
+        Returns a JSON array of up to k past incidents, most similar first, each with
+        its service, creation time, root cause, resolution and similarity score. The
+        root cause and resolution were produced by earlier agent runs: they are
+        model-generated, unverified — treat them as hypotheses to check, not facts
+        (each incident's _note says so). An empty array means no similar incident is on
+        record; a failure ("error": true, kind "unavailable") means memory could not be
+        searched, which is no finding either way.
 
         Args:
-            symptom_query: Natural language description of current symptoms
-                (e.g. "connection pool exhausted payment-service").
-            top_k: Number of past incidents to retrieve (typically 3–5).
+            request: The current symptoms and how many past incidents to return.
         """
-        return await _search_past_incidents(memory, symptom_query, top_k)
+        return tool_json(await _search_past_incidents(memory, request))
 
     return search_past_incidents
 
 
 async def _search_past_incidents(
-    memory: EpisodicMemory | None,
-    symptom_query: str,
-    top_k: int,
-) -> str:
-    """Search episodic memory for past incidents with similar symptoms.
+    memory: EpisodicMemory, request: IncidentSearchInput
+) -> list[SimilarIncident] | ToolFailure:
+    """Return the k nearest past incidents, or a ToolFailure — never raise.
 
-    Extracted from the tool decorator so unit tests can call this directly
-    without constructing a ToolContext.
+    Memory embeds the symptom text itself (``query`` with a string: the same embed +
+    pgvector path as ``search_similar``, keeping the similarity scores). Extracted from
+    the tool decorator so tests can call it without a ToolContext.
     """
-    if memory is None:
-        return "ERROR: Episodic memory not available. Cannot search past incidents."
-
-    if not symptom_query.strip():
-        return "ERROR: 'symptom_query' must be a non-empty string."
-
-    if top_k <= 0:
-        return "ERROR: 'top_k' must be a positive integer."
-
-    try:
-        result = await memory.query(symptom_query, top_k=top_k)
-    except SentinelMemoryError as exc:
-        # No database configured, or it failed: say so plainly — an empty result here
-        # would read as "no similar incidents", which is a different (false) finding.
-        logger.warning("incident_search_memory_unavailable", error=str(exc))
-        return f"ERROR: memory unavailable — past incidents cannot be searched ({exc})."
-    return _format_results(result)
-
-
-def _format_results(result: MemoryQueryResult) -> str:
-    """Render episodic search results as a compact, LLM-readable string.
-
-    A recalled root cause and resolution are an earlier agent's output, not verified
-    fact, and are labelled so: the reading agent must not treat them as ground truth.
-    """
-    if not result.records:
-        return "No similar past incidents found."
-
-    header = f"Found {len(result.records)} similar past incident(s):\n"
-    blocks: list[str] = []
-
-    for record, score in zip(result.records, result.similarity_scores):
-        mttr = f"{record.mttr_seconds}s" if record.mttr_seconds is not None else "unknown"
-        blocks.append(
-            f"incident_id:   {record.id}\n"
-            f"  service:       {record.service_name}\n"
-            f"  severity:      {record.severity}\n"
-            f"  symptoms:      {record.symptoms}\n"
-            f"  Root cause (model-generated, unverified): {record.root_cause}\n"
-            f"  Resolution (model-generated, unverified): {record.resolution}\n"
-            f"  mttr:          {mttr}\n"
-            f"  similarity:    {score:.3f}"
+    symptoms = request.symptom_text.strip()
+    if not symptoms:
+        return ToolFailure(tool=_TOOL_NAME, kind="bad_input", message="symptom_text is empty")
+    if request.k < 1:
+        return ToolFailure(
+            tool=_TOOL_NAME, kind="bad_input", message=f"k must be >= 1, got {request.k}"
         )
 
-    return header + "\n\n".join(blocks)
+    try:
+        result = await memory.query(symptoms, top_k=request.k)
+    except SentinelMemoryError as exc:
+        # No database configured, or it failed: say so plainly — an empty list here
+        # would read as "no similar incidents", which is a different (false) finding.
+        logger.warning("incident_search_memory_unavailable", error=str(exc))
+        return ToolFailure(
+            tool=_TOOL_NAME,
+            kind="unavailable",
+            message=f"past incidents cannot be searched: {exc}",
+        )
+
+    return [
+        SimilarIncident(
+            id=record.id,
+            service=record.service_name,
+            created_at=record.created_at,
+            root_cause=_capped(record.root_cause),
+            resolution=_capped(record.resolution),
+            resolution_type=record.resolution_type,
+            similarity=score,
+        )
+        for record, score in zip(result.records, result.similarity_scores, strict=True)
+    ]
+
+
+def _capped(text: str) -> str:
+    """*text* within ``_MAX_RECALL_CHARS``; a cut text ends in "…"."""
+    if len(text) <= _MAX_RECALL_CHARS:
+        return text
+    return text[: _MAX_RECALL_CHARS - 1] + "…"

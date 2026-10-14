@@ -3,8 +3,10 @@
 The suite is independent of the caller's shell and of the developer's ``.env``:
 ``Settings`` never reads ``.env`` here, ``DATABASE_URL`` is unset for the whole session
 (a test that needs it sets it to the test database), ``GROQ_API_KEY`` gets a dummy
-default, and the LangFuse keys are removed so the client is disabled and nothing is ever
-sent. The only database the suite touches is ``TEST_DATABASE_URL``.
+default, the LangFuse keys are removed so the client is disabled and nothing is ever
+sent, and the Datadog settings are removed so ``Settings`` falls back to its defaults (a
+test that needs keys passes fakes). The only database the suite touches is
+``TEST_DATABASE_URL``.
 """
 
 from __future__ import annotations
@@ -35,13 +37,16 @@ _TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
 _IN_CI = os.environ.get("CI", "").strip().lower() == "true"
 _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 _LANGFUSE_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
+# Removed with the LangFuse keys: the suite never holds a real Datadog key or site.
+_DATADOG_VARS = ("DD_API_KEY", "DD_APP_KEY", "DD_SITE")
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Before collection: a dummy GROQ_API_KEY (Settings requires one), never a real one,
-    and no LangFuse keys — a keyless langfuse client is a disabled no-op (no network)."""
+    """Before collection: a dummy GROQ_API_KEY (Settings boots without one, but agents
+    built from the default groq/ models need one), and no LangFuse keys — a keyless
+    langfuse client is a disabled no-op (no network)."""
     os.environ.setdefault("GROQ_API_KEY", "fake-key-for-tests")
-    for var in _LANGFUSE_KEYS:
+    for var in (*_LANGFUSE_KEYS, *_DATADOG_VARS):
         os.environ.pop(var, None)
 
 
@@ -86,7 +91,7 @@ def _isolated_environment() -> Iterator[None]:
     with pytest.MonkeyPatch.context() as mp:
         mp.setitem(Settings.model_config, "env_file", None)
         mp.delenv("DATABASE_URL", raising=False)
-        for var in _LANGFUSE_KEYS:
+        for var in (*_LANGFUSE_KEYS, *_DATADOG_VARS):
             mp.delenv(var, raising=False)
         yield
 

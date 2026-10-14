@@ -60,7 +60,7 @@ def _serve(port: int = 8000, host: str = "0.0.0.0") -> None:
 
 
 def _run_scenario(scenario_id: str) -> None:
-    """Run a single scenario end-to-end with interactive HITL."""
+    """Run a single scenario end-to-end and print its trajectory."""
     _seed_database()
 
     # Import run_scenario by adding scripts/ to sys.path at runtime,

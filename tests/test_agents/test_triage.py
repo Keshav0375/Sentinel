@@ -149,9 +149,9 @@ def test_triage_agent_no_extra_tools(triage_agent: Agent[TriageResult]) -> None:
     names = {t.name for t in triage_agent.tools}
     unexpected = {
         "fetch_logs",
-        "list_recent_deploys",
-        "draft_rollback_pr",
-        "request_human_approval",
+        "get_deploy_details",
+        "prepare_rollback_spec",
+        "format_escalation",
     }
     assert not names & unexpected, f"Unexpected tools in triage agent: {names & unexpected}"
 

@@ -9,10 +9,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from sentinel.eval.runner import (
     EvalRunResult,
-    _auto_approve,
     run_eval,
     run_scenario_eval,
     scores_from_results,
@@ -89,23 +89,6 @@ def _make_groq_client() -> MagicMock:
     client.chat.completions = MagicMock()
     client.chat.completions.create = AsyncMock()
     return client
-
-
-# ── _auto_approve ─────────────────────────────────────────────────────────────
-
-
-class TestAutoApprove:
-    async def test_returns_approve(self) -> None:
-        decision, comment = await _auto_approve("Roll back deploy-abc123")
-        assert decision == "approve"
-
-    async def test_comment_is_string_or_none(self) -> None:
-        _, comment = await _auto_approve("some action")
-        assert comment is None or isinstance(comment, str)
-
-    async def test_does_not_raise_on_empty_display(self) -> None:
-        decision, _ = await _auto_approve("")
-        assert decision == "approve"
 
 
 # ── scores_from_results ───────────────────────────────────────────────────────
@@ -382,10 +365,10 @@ def _settings_mock(tmp_path: Path) -> MagicMock:
     s = MagicMock()
     s.sentinel_db_path = tmp_path / "test.db"
     s.sentinel_embedding_model = "all-MiniLM-L6-v2"
-    s.groq_api_key = "test-key"
+    s.groq_api_key = SecretStr("test-key")
     s.groq_base_url = "https://api.groq.com/openai/v1"
     s.sentinel_judge_model = "llama-3.1-8b-instant"
-    s.sentinel_max_tool_calls = 15
+    s.sentinel_max_tool_calls = 20
     s.sentinel_analysis_model = "llama-3.3-70b-versatile"
     s.sentinel_triage_model = "llama-3.1-8b-instant"
     s.sentinel_log_level = "INFO"

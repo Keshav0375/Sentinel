@@ -53,7 +53,8 @@ _DEFAULT_LIST_LIMIT = 50
 _NO_POOL = "memory unavailable: no database configured (DATABASE_URL is not set)"
 
 _COLUMNS = (
-    "id, service, severity, root_cause, resolution, mttr_seconds, embedding, created_at, trajectory"
+    "id, service, severity, root_cause, resolution, resolution_type, mttr_seconds, embedding, "
+    "created_at, trajectory"
 )
 
 
@@ -446,6 +447,7 @@ def _row_to_record(row: asyncpg.Record) -> EpisodicRecord:
         "symptoms": str(trajectory.get("symptoms") or ""),
         "root_cause": row["root_cause"] or "unknown",
         "resolution": row["resolution"] or "unresolved",
+        "resolution_type": row["resolution_type"],
         "mttr_seconds": row["mttr_seconds"],
         "embedding": vector.to_list() if vector is not None else [],
         "raw_timeline": raw_timeline,

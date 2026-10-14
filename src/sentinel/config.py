@@ -5,15 +5,24 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Maps provider prefix → (env_var_name, Settings field name) for error messages.
-_PROVIDER_KEY_FIELDS: dict[str, str] = {
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "azure": "AZURE_API_KEY",
-}
+# Every credential field. All optional: no secret is required to boot, and a feature whose
+# key is missing fails at use (backend.md §8.2; decision 2026-10-14). A blank value counts
+# as missing.
+_SECRET_FIELDS = (
+    "groq_api_key",
+    "openai_api_key",
+    "anthropic_api_key",
+    "azure_api_key",
+    "gemini_api_key",
+    "dd_api_key",
+    "dd_app_key",
+    "github_api_token",
+    "langfuse_public_key",
+    "langfuse_secret_key",
+)
 
 
 class Settings(BaseSettings):
@@ -21,6 +30,10 @@ class Settings(BaseSettings):
 
     Intended to be instantiated once at startup and injected via FastAPI Depends
     or passed explicitly — never imported as a module-level singleton.
+
+    No field is required: the app boots with no credentials at all. Secrets are
+    ``SecretStr | None`` (masked in repr and logs); read one with ``secret_value``,
+    which raises a clear error naming the env var when it is unset.
     """
 
     model_config = SettingsConfigDict(
@@ -31,29 +44,29 @@ class Settings(BaseSettings):
     )
 
     # ── Groq (primary dev provider) ───────────────────────────────────────────
-    # Required — no default. All model defaults use groq/ so this key is always
-    # needed unless you override every model string to a different provider.
-    groq_api_key: str
+    # All model defaults use groq/, so running an incident needs this key, but booting
+    # does not: resolve_model fails with a clear error when it is unset.
+    groq_api_key: SecretStr | None = None
 
     # Base URL for the Groq-compatible OpenAI client.
     groq_base_url: str = "https://api.groq.com/openai/v1"
 
     # ── OpenAI ────────────────────────────────────────────────────────────────
     # Required only when a sentinel_*_model field uses the "openai/" prefix.
-    openai_api_key: str = ""
+    openai_api_key: SecretStr | None = None
 
     # ── Anthropic ─────────────────────────────────────────────────────────────
     # Required only when a sentinel_*_model field uses the "anthropic/" prefix.
-    anthropic_api_key: str = ""
+    anthropic_api_key: SecretStr | None = None
 
     # ── Azure OpenAI ──────────────────────────────────────────────────────────
     # Required only when a sentinel_*_model field uses the "azure/" prefix.
-    azure_api_key: str = ""
+    azure_api_key: SecretStr | None = None
     azure_api_base: str = ""
     azure_api_version: str = "2024-02-01"
 
     # ── Gemini (future — excluded from provider layer for now) ────────────────
-    gemini_api_key: str = ""
+    gemini_api_key: SecretStr | None = None
 
     # ── Models — provider/model format (LiteLLM) ──────────────────────────────
     # Each string selects both the provider and the model in one value.
@@ -76,8 +89,8 @@ class Settings(BaseSettings):
     sentinel_db_path: Path = Path("./data/sentinel.db")
 
     # ── PostgreSQL + pgvector (Phase 2) ───────────────────────────────────────
-    # asyncpg DSN (postgresql://…). Empty → no Postgres pool is created and the
-    # Phase-1 SQLite store above stays the only database.
+    # asyncpg DSN (postgresql://…). Empty → no Postgres pool is created; the app still
+    # boots and every memory call reports "memory unavailable" (decision 2026-10-12).
     database_url: str = ""
 
     # asyncpg pool bounds — one connection per concurrent incident (backend.md §4.5).
@@ -86,8 +99,28 @@ class Settings(BaseSettings):
 
     sentinel_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
-    # Hard cap on tool calls per incident to prevent runaway loops.
-    sentinel_max_tool_calls: int = 15
+    # Hard cap on tool calls per incident to prevent runaway loops (§4.6).
+    sentinel_max_tool_calls: int = 20
+
+    # Stub provider calls in tests/CI (§9.1); /ready skips the live-provider check.
+    sentinel_fake_llm: bool = False
+
+    # ── LangFuse (§6) ─────────────────────────────────────────────────────────
+    # The langfuse v3 client reads LANGFUSE_* from the process environment itself
+    # (infra/tracing.configure_langfuse); these fields mirror the same env vars.
+    langfuse_public_key: SecretStr | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_base_url: str | None = None
+
+    # ── Datadog (fetch_logs — §4.8) ───────────────────────────────────────────
+    # The app key is scoped to logs_read_data + synthetics_read (read-only).
+    dd_api_key: SecretStr | None = None
+    dd_app_key: SecretStr | None = None
+    dd_site: str = "us5.datadoghq.com"
+
+    # ── GitHub (get_deploy_details — §4.8) ────────────────────────────────────
+    # Read-only fine-grained PAT on Keshav0375/Sentinel-deployment ("Pull requests: read" only).
+    github_api_token: SecretStr | None = None
 
     # ── Validators ────────────────────────────────────────────────────────────
     @field_validator("sentinel_max_tool_calls")
@@ -107,54 +140,13 @@ class Settings(BaseSettings):
             raise ValueError("sentinel_db_pool_min must be <= sentinel_db_pool_max")
         return self
 
-    @field_validator("groq_api_key")
+    @field_validator(*_SECRET_FIELDS, "langfuse_base_url", mode="before")
     @classmethod
-    def groq_api_key_non_empty(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("groq_api_key must not be empty")
+    def blank_is_unset(cls, v: object) -> object:
+        """A blank or whitespace-only value counts as missing (None)."""
+        if isinstance(v, str) and not v.strip():
+            return None
         return v
-
-    @model_validator(mode="after")
-    def validate_provider_keys(self) -> Settings:
-        """Assert the API key for each active provider is set.
-
-        Reads the provider prefix from each sentinel_*_model string and checks
-        that the matching API key field is non-empty. Groq is always valid
-        because groq_api_key is required. Bare model names (no '/' separator)
-        are allowed through for backwards compatibility.
-        """
-        models_to_check = [
-            ("SENTINEL_TRIAGE_MODEL", self.sentinel_triage_model),
-            ("SENTINEL_ANALYSIS_MODEL", self.sentinel_analysis_model),
-            ("SENTINEL_JUDGE_MODEL", self.sentinel_judge_model),
-        ]
-
-        for env_var, model_string in models_to_check:
-            if "/" not in model_string:
-                continue  # bare model name — no provider prefix to validate
-            provider = model_string.split("/")[0].lower()
-
-            if provider == "groq":
-                pass  # groq_api_key is required and already validated above
-            elif provider == "openai":
-                if not self.openai_api_key.strip():
-                    raise ValueError(
-                        f"{env_var}={model_string!r} requires OPENAI_API_KEY to be set"
-                    )
-            elif provider == "anthropic":
-                if not self.anthropic_api_key.strip():
-                    raise ValueError(
-                        f"{env_var}={model_string!r} requires ANTHROPIC_API_KEY to be set"
-                    )
-            elif provider == "azure":
-                if not self.azure_api_key.strip():
-                    raise ValueError(f"{env_var}={model_string!r} requires AZURE_API_KEY to be set")
-                if not self.azure_api_base.strip():
-                    raise ValueError(
-                        f"{env_var}={model_string!r} requires AZURE_API_BASE to be set"
-                    )
-
-        return self
 
 
 def get_settings() -> Settings:
@@ -164,4 +156,16 @@ def get_settings() -> Settings:
     In tests, instantiate Settings directly with explicit kwargs to avoid
     requiring a .env file.
     """
-    return Settings()  # type: ignore[call-arg]  # required fields populated from env
+    return Settings()
+
+
+def secret_value(secret: SecretStr | None, env_var: str) -> str:
+    """Return *secret*'s plain value at the point of use.
+
+    Raises:
+        ValueError: The secret is unset; the message names *env_var* so the operator
+            knows which key to provide. Callers turn this into their own failure.
+    """
+    if secret is None:
+        raise ValueError(f"{env_var} is not set")
+    return secret.get_secret_value()

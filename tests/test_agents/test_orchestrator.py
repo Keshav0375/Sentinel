@@ -245,7 +245,7 @@ def test_orchestrator_instructions_mention_tool_call_cap(
     orchestrator: Agent[IncidentSummary],
 ) -> None:
     assert isinstance(orchestrator.instructions, str)
-    assert "15" in orchestrator.instructions
+    assert "budget of 20 tool calls" in orchestrator.instructions
 
 
 def test_orchestrator_instructions_mention_all_specialists(

@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
+import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from agents import Runner, add_trace_processor
 from agents import trace as agent_trace
 from openai import AsyncOpenAI
@@ -30,7 +32,7 @@ from sentinel.agents.log_analyst import build_log_analyst_agent
 from sentinel.agents.orchestrator import build_orchestrator_agent
 from sentinel.agents.remediation import build_remediation_agent
 from sentinel.agents.triage import build_triage_agent
-from sentinel.config import Settings, get_settings
+from sentinel.config import Settings, get_settings, secret_value
 from sentinel.eval.judge import evaluate_trajectory
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario
 from sentinel.generator.scenarios import Scenario
@@ -60,12 +62,6 @@ class EvalRunResult:
     trajectory_missing: bool = False
 
 
-async def _auto_approve(display: str) -> tuple[str, str | None]:
-    """HITL approval function for automated eval — always approves immediately."""
-    logger.debug("eval_auto_approve", preview=display[:80])
-    return ("approve", "Auto-approved by eval runner")
-
-
 async def run_scenario_eval(
     scenario: Scenario,
     *,
@@ -73,17 +69,15 @@ async def run_scenario_eval(
     trajectories_dir: Path,
     settings: Settings,
     judge_model: str,
-    max_turns: int = 15,
+    max_turns: int = 20,
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
+    pool: asyncpg.Pool | None = None,
 ) -> EvalRunResult:
     """Run one scenario end-to-end and return a scored result.
 
-    Builds a fresh agent set with the scenario injected into log/deploy tools,
-    runs the pipeline, reads the trajectory written by SentinelTracer, and
-    calls the LLM judge.
-
-    HITL is auto-approved so the batch runs without human intervention.
+    Builds a fresh agent set, runs the pipeline on the scenario's alert, reads the
+    trajectory written by SentinelTracer, and calls the LLM judge.
 
     Args:
         scenario: Loaded scenario (with ground truth).
@@ -95,6 +89,7 @@ async def run_scenario_eval(
         max_turns: Tool-call cap per pipeline run.
         semantic_memory: Service metadata store.
         episodic_memory: Past-incident similarity store.
+        pool: asyncpg pool ``get_deploy_details`` reads; None without ``DATABASE_URL``.
 
     Returns:
         ``EvalRunResult`` with scenario_id, incident_id, score, and error info.
@@ -109,7 +104,7 @@ async def run_scenario_eval(
         incident_id=incident_id,
     )
 
-    # ── Build fresh agents with scenario injected ──────────────────────────────
+    # ── Build fresh agents ─────────────────────────────────────────────────────
     triage_agent = build_triage_agent(
         semantic_memory,
         episodic_memory,
@@ -118,19 +113,17 @@ async def run_scenario_eval(
     )
     log_analyst_agent = build_log_analyst_agent(
         semantic_memory,
-        scenario,
         model_string=settings.sentinel_analysis_model,
         settings=settings,
     )
     deploy_correlator_agent = build_deploy_correlator_agent(
-        scenario,
+        pool,
         model_string=settings.sentinel_triage_model,
         settings=settings,
     )
     remediation_agent = build_remediation_agent(
         model_string=settings.sentinel_analysis_model,
         settings=settings,
-        approval_fn=_auto_approve,
     )
     comms_agent = build_comms_agent(
         model_string=settings.sentinel_triage_model,
@@ -148,7 +141,7 @@ async def run_scenario_eval(
 
     # Judge uses Groq directly (not LiteLLM) — strip provider prefix if present.
     groq_client = AsyncOpenAI(
-        api_key=settings.groq_api_key,
+        api_key=secret_value(settings.groq_api_key, "GROQ_API_KEY"),
         base_url=settings.groq_base_url,
     )
 
@@ -257,7 +250,7 @@ async def run_eval(
     """Run the full eval suite and return per-scenario results.
 
     Iterates over all scenarios (or a specified subset). Each scenario:
-    1. Runs the full agent pipeline with auto-approve HITL
+    1. Runs the full agent pipeline
     2. Reads the trajectory JSON written by SentinelTracer
     3. Calls the LLM judge (evaluate_trajectory)
 
@@ -336,6 +329,7 @@ async def run_eval(
                     max_turns=settings.sentinel_max_tool_calls + 5,
                     semantic_memory=semantic_memory,
                     episodic_memory=episodic_memory,
+                    pool=pool,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error(

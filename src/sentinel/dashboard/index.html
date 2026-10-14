@@ -172,8 +172,6 @@
                        box-shadow:0 0 0 1px var(--blue),0 0 16px rgba(56,139,253,.1)}
     .agent-card.done{border-color:var(--green)}
     .agent-card.err{border-color:var(--red)}
-    .agent-card.hitl{border-color:var(--amber);
-                     box-shadow:0 0 0 1px var(--amber),0 0 16px rgba(210,153,34,.1)}
     .card-header{padding:12px 16px;display:flex;align-items:flex-start;gap:10px;
                  border-bottom:1px solid var(--border)}
     .card-status{width:10px;height:10px;border-radius:50%;background:var(--border);
@@ -181,7 +179,6 @@
     .agent-card.active .card-status{background:var(--blue);animation:pulse 1.4s infinite}
     .agent-card.done .card-status{background:var(--green)}
     .agent-card.err .card-status{background:var(--red)}
-    .agent-card.hitl .card-status{background:var(--amber)}
     @keyframes pulse{
       0%,100%{box-shadow:0 0 0 2px rgba(56,139,253,.3)}
       50%{box-shadow:0 0 0 5px rgba(56,139,253,.06)}}
@@ -221,7 +218,6 @@
     .event-item.ev-completed .event-text{color:var(--green)}
     .event-item.ev-tool .event-text{color:var(--text-secondary)}
     .event-item.ev-result .event-text{color:var(--muted)}
-    .event-item.ev-hitl .event-text{color:var(--amber)}
     .event-item.ev-resolved .event-text{color:var(--green);font-weight:600}
     .event-item.ev-error .event-text{color:var(--red)}
     .event-item.ev-system .event-text{color:var(--muted);font-style:italic}
@@ -237,7 +233,7 @@
     #res-banner .banner-hint{font-weight:400;font-size:12px;margin-left:auto;
                              color:var(--green);opacity:.7}
 
-    /* ══ HITL Overlay ══════════════════════════════════════════════════════ */
+    /* ══ Modals ════════════════════════════════════════════════════════════ */
     .modal-backdrop{display:none;position:fixed;inset:0;
                     background:rgba(0,0,0,.72);z-index:200;
                     align-items:center;justify-content:center;padding:20px}
@@ -247,20 +243,7 @@
                 box-shadow:0 4px 40px rgba(0,0,0,.4)}
     .modal-card h2{font-size:16px;margin-bottom:16px;display:flex;
                    align-items:center;gap:8px}
-    #hitl-modal .modal-card{border:2px solid var(--amber)}
-    #hitl-modal h2{color:var(--amber)}
-    #hitl-text{background:var(--bg);border:1px solid var(--border);
-               border-radius:var(--r);padding:12px;font-family:var(--mono);
-               font-size:12px;white-space:pre-wrap;max-height:280px;
-               overflow-y:auto;margin-bottom:16px}
     .modal-actions{display:flex;gap:10px;flex-wrap:wrap}
-    #rej-comment{width:100%;margin-top:12px;background:var(--bg);
-                 border:1px solid var(--border);border-radius:var(--r);
-                 color:var(--text);padding:8px;font-family:var(--sans);
-                 font-size:13px;display:none;resize:vertical;min-height:56px}
-    #rej-comment.on{display:block}
-    #rej-submit{margin-top:8px;display:none}
-    #rej-submit.on{display:block}
 
     /* ══ Resolution Modal ══════════════════════════════════════════════════ */
     #resolve-modal .modal-card{border:2px solid var(--green);max-width:520px}
@@ -391,22 +374,6 @@
 
 </div>
 
-<!-- ═══ HITL MODAL ══════════════════════════════════════════════════════════ -->
-<div class="modal-backdrop" id="hitl-modal">
-  <div class="modal-card">
-    <h2>&#9888;&#65039; Human Approval Required</h2>
-    <div id="hitl-text"></div>
-    <div class="modal-actions">
-      <button class="btn btn-success" onclick="submitHitl('approve')">Approve</button>
-      <button class="btn btn-outline" onclick="toggleReject()">Reject...</button>
-    </div>
-    <textarea id="rej-comment" placeholder="Reason for rejection (optional)"></textarea>
-    <div id="rej-submit">
-      <button class="btn btn-danger" onclick="submitHitl('reject')">Confirm Rejection</button>
-    </div>
-  </div>
-</div>
-
 <!-- ═══ RESOLUTION MODAL ═══════════════════════════════════════════════════ -->
 <div class="modal-backdrop" id="resolve-modal" onclick="closeModal('resolve-modal')">
   <div class="modal-card" onclick="event.stopPropagation()">
@@ -477,9 +444,9 @@ const AGENTS = [
   {key:'deploy_correlator_agent', label:'Deploy Correlator', icon:'\u{1f680}',
    desc:'Checks recent deployments and correlates suspicious changes with the incident timeline'},
   {key:'remediation_agent',       label:'Remediation',       icon:'\u{1f527}',
-   desc:'Drafts a remediation plan (rollback, hotfix, config change) and requests human approval'},
+   desc:'Drafts a rollback spec or an escalation; a human merges the revert PR on GitHub'},
   {key:'comms_agent',             label:'Comms Agent',       icon:'\u{1f4e2}',
-   desc:'Produces a structured Slack summary of the full incident for the on-call team'},
+   desc:'Summarises the full incident in plain language (sends nothing)'},
 ];
 
 const SEV_MAP = {critical:'critical',high:'high',warning:'warning',low:'low',info:'info'};
@@ -507,10 +474,9 @@ const TOOL_LABELS = {
   get_service_metadata: 'Looking up service metadata',
   search_past_incidents: 'Searching for similar past incidents',
   fetch_logs: 'Fetching application logs',
-  list_recent_deploys: 'Checking recent deployments',
-  draft_rollback_pr: 'Drafting rollback pull request',
-  request_human_approval: 'Requesting human approval',
-  draft_slack_summary: 'Drafting Slack notification',
+  get_deploy_details: 'Checking recent deployments',
+  prepare_rollback_spec: 'Drafting rollback spec',
+  format_escalation: 'Preparing escalation',
 };
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -700,7 +666,7 @@ function buildPipeline() {
 function setCardState(agentKey, state) {
   const card = document.getElementById(`card-${agentKey}`);
   if (!card) return;
-  card.classList.remove('active','done','err','hitl');
+  card.classList.remove('active','done','err');
   if (state) card.classList.add(state);
   if (state === 'active') {
     card.scrollIntoView({behavior:'smooth', block:'nearest'});
@@ -748,7 +714,7 @@ function addEvent(type, agentName, text) {
 function eventIcon(type) {
   const map = {
     started: '\u{1f916}', completed: '✅', tool: '⚙',
-    result: '→', hitl: '⚠️', resolved: '\u{1f389}',
+    result: '→', resolved: '\u{1f389}',
     error: '❌', system: '\u{1f4ac}',
   };
   return map[type] || '•';
@@ -826,8 +792,6 @@ function dispatch(ev, incId) {
     case 'agent_completed':   onCompleted(ev);           break;
     case 'tool_called':       onToolCalled(ev);          break;
     case 'tool_result':       onToolResult(ev);          break;
-    case 'hitl_requested':    onHitlReq(ev, incId);      break;
-    case 'hitl_resolved':     onHitlRes(ev);             break;
     case 'incident_resolved': onResolved(ev);            break;
     default:
       addEvent('system', ev.agent_name || '', `${ev.type}: ${ev.agent_name || ''}`);
@@ -895,26 +859,6 @@ function onToolResult(ev) {
   const summary = String(output).slice(0, 80);
   addEvent('result', ev.agent_name || '',
     `${humanizeToolName(toolName)} → <span style="color:var(--muted)">${esc(summary)}</span>`);
-}
-
-function onHitlReq(ev, incId) {
-  const display = ev.data?.display || 'Approval requested.';
-  document.getElementById('hitl-text').textContent = display;
-  document.getElementById('hitl-modal').dataset.incId = incId;
-  document.getElementById('hitl-modal').classList.add('on');
-  document.getElementById('rej-comment').classList.remove('on');
-  document.getElementById('rej-submit').classList.remove('on');
-  setCardState('remediation_agent', 'hitl');
-  addEvent('hitl', 'remediation_agent',
-    '<strong>Human approval required</strong> &mdash; review the remediation plan');
-}
-
-function onHitlRes(ev) {
-  document.getElementById('hitl-modal').classList.remove('on');
-  const dec = ev.data?.decision || '';
-  setCardState('remediation_agent', 'done');
-  addEvent('hitl', 'remediation_agent',
-    `Approval decision: <strong>${esc(dec)}</strong>`);
 }
 
 function onResolved(ev) {
@@ -994,38 +938,6 @@ function section(label, content) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   HITL SUBMIT
-   ══════════════════════════════════════════════════════════════════════════ */
-
-async function submitHitl(action) {
-  const incId = document.getElementById('hitl-modal').dataset.incId;
-  if (!incId) return;
-  const comment = action === 'reject'
-    ? (document.getElementById('rej-comment').value.trim() || undefined)
-    : undefined;
-  try {
-    const r = await fetch(`/incidents/${incId}/approve`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({action, comment}),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      addEvent('error', 'system', `HITL submit failed: ${err.detail || r.status}`);
-    }
-  } catch(e) {
-    addEvent('error', 'system', `HITL submit error: ${e.message}`);
-  }
-}
-
-function toggleReject() {
-  const c = document.getElementById('rej-comment');
-  const s = document.getElementById('rej-submit');
-  const show = c.classList.toggle('on');
-  if (show) s.classList.add('on'); else s.classList.remove('on');
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
    UI HELPERS
    ══════════════════════════════════════════════════════════════════════════ */
 
@@ -1077,7 +989,6 @@ function resetState() {
 
 function resetUI() {
   document.getElementById('inc-bar').classList.remove('on');
-  document.getElementById('hitl-modal').classList.remove('on');
   document.getElementById('resolve-modal').classList.remove('on');
   const feed = document.getElementById('event-feed');
   feed.innerHTML = '';

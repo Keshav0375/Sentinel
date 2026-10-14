@@ -132,21 +132,16 @@ class TestDashboardRoute:
             html = client.get("/").text
         assert "EventSource" in html
 
-    def test_dashboard_contains_hitl_overlay(self) -> None:
+    def test_dashboard_offers_no_approval_path(self) -> None:
+        """The revert PR on GitHub is the only gate: no approve button, modal or call."""
         from sentinel.main import create_app
 
         app = create_app()
         with TestClient(app) as client:
             html = client.get("/").text
-        assert "hitl" in html.lower() or "Approval" in html
-
-    def test_dashboard_references_approve_endpoint(self) -> None:
-        from sentinel.main import create_app
-
-        app = create_app()
-        with TestClient(app) as client:
-            html = client.get("/").text
-        assert "/approve" in html
+        assert "/approve" not in html
+        assert "hitl" not in html.lower()
+        assert "Approve" not in html
 
     def test_dashboard_references_webhooks_alert(self) -> None:
         from sentinel.main import create_app

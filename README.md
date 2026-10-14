@@ -145,7 +145,7 @@ _This is the architectural view of Phase 2._ Deep-dive docs live in the
 
 ---
 
-**Autonomous DevOps incident response agent** — multi-agent pipeline that triages alerts, diagnoses root causes, drafts remediation plans, and communicates status, with a mandatory human-approval gate before any destructive action.
+**Autonomous DevOps incident response agent** — multi-agent pipeline that triages alerts, diagnoses root causes, drafts a rollback or an escalation, and writes the incident summary. The backend never acts on the world: it drafts a rollback spec, GitHub Actions opens the revert PR on Sentinel-deployment, and a human merges (or closes) it.
 
 Built as a portfolio project demonstrating production-grade agentic engineering: multi-agent orchestration, HITL safety, episodic memory, trajectory evaluation, and real-time observability.
 
@@ -159,26 +159,24 @@ Alert fires
     ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      Orchestrator Agent                      │
-│  (coordinates handoffs, enforces 15-call cap, writes STM)   │
+│  (coordinates handoffs, enforces 20-call cap, writes STM)   │
 └──┬──────────┬──────────┬──────────┬──────────┬─────────────┘
    │          │          │          │          │
    ▼          ▼          ▼          ▼          ▼
 Triage    Log      Deploy    Remediation  Comms
 Agent   Analyst  Correlator   Agent      Agent
-   │       │          │          │          │
-   │    fetch_     list_      draft_    draft_
-get_    logs    recent_   rollback_  slack_
-service_         deploys      pr     summary
-metadata                       │
-search_                 request_human_
-past_                   approval ◄── HITL gate
+   │       │          │          │       (no tools:
+get_    fetch_     get_      prepare_   writes the
+service_ logs     deploy_   rollback_   summary)
+metadata          details    spec  or
+search_                     format_
+past_                       escalation
 incidents                      │
                                ▼
-                        Human approves / rejects
+              Rollback spec ──► GitHub Actions opens the revert PR
                                │
                                ▼
-                     Incident resolved + stored
-                     in episodic memory
+                     A human merges (or closes) it on GitHub
 ```
 
 Every tool call is captured as a trajectory. After resolution, an LLM judge scores the trajectory across 6 dimensions and writes a report viewable in the web dashboard.
@@ -188,10 +186,10 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 ## Features
 
 - **Multi-agent pipeline** — 5 specialist agents (Triage, Log Analyst, Deploy Correlator, Remediation, Comms) orchestrated via OpenAI Agents SDK handoffs
-- **HITL safety gate** — `request_human_approval` is the only path to destructive actions; no agent can bypass it
+- **HITL safety gate** — the backend only drafts a rollback spec or an escalation; GitHub Actions opens the revert PR and a human merges or closes it on GitHub. No agent has a tool that acts on the world
 - **Episodic memory** — past incidents embedded and stored in SQLite; similar incidents surface automatically during triage
 - **Semantic memory** — service map, dependency graph, and runbooks loaded from seed data
-- **Live incident dashboard** — real-time SSE stream of agent activity at `http://localhost:8000/`; approve/reject HITL from the browser
+- **Live incident dashboard** — real-time SSE stream of agent activity at `http://localhost:8000/`
 - **Trajectory eval** — LLM-as-judge scores every incident across 6 dimensions (0–5), with a Markdown and JSON report
 - **Eval results dashboard** — browse per-scenario scores at `http://localhost:8000/eval`
 - **10 synthetic scenarios** — 5 failure classes (bad deploy, DB pool, downstream outage, memory leak, config regression)
@@ -287,9 +285,8 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 
 1. Select `bad_deploy_01` from the dropdown — a critical API gateway alert fires
 2. Watch the five agent cards light up in sequence as each specialist completes its analysis
-3. An amber HITL overlay appears when the Remediation Agent requests rollback approval
-4. Click ✅ Approve — the pipeline continues and the incident resolves
-5. Switch to `/eval` to see the LLM judge's per-dimension scores
+3. The Remediation Agent drafts a rollback spec (or an escalation) and the incident resolves
+4. Switch to `/eval` to see the LLM judge's per-dimension scores
 
 ---
 
@@ -340,10 +337,10 @@ Pass threshold: **3.0 / 5.0** (60%)
 sentinel/
 ├── src/sentinel/
 │   ├── agents/          # 5 specialist agents + orchestrator
-│   ├── tools/           # Tool implementations (fetch_logs, draft_rollback_pr, …)
+│   ├── tools/           # Tool implementations (fetch_logs, prepare_rollback_spec, …)
 │   ├── memory/          # Episodic (SQLite + embeddings), semantic, short-term
 │   ├── eval/            # Rubric, LLM-as-judge, batch runner, report generator
-│   ├── api/             # FastAPI routes (webhooks, SSE, HITL, incidents, scenarios)
+│   ├── api/             # FastAPI routes (webhooks, SSE, incidents, scenarios)
 │   ├── infra/           # DB, logging, tracing, event bus, dashboard emitter
 │   ├── models/          # Pydantic domain models
 │   ├── generator/       # Synthetic alert + log + deploy data
@@ -365,7 +362,7 @@ sentinel/
 
 **Why multi-agent, not single agent?** Each specialist has a focused system prompt and constrained tool set. This makes each agent independently testable and improvable — changing the Log Analyst's prompt doesn't risk breaking Triage.
 
-**Why HITL at the tool level, not the prompt level?** There is no "execute rollback" tool — only `draft_rollback_pr` + `request_human_approval`. An agent can't bypass approval by ignoring a prompt instruction; it literally has no tool that acts without human sign-off.
+**Why HITL at the tool level, not the prompt level?** There is no "execute rollback" tool — only `prepare_rollback_spec` and `format_escalation`, which draft and return. An agent can't bypass the gate by ignoring a prompt instruction: it has no tool that acts, and the revert PR a human merges on GitHub is the only path to a rollback.
 
 **Why SQLite for episodic memory?** Zero infrastructure cost for the MVP. The embedding + cosine similarity approach works well at 10–100 incidents. Phase 2 swaps to Cosmos DB with a vector index for scale.
 
@@ -384,7 +381,6 @@ _Documented here for interview conversations about production readiness:_
 | Cache | Redis for short-term memory |
 | Model routing | LiteLLM done (Phase 9) — Kong AI Gateway for token budgets is Phase 2 |
 | Observability | Self-hosted LangFuse for trace dashboards |
-| HITL channel | Slack interactive buttons (real Slack app) |
 | PR creation | GitHub App for real PR creation |
 | Self-improvement | Nightly ACA Job — re-evals + auto-PR to improve failing prompts |
 | Alert source | Azure Service Bus + Datadog webhook for real alerts |

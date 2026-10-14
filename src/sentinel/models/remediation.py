@@ -1,16 +1,15 @@
-"""Remediation models — RemediationAction, RemediationPlan, RollbackPR,
-ApprovalRequest, ApprovalResult.
+"""Remediation models — RemediationAction, RemediationPlan, RollbackPR.
 
-These models encode the HITL safety contract: agents can only *draft* actions
-(RemediationPlan, RollbackPR) and *request* approval (ApprovalRequest). They
-never directly execute anything. ApprovalResult records the human's decision.
+Agents only *draft* (RemediationPlan, RollbackPR); they never execute anything.
+The human gate is the revert PR on Sentinel-deployment, merged or closed on GitHub
+(backend.md §3.3) — there is no approval model because there is no approval API.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 
 class RemediationAction(StrEnum):
@@ -21,25 +20,6 @@ class RemediationAction(StrEnum):
     SCALE = "scale"
     RESTART = "restart"
     ESCALATE = "escalate"
-
-
-class RiskLevel(StrEnum):
-    """Perceived risk of a proposed remediation action.
-
-    Used in ApprovalRequest so the human reviewer can judge urgency vs. risk.
-    """
-
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
-
-
-class ApprovalStatus(StrEnum):
-    """Outcome of a HITL approval gate. Matches ARCHITECTURE.md §8."""
-
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    TIMEOUT = "timeout"
 
 
 class RemediationPlan(BaseModel):
@@ -59,42 +39,11 @@ class RemediationPlan(BaseModel):
 class RollbackPR(BaseModel):
     """A drafted pull request that, once merged, reverts a bad deploy.
 
-    This is an *artifact*, not an action. The human approves it via the HITL
-    gate, then the orchestrator (in Phase 2) would merge it via the GitHub API.
+    This is an *artifact*, not an action. The backend never opens or merges a PR:
+    GitHub Actions creates the revert PR and a human merges or closes it on GitHub.
     """
 
     title: str
     body: str
     deploy_id: str
     target_branch: str = "main"
-
-
-class ApprovalRequest(BaseModel):
-    """Sent to the HITL gate before any destructive action executes.
-
-    Exactly matches the structure in ARCHITECTURE.md §8.
-    """
-
-    action: str
-    risk_level: RiskLevel
-    evidence_summary: str
-    proposed_by: str
-
-
-class ApprovalResult(BaseModel):
-    """The human's decision returned by the HITL gate.
-
-    reviewer is the identifier of whoever approved/rejected (username or
-    "cli-input" for the MVP terminal prompt).
-    """
-
-    status: ApprovalStatus
-    reviewer: str
-    comment: str | None = None
-
-    @field_validator("reviewer")
-    @classmethod
-    def reviewer_non_empty(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("reviewer must not be empty")
-        return v
