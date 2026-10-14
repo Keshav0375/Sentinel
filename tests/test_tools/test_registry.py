@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from agents import FunctionTool, function_tool
 
+from sentinel.config import Settings
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
@@ -65,6 +66,19 @@ def test_tool_deps_scenario_can_be_set(
         scenario=scenario,
     )
     assert deps.scenario is scenario
+
+
+def test_tool_deps_settings_default_and_injection(
+    mock_semantic: SemanticMemory,
+    mock_episodic: EpisodicMemory,
+) -> None:
+    """Settings default to the environment's and can be injected (fetch_logs reads them)."""
+    default = ToolDeps(semantic_memory=mock_semantic, episodic_memory=mock_episodic)
+    assert isinstance(default.settings, Settings)
+    custom = Settings(dd_site="datadoghq.eu")
+    deps = ToolDeps(semantic_memory=mock_semantic, episodic_memory=mock_episodic, settings=custom)
+    assert deps.settings is custom
+    assert "fetch_logs" in {t.name for t in build_tools(deps)}
 
 
 def test_tool_deps_with_real_memory_objects() -> None:

@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 
 from agents import FunctionTool
 
+from sentinel.config import Settings
 from sentinel.generator.scenarios import Scenario
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
@@ -57,14 +58,18 @@ class ToolDeps:
     Attributes:
         semantic_memory: Service map and runbook lookups (SemanticMemory).
         episodic_memory: Past-incident similarity search (EpisodicMemory).
-        scenario: Active scenario supplying synthetic logs and deploys in the
-            MVP. None when no scenario is pre-loaded (e.g. registry-only unit
-            tests that don't exercise log/deploy tools).
+        scenario: Active scenario supplying synthetic deploys in the MVP. None
+            when no scenario is pre-loaded (e.g. registry-only unit tests that
+            don't exercise the deploy tool).
+        settings: Credentials and endpoints for the API-backed tools (Datadog for
+            ``fetch_logs``). Defaults to the environment's Settings; keys are read
+            at call time, so a missing key fails the call, never the build.
     """
 
     semantic_memory: SemanticMemory
     episodic_memory: EpisodicMemory
     scenario: Scenario | None = field(default=None)
+    settings: Settings = field(default_factory=Settings)
 
 
 def build_tools(deps: ToolDeps) -> list[FunctionTool]:
@@ -90,7 +95,7 @@ def build_tools(deps: ToolDeps) -> list[FunctionTool]:
     # ── 4.3 — fetch_logs ─────────────────────────────────────────────────────
     from sentinel.tools.log_fetcher import make_log_fetcher_tool
 
-    tools.append(make_log_fetcher_tool(deps.scenario))
+    tools.append(make_log_fetcher_tool(deps.settings))
 
     # ── 4.4 — list_recent_deploys ─────────────────────────────────────────────
     from sentinel.tools.deploy_checker import make_deploy_checker_tool

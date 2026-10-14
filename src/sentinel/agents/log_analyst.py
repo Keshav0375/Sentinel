@@ -8,7 +8,6 @@ from agents import Agent
 
 from sentinel.agents.loader import load_prompt
 from sentinel.config import Settings
-from sentinel.generator.scenarios import Scenario
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.log_entry import LogAnalysis
 from sentinel.providers import get_capabilities, resolve_model
@@ -20,27 +19,24 @@ LOG_ANALYST_AGENT_NAME = "log_analyst_agent"
 
 def build_log_analyst_agent(
     semantic_memory: SemanticMemory,
-    scenario: Scenario | None,
     *,
     model_string: str,
     settings: Settings,
 ) -> Agent[LogAnalysis]:
     """Create a configured Log Analyst Agent with injected dependencies.
 
-    The agent receives a service name and time window, fetches logs for that
-    service via ``fetch_logs``, enriches context with ``get_service_metadata``
-    when dependency information is needed, and returns a ``LogAnalysis`` with
-    error patterns, an anomaly summary, key evidence lines, and a one-sentence
-    root cause hypothesis.
+    The agent receives a service name and time window, reads the service's Datadog
+    evidence (synthetic check runs and CI deploy logs) via ``fetch_logs``, enriches
+    context with ``get_service_metadata`` when dependency information is needed, and
+    returns a ``LogAnalysis`` with error patterns, an anomaly summary, key evidence
+    lines, and a one-sentence root cause hypothesis.
 
     Args:
         semantic_memory: Service map lookups used to understand dependency
             topology when errors may propagate from upstream services.
-        scenario: Active scenario supplying synthetic log data in the MVP.
-            ``None`` causes ``fetch_logs`` to return an error response, which
-            the agent will surface in its analysis.
         model_string: Provider/model string (e.g. 'groq/llama-3.3-70b-versatile').
-        settings: Validated Settings instance for API key lookup.
+        settings: Validated Settings instance for API key lookup; also supplies the
+            Datadog keys and site ``fetch_logs`` reads at call time.
 
     Returns:
         Configured Agent that produces a ``LogAnalysis`` as structured output
@@ -59,7 +55,7 @@ def build_log_analyst_agent(
         name=LOG_ANALYST_AGENT_NAME,
         instructions=load_prompt("log_analyst.txt"),
         tools=[
-            make_log_fetcher_tool(scenario),
+            make_log_fetcher_tool(settings),
             make_service_lookup_tool(semantic_memory),
         ],
         model=llm,

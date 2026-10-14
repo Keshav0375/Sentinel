@@ -92,3 +92,88 @@ class SimilarIncident(BaseModel):
 
 
 _RECALLED_FIELDS = frozenset({"root_cause", "resolution"})
+
+
+# ── fetch_logs ────────────────────────────────────────────────────────────────
+
+LogSource = Literal["synthetics", "deploys"]
+
+
+class LogFetchInput(BaseModel):
+    """Input of ``fetch_logs``."""
+
+    service: str = Field(description='Exact service name (e.g. "sentinel-watchtower").')
+    window_minutes: int = Field(
+        default=60,
+        description="How far back from now to look, in minutes (1-1440). Synthetic checks "
+        "run every 30 minutes, so a window under 30 may hold no check at all.",
+    )
+    include: list[LogSource] = Field(
+        default_factory=lambda: ["synthetics", "deploys"],
+        description='Evidence sources to read: "synthetics" (Datadog Synthetics check runs) '
+        'and/or "deploys" (the CI pipeline\'s deploy.completed logs). Default: both.',
+    )
+
+
+class LogWindow(BaseModel):
+    """The time range a ``fetch_logs`` call covered (UTC)."""
+
+    start: datetime
+    end: datetime
+
+
+class SyntheticResult(BaseModel):
+    """One Datadog Synthetics API-test run against the service.
+
+    The failure details (status code, failure, content type, body snippet, assertions)
+    are filled for failed runs only, and only for the most recent few of them.
+    """
+
+    test_name: str = Field(
+        description='Synthetics test name (e.g. "sentinel-runtime-health GET /health").'
+    )
+    public_id: str = Field(description="Synthetics test public id.")
+    checked_at: datetime | None = Field(description="When the check ran (UTC).")
+    passed: bool = Field(description="Whether every assertion of the test held.")
+    location: str | None = Field(default=None, description="Probe location of the run.")
+    latency_ms: float | None = Field(default=None, description="Total response time (ms).")
+    status_code: int | None = Field(default=None, description="HTTP status code returned.")
+    failure_code: str | None = Field(
+        default=None, description="Datadog failure code (e.g. INCORRECT_ASSERTION, TIMEOUT)."
+    )
+    failure_message: str | None = Field(default=None, description="Datadog failure message.")
+    content_type: str | None = Field(default=None, description="Response content-type header.")
+    body_snippet: str | None = Field(default=None, description="Start of the response body.")
+    assertions: list[str] = Field(
+        default=[], description="What the test checks (expected values), in order."
+    )
+
+
+class DeployLogEntry(BaseModel):
+    """One ``deploy.completed`` log the CI pipeline sent for the service."""
+
+    timestamp: datetime | None = Field(description="When the log was sent (UTC).")
+    status: str | None = Field(default=None, description="Log status (info, error, ...).")
+    version: str | None = Field(default=None, description='Deployed version, "pr-<n>-<sha>".')
+    deploy_status: str | None = Field(default=None, description="succeeded | failed.")
+    failed_stage: str | None = Field(
+        default=None, description='Stage that failed (build, deploy, verify) or "none".'
+    )
+    pr_number: int | None = Field(default=None, description="Pull request that was deployed.")
+    message: str = Field(description='Log message (e.g. "deploy.completed").')
+
+
+class LogFetchResult(BaseModel):
+    """Evidence ``fetch_logs`` read for a service over a time window, newest first.
+
+    ``sources`` names what was read: an empty list for a source that was read means
+    nothing was recorded in the window. ``truncated`` is true when entries were dropped
+    or text was cut to keep the payload small.
+    """
+
+    service: str
+    window: LogWindow
+    sources: list[LogSource] = Field(description="The evidence sources this call read.")
+    synthetic_results: list[SyntheticResult] = []
+    deploy_logs: list[DeployLogEntry] = []
+    truncated: bool = False

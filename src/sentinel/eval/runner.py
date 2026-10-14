@@ -118,7 +118,6 @@ async def run_scenario_eval(
     )
     log_analyst_agent = build_log_analyst_agent(
         semantic_memory,
-        scenario,
         model_string=settings.sentinel_analysis_model,
         settings=settings,
     )

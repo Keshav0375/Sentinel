@@ -76,7 +76,7 @@ def _build_orchestrator_for_scenario(
 ) -> Any:
     """Build a full orchestrator pipeline with scenario data injected.
 
-    Rebuilds all agents per-incident so the log/deploy tools have access to
+    Rebuilds all agents per-incident so the deploy tool has access to
     the scenario's synthetic data. The construction cost is negligible — it's
     just Python object creation, not LLM calls.
     """
@@ -88,7 +88,6 @@ def _build_orchestrator_for_scenario(
     )
     log_analyst_agent = build_log_analyst_agent(
         semantic_memory,
-        scenario,
         model_string=settings.sentinel_analysis_model,
         settings=settings,
     )
