@@ -11,8 +11,12 @@ The watched app sends no runtime logs, so the evidence is what Datadog really ho
 
 Read-only. Every URL is built from ``settings.dd_site``. Transient errors (connect
 errors, timeouts, 429, 5xx) are retried — 3 attempts, 1 s then 2 s apart (429 honours
-Retry-After up to a bound); any other error status fails at once. The keys are read only
-when the request headers are built and never logged. Nothing is captured to Langfuse.
+Retry-After up to a bound); any other error status fails that source at once. The
+sources are read concurrently under one overall deadline (45 s). A source that fails
+or misses the deadline is reported in ``sources`` and the others are still returned;
+only when every requested source fails does the call return a ToolFailure. The keys
+are read only when the request headers are built and never logged. Nothing is
+captured to Langfuse.
 """
 
 from __future__ import annotations
@@ -67,6 +71,7 @@ _ATTEMPTS = 3
 _RETRY_DELAYS = (1.0, 2.0, 4.0)
 _MAX_RETRY_AFTER = 10.0  # a 429's Retry-After is honoured up to this many seconds
 _REQUEST_TIMEOUT = httpx.Timeout(10.0)
+_DEADLINE_SECONDS = 45.0  # the whole call, every source and retry included
 
 # A bare hostname only: the site is spliced into every URL.
 _SITE_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
@@ -96,6 +101,7 @@ def make_log_fetcher_tool(
     http_client: httpx.AsyncClient | None = None,
     sleep: SleepFn = asyncio.sleep,
     clock: ClockFn = _utcnow,
+    deadline: float = _DEADLINE_SECONDS,
 ) -> FunctionTool:
     """Create the fetch_logs tool with the Datadog settings injected.
 
@@ -106,6 +112,8 @@ def make_log_fetcher_tool(
             transport). None → a short-lived client per call.
         sleep: Awaited between retry attempts (tests pass a recorder).
         clock: Returns the current UTC time; the window ends there.
+        deadline: Seconds the whole call may take; a source still reading then is
+            reported failed and the others are returned.
 
     Returns:
         FunctionTool that agents can call to read a service's Datadog evidence.
@@ -119,17 +127,25 @@ def make_log_fetcher_tool(
         Synthetics check runs — pass/fail, latency and, for failed runs, the HTTP status,
         the failure message, the response content type, a body snippet and what the
         test asserts — and (2) the CI pipeline's deploy.completed logs (version,
-        deploy_status, failed_stage, PR number). An empty list for a source in
-        ``sources`` means nothing was recorded in the window. Returns JSON; a failure
-        carries "error": true and means Datadog could not be read (kind "unavailable":
-        not configured; "upstream_error": Datadog answered with an error) — no finding
-        either way.
+        deploy_status, failed_stage, PR number). Returns JSON. ``sources`` gives each
+        source's status: "ok" (an empty list then means nothing was recorded in the
+        window) or "failed: <kind>: <why>" (that source was not read — no finding
+        either way). When every source fails the result is a failure with "error":
+        true (kind "unavailable": not configured; "upstream_error": Datadog answered
+        with an error or not in time) — no finding either way.
 
         Args:
             request: The service, the window in minutes, and which sources to read.
         """
         return tool_json(
-            await _fetch_logs(settings, request, http_client=http_client, sleep=sleep, clock=clock)
+            await _fetch_logs(
+                settings,
+                request,
+                http_client=http_client,
+                sleep=sleep,
+                clock=clock,
+                deadline=deadline,
+            )
         )
 
     return fetch_logs
@@ -142,6 +158,7 @@ async def _fetch_logs(
     http_client: httpx.AsyncClient | None = None,
     sleep: SleepFn = asyncio.sleep,
     clock: ClockFn = _utcnow,
+    deadline: float = _DEADLINE_SECONDS,
 ) -> LogFetchResult | ToolFailure:
     """Read the service's Datadog evidence, or return a ToolFailure — never raise.
 
@@ -174,20 +191,20 @@ async def _fetch_logs(
         headers=_auth_headers(settings),
         sleep=sleep,
     )
-    try:
-        if http_client is None:
-            async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
-                result = await reader.collect(client, service, window, sources)
-        else:
-            result = await reader.collect(http_client, service, window, sources)
-    except _DatadogFailure as exc:
-        logger.warning("fetch_logs_failed", service=service, kind=exc.kind, error=exc.message)
-        return _failure(exc.kind, exc.message)
+    if http_client is None:
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
+            result = await reader.collect(client, service, window, sources, deadline)
+    else:
+        result = await reader.collect(http_client, service, window, sources, deadline)
 
+    if isinstance(result, ToolFailure):
+        logger.warning("fetch_logs_failed", service=service, kind=result.kind, error=result.message)
+        return result
     logger.info(
         "fetch_logs_done",
         service=service,
         window_minutes=minutes,
+        sources=result.sources,
         synthetic_results=len(result.synthetic_results),
         deploy_logs=len(result.deploy_logs),
         truncated=result.truncated,
@@ -225,23 +242,62 @@ class _DatadogReader:
         service: str,
         window: LogWindow,
         sources: list[LogSource],
-    ) -> LogFetchResult:
-        truncated = False
-        synthetic_results: list[SyntheticResult] = []
-        deploy_logs: list[DeployLogEntry] = []
+        deadline: float,
+    ) -> LogFetchResult | ToolFailure:
+        """Read the sources concurrently within *deadline* seconds.
+
+        A source that fails, or is still reading at the deadline, is reported in
+        ``sources`` and the others are kept. Every source failing → ToolFailure.
+        """
+        tasks: dict[LogSource, asyncio.Future[tuple[list[Any], bool]]] = {}
         if "synthetics" in sources:
-            synthetic_results, cut = await self._synthetics(client, service, window)
-            truncated = truncated or cut
+            tasks["synthetics"] = asyncio.ensure_future(self._synthetics(client, service, window))
         if "deploys" in sources:
-            deploy_logs, cut = await self._deploy_logs(client, service, window)
-            truncated = truncated or cut
+            tasks["deploys"] = asyncio.ensure_future(self._deploy_logs(client, service, window))
+        _, pending = await asyncio.wait(tasks.values(), timeout=deadline)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        statuses: dict[LogSource, str] = {}
+        failures: list[tuple[LogSource, _DatadogFailure]] = []
+        read: dict[LogSource, tuple[list[Any], bool]] = {}
+        for source in sources:
+            task = tasks[source]
+            if task in pending:
+                failure = _DatadogFailure(f"no answer within the {deadline:g} s deadline")
+            else:
+                try:
+                    read[source] = task.result()
+                except _DatadogFailure as exc:
+                    failure = exc
+                else:
+                    statuses[source] = "ok"
+                    continue
+            failures.append((source, failure))
+            statuses[source] = f"failed: {failure.kind}: {failure.message}"
+            logger.warning(
+                "fetch_logs_source_failed",
+                service=service,
+                source=source,
+                kind=failure.kind,
+                error=failure.message,
+            )
+
+        if not read:
+            kinds: set[ToolFailureKind] = {failure.kind for _, failure in failures}
+            kind: ToolFailureKind = next(iter(kinds)) if len(kinds) == 1 else "upstream_error"
+            return _failure(kind, "; ".join(f"{src}: {f.message}" for src, f in failures))
+
+        synthetic_results, synthetics_cut = read.get("synthetics", ([], False))
+        deploy_logs, deploys_cut = read.get("deploys", ([], False))
         return LogFetchResult(
             service=service,
             window=window,
-            sources=sources,
+            sources=statuses,
             synthetic_results=synthetic_results,
             deploy_logs=deploy_logs,
-            truncated=truncated,
+            truncated=synthetics_cut or deploys_cut,
         )
 
     # ── Synthetics ───────────────────────────────────────────────────────────

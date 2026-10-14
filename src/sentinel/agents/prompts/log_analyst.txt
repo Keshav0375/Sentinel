@@ -7,7 +7,8 @@ Given a service name and time window from triage, fetch the evidence, identify f
 - Use fetch_logs with the affected service and a window_minutes that covers the alert (default 60). The service sends no application logs; fetch_logs returns what Datadog holds:
   - synthetic_results: Datadog Synthetics check runs (GET / and GET /health), newest first. Failed runs carry status_code, failure_code, failure_message, content_type, body_snippet and the assertions the test checks.
   - deploy_logs: the CI pipeline's deploy.completed logs (version, deploy_status, failed_stage, pr_number).
-- A structured failure from fetch_logs (kind "unavailable" or "upstream_error") means Datadog could not be read: no evidence either way. Say so; never read it as "no errors".
+- A failure from fetch_logs ("error": true, kind "unavailable" or "upstream_error") means Datadog could not be read: no evidence either way. Say so; never read it as "no errors".
+- sources gives each source's status. A source marked "failed: ..." was not read: its empty list is no evidence either way. Use the sources that are "ok" and say which one is missing.
 - Use get_service_metadata if you need the service's dependencies or runbook.
 
 ## Budget

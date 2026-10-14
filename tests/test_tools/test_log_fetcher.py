@@ -7,8 +7,11 @@ the auth headers, the time window and the retries. Sleeps are recorded, never aw
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
-from collections.abc import Callable
+import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -337,6 +340,32 @@ async def _fetch(
         )
 
 
+async def _fetch_with(
+    handler: Callable[[httpx.Request], Awaitable[httpx.Response]],
+    *,
+    deadline: float = 45.0,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+    **request: Any,
+) -> LogFetchResult | ToolFailure:
+    """``_fetch`` over an async handler (one that can stall) with a chosen deadline."""
+    request.setdefault("service", SERVICE)
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        return await _fetch_logs(
+            _settings(),
+            LogFetchInput(**request),
+            http_client=client,
+            sleep=sleep or Sleeps(),
+            clock=lambda: NOW,
+            deadline=deadline,
+        )
+
+
+def _result(result: LogFetchResult | ToolFailure) -> LogFetchResult:
+    assert isinstance(result, LogFetchResult), result
+    return result
+
+
 async def _invoke(tool: FunctionTool, arguments: dict[str, Any]) -> str:
     """Call the tool the way the Runner does: JSON arguments through on_invoke_tool.
 
@@ -392,7 +421,7 @@ async def test_invoked_with_json_args_returns_the_typed_result(dd: FakeDatadog) 
         )
     assert "deploy.completed" in result
     result = LogFetchResult.model_validate_json(result)
-    assert result.sources == ["deploys"]
+    assert result.sources == {"deploys": "ok"}
     assert result.window.start == NOW - timedelta(minutes=30)
     assert [e.version for e in result.deploy_logs] == ["pr-48-b1c2d3e", "pr-47-a3f9c2e"]
     assert dd.paths() == ["POST /api/v2/logs/events/search"]
@@ -405,7 +434,7 @@ async def test_invoked_with_defaults_reads_both_sources(dd: FakeDatadog) -> None
         )
         text = await _invoke(tool, {"request": {"service": SERVICE}})
     result = LogFetchResult.model_validate_json(text)
-    assert result.sources == ["synthetics", "deploys"]
+    assert result.sources == {"synthetics": "ok", "deploys": "ok"}
     assert result.window.end - result.window.start == timedelta(minutes=60)
     assert len(result.synthetic_results) == 5
     assert len(result.deploy_logs) == 2
@@ -609,7 +638,7 @@ async def test_no_tests_for_the_service_is_an_empty_list(dd: FakeDatadog) -> Non
     dd.tests = [TEST_OTHER_SERVICE]
     result = await _fetch(dd, include=["synthetics"])
     assert isinstance(result, LogFetchResult)
-    assert result.sources == ["synthetics"]
+    assert result.sources == {"synthetics": "ok"}
     assert result.synthetic_results == []
     assert dd.paths() == ["GET /api/v1/synthetics/tests"]
 
@@ -758,7 +787,7 @@ async def test_three_transient_failures_give_upstream_error(dd: FakeDatadog) -> 
 async def test_a_403_is_not_retried(dd: FakeDatadog) -> None:
     sleeps = Sleeps()
     dd.faults = [_status(403, json={"errors": ["Forbidden"]})]
-    result = await _fetch(dd, sleeps)
+    result = await _fetch(dd, sleeps, include=["synthetics"])
     assert isinstance(result, ToolFailure)
     assert result.kind == "upstream_error"
     assert "HTTP 403" in result.message
@@ -778,15 +807,91 @@ async def test_a_400_on_the_search_is_not_retried(dd: FakeDatadog) -> None:
     assert len(dd.requests) == 1
 
 
-async def test_a_failure_in_one_source_fails_the_call(dd: FakeDatadog) -> None:
-    """No half answer: an empty list must only ever mean "nothing recorded"."""
-    dd.faults = [
-        lambda r: httpx.Response(200, json={"tests": []}),
-        _status(403, json={"errors": ["Forbidden"]}),
-    ]
+async def test_a_failure_in_one_source_returns_the_others(dd: FakeDatadog) -> None:
+    """The deploy logs still come back; the failed source says so in ``sources``."""
+    dd.faults = [_status(403, json={"errors": ["Forbidden"]})]  # the synthetics listing
+    result = _result(await _fetch(dd))
+    assert result.sources["deploys"] == "ok"
+    status = result.sources["synthetics"]
+    assert status.startswith("failed: upstream_error: ")
+    assert "/api/v1/synthetics/tests" in status and "HTTP 403" in status
+    assert result.synthetic_results == []  # not read — not "nothing recorded"
+    assert [e.version for e in result.deploy_logs] == ["pr-48-b1c2d3e", "pr-47-a3f9c2e"]
+
+
+async def test_a_failed_deploy_search_keeps_the_synthetics(dd: FakeDatadog) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(400, json={"errors": ["invalid query"]}, request=request)
+        return dd.handler(request)
+
+    result = _result(await _fetch_with(handler))
+    assert result.sources["synthetics"] == "ok"
+    assert result.sources["deploys"].startswith("failed: upstream_error: ")
+    assert "invalid query" in result.sources["deploys"]
+    assert len(result.synthetic_results) == 5
+    assert result.deploy_logs == []
+
+
+async def test_every_source_failing_is_a_tool_failure(dd: FakeDatadog) -> None:
+    dd.faults = [_status(403, json={"errors": ["Forbidden"]})] * 2
     result = await _fetch(dd)
     assert isinstance(result, ToolFailure)
     assert result.kind == "upstream_error"
+    assert "synthetics: " in result.message and "deploys: " in result.message
+
+
+async def test_a_partial_result_reaches_the_model_as_json(dd: FakeDatadog) -> None:
+    dd.faults = [_status(403, json={"errors": ["Forbidden"]})]
+    async with dd.client() as client:
+        tool = make_log_fetcher_tool(
+            _settings(), http_client=client, sleep=Sleeps(), clock=lambda: NOW
+        )
+        data = json.loads(await _invoke(tool, {"request": {"service": SERVICE}}))
+    assert "error" not in data
+    assert data["sources"]["deploys"] == "ok"
+    assert data["sources"]["synthetics"].startswith("failed: upstream_error")
+
+
+# ── Overall deadline ──────────────────────────────────────────────────────────
+
+
+def test_the_default_deadline_is_45_seconds() -> None:
+    for fn in (make_log_fetcher_tool, _fetch_logs):
+        assert inspect.signature(fn).parameters["deadline"].default == 45.0
+
+
+async def test_a_source_past_the_deadline_is_failed_and_the_rest_returned(
+    dd: FakeDatadog,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            await asyncio.sleep(30)  # the logs search never answers in time
+        return dd.handler(request)
+
+    started = time.monotonic()
+    result = _result(await _fetch_with(handler, deadline=0.2))
+    assert time.monotonic() - started < 5
+    assert result.sources == {
+        "synthetics": "ok",
+        "deploys": "failed: upstream_error: no answer within the 0.2 s deadline",
+    }
+    assert len(result.synthetic_results) == 5
+    assert result.deploy_logs == []
+
+
+async def test_the_deadline_covers_retries_and_backoff(dd: FakeDatadog) -> None:
+    """Real sleeps between retries count against the one deadline for the call."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, request=request)
+
+    started = time.monotonic()
+    result = await _fetch_with(handler, deadline=0.2, sleep=asyncio.sleep)
+    assert time.monotonic() - started < 5
+    assert isinstance(result, ToolFailure)
+    assert result.kind == "upstream_error"
+    assert result.message.count("no answer within the 0.2 s deadline") == 2
 
 
 @pytest.mark.parametrize(

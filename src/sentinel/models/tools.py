@@ -174,14 +174,19 @@ class DeployLogEntry(BaseModel):
 class LogFetchResult(BaseModel):
     """Evidence ``fetch_logs`` read for a service over a time window, newest first.
 
-    ``sources`` names what was read: an empty list for a source that was read means
-    nothing was recorded in the window. ``truncated`` is true when entries were dropped
-    or text was cut to keep the payload small.
+    ``sources`` maps each requested source to ``"ok"`` or ``"failed: <kind>: <why>"``.
+    An empty list for an ``ok`` source means nothing was recorded in the window; a
+    failed source was not read — no finding either way — and its list is empty.
+    ``truncated`` is true when entries were dropped or text was cut to keep the
+    payload small.
     """
 
     service: str
     window: LogWindow
-    sources: list[LogSource] = Field(description="The evidence sources this call read.")
+    sources: dict[LogSource, str] = Field(
+        description='Each requested source → "ok", or "failed: <kind>: <why>" when it '
+        "could not be read (no finding either way)."
+    )
     synthetic_results: list[SyntheticResult] = []
     deploy_logs: list[DeployLogEntry] = []
     truncated: bool = False
