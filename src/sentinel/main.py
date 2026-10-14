@@ -261,11 +261,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("sentinel_ready")
         yield
     finally:
-        # Flushing can block on network I/O: off the loop. Never raises, so the pool
-        # below is always closed.
-        await asyncio.to_thread(shutdown_traces)
-        await close_pool()
-        logger.info("sentinel_shutdown")
+        # Flushing can block on network I/O, so it runs off the loop. shutdown_traces
+        # never raises, but the await can still be cancelled (e.g. a second SIGTERM):
+        # the nested finally closes the pool regardless.
+        try:
+            await asyncio.to_thread(shutdown_traces)
+        finally:
+            await close_pool()
+            logger.info("sentinel_shutdown")
 
 
 def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> None:

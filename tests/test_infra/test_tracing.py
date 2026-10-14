@@ -16,7 +16,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -762,6 +762,27 @@ async def test_lifespan_shuts_down_langfuse_on_exit(
 
     mock_client.shutdown.assert_called_once_with()
     assert shutdown_threads != [loop_thread]  # flushed off the event loop
+
+
+async def test_lifespan_closes_the_pool_when_shutdown_traces_is_cancelled(
+    light_lifespan: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    close_pool = AsyncMock()
+    monkeypatch.setattr(main, "close_pool", close_pool)
+    real_to_thread = asyncio.to_thread
+
+    async def _cancelled_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+        if func is main.shutdown_traces:
+            raise asyncio.CancelledError
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", _cancelled_to_thread)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with main.lifespan(FastAPI()):
+            pass
+
+    close_pool.assert_awaited_once_with()
 
 
 async def test_lifespan_shuts_down_langfuse_after_failed_startup(
