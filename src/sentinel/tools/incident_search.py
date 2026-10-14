@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from agents import FunctionTool, function_tool
 
+from sentinel.exceptions import SentinelMemoryError
+from sentinel.infra.logging import get_logger
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.models.memory import MemoryQueryResult
+
+logger = get_logger("sentinel.tools.incident_search")
 
 
 def make_incident_search_tool(memory: EpisodicMemory) -> FunctionTool:
@@ -60,7 +64,13 @@ async def _search_past_incidents(
     if top_k <= 0:
         return "ERROR: 'top_k' must be a positive integer."
 
-    result = await memory.query(symptom_query, top_k=top_k)
+    try:
+        result = await memory.query(symptom_query, top_k=top_k)
+    except SentinelMemoryError as exc:
+        # No database configured, or it failed: say so plainly — an empty result here
+        # would read as "no similar incidents", which is a different (false) finding.
+        logger.warning("incident_search_memory_unavailable", error=str(exc))
+        return f"ERROR: memory unavailable — past incidents cannot be searched ({exc})."
     return _format_results(result)
 
 

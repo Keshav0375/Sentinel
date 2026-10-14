@@ -99,7 +99,7 @@ class AlertDeduplicator:
 
 def _new_incident_id() -> str:
     """Generate a unique incident ID in the same format as ``Incident.id``."""
-    return f"inc-{uuid.uuid4().hex[:8]}"
+    return str(uuid.uuid4())
 
 
 def make_alert_router(

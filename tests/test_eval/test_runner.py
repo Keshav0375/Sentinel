@@ -389,6 +389,7 @@ def _settings_mock(tmp_path: Path) -> MagicMock:
     s.sentinel_analysis_model = "llama-3.3-70b-versatile"
     s.sentinel_triage_model = "llama-3.1-8b-instant"
     s.sentinel_log_level = "INFO"
+    s.database_url = ""  # no Postgres: run_eval builds episodic memory with pool=None
     return s
 
 
@@ -427,6 +428,34 @@ class TestRunEval:
 
         assert len(results) == 1
         assert results[0].scenario_id == "bad_deploy_01"
+
+    async def test_episodic_memory_gets_the_pool_and_pool_is_closed(self, tmp_path: Path) -> None:
+        """run_eval opens the Postgres pool, hands it to EpisodicMemory, closes it after."""
+        pool = MagicMock(name="pool")
+        with (
+            patch("sentinel.eval.runner.get_settings", return_value=_settings_mock(tmp_path)),
+            patch("sentinel.eval.runner.configure_logging"),
+            patch("sentinel.eval.runner.create_tables", new_callable=AsyncMock),
+            patch(
+                "sentinel.eval.runner.init_pool_from_settings",
+                new_callable=AsyncMock,
+                return_value=pool,
+            ),
+            patch("sentinel.eval.runner.close_pool", new_callable=AsyncMock) as close_pool,
+            patch("sentinel.eval.runner.EmbeddingClient") as embedding_cls,
+            patch("sentinel.eval.runner.SemanticMemory"),
+            patch("sentinel.eval.runner.EpisodicMemory") as episodic_cls,
+            patch("sentinel.eval.runner.ShortTermMemory"),
+            patch("sentinel.eval.runner.apply_sdk_defaults"),
+            patch("sentinel.eval.runner.SentinelTracer"),
+            patch("sentinel.eval.runner.add_trace_processor"),
+            patch("sentinel.eval.runner.load_scenario", side_effect=FileNotFoundError("x")),
+            patch.dict(sys.modules, {"data": MagicMock(), "data.seed": _FAKE_SEED_MOD}),
+        ):
+            await run_eval(scenario_ids=["missing"], db_path=tmp_path / "test.db")
+
+        episodic_cls.assert_called_once_with(pool, embedding_cls.from_model_name.return_value)
+        close_pool.assert_awaited_once()
 
     async def test_unknown_scenario_skipped(self, tmp_path: Path) -> None:
         """Scenarios that don't exist are skipped, not crash the batch."""

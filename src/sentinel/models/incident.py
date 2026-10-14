@@ -92,7 +92,8 @@ class Incident(BaseModel):
     re-typed once those models exist.
     """
 
-    id: str = Field(default_factory=lambda: f"inc-{uuid.uuid4().hex[:8]}")
+    # A UUID string: episodic memory stores it as incidents.id (UUID, §5.3).
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     alert: AlertPayload
     status: IncidentStatus = IncidentStatus.TRIAGE
     severity: Severity | None = None

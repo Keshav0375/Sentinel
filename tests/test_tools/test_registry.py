@@ -77,7 +77,7 @@ async def test_tool_deps_with_real_memory_objects(tmp_path: Path) -> None:
 
     client = EmbeddingClient(MagicMock())
     semantic = SemanticMemory(db_path)
-    episodic = EpisodicMemory(db_path, client)
+    episodic = EpisodicMemory(None, client)  # no pool: constructs; calls would raise
 
     deps = ToolDeps(semantic_memory=semantic, episodic_memory=episodic)
     assert isinstance(deps.semantic_memory, SemanticMemory)

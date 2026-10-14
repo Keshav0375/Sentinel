@@ -32,9 +32,10 @@ def semantic_memory(db_path: Path) -> SemanticMemory:
 
 
 @pytest.fixture()
-def episodic_memory(db_path: Path) -> EpisodicMemory:
+def episodic_memory() -> EpisodicMemory:
+    # No pool: the agent is only built here, never run, so memory is never called.
     mock_client = MagicMock()
-    return EpisodicMemory(db_path, mock_client)
+    return EpisodicMemory(None, mock_client)
 
 
 @pytest.fixture()

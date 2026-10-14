@@ -22,7 +22,7 @@ Usage::
 
     deps = ToolDeps(
         semantic_memory=SemanticMemory(db_path),
-        episodic_memory=EpisodicMemory(db_path, embedding_client),
+        episodic_memory=EpisodicMemory(pool, embedding_client),  # pool: asyncpg.Pool | None
         scenario=loaded_scenario,
     )
     tools = build_tools(deps)

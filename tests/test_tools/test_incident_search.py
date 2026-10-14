@@ -1,14 +1,20 @@
-"""Tests for sentinel.tools.incident_search — search_past_incidents tool."""
+"""Tests for sentinel.tools.incident_search — search_past_incidents tool.
+
+Unit tests: no database. The tool is exercised against an in-memory stand-in for
+EpisodicMemory (ranked by the same keyword-cluster embeddings), and against a real
+EpisodicMemory with no pool for the "memory unavailable" path. The pgvector ranking
+itself is covered by tests/test_memory/test_episodic.py.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 from agents import FunctionTool
 
-from sentinel.infra.db import create_tables
+from sentinel.exceptions import SentinelMemoryError
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
@@ -49,6 +55,50 @@ class _KeywordFakeModel:
         return np.array(result, dtype=np.float32)
 
 
+class _InMemoryEpisodic(EpisodicMemory):
+    """EpisodicMemory stand-in: keeps records in a list, ranks by dot product.
+
+    Only store_incident and query are overridden — the two calls the tool path uses.
+    """
+
+    def __init__(self, client: EmbeddingClient) -> None:
+        super().__init__(None, client)
+        self._client = client
+        self._records: list[EpisodicRecord] = []
+
+    async def store_incident(self, incident: Incident) -> None:
+        symptoms = f"Service {incident.alert.service} {incident.alert.metric}"
+        self._records.append(
+            EpisodicRecord(
+                id=incident.id,
+                service_name=incident.alert.service,
+                severity=incident.severity.value if incident.severity else "P3",
+                symptoms=symptoms,
+                root_cause="unknown",
+                resolution="unresolved",
+                embedding=await self._client.embed(symptoms),
+            )
+        )
+
+    async def query(self, query_input: Any, *, top_k: int = 5) -> MemoryQueryResult:
+        q = await self._client.embed(str(query_input))
+        scored = sorted(
+            ((sum(a * b for a, b in zip(q, r.embedding)), r) for r in self._records),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )[:top_k]
+        return MemoryQueryResult(
+            records=[r for _, r in scored], similarity_scores=[s for s, _ in scored]
+        )
+
+
+class _FailingEpisodic(EpisodicMemory):
+    """EpisodicMemory whose database fails mid-query."""
+
+    async def query(self, query_input: Any, *, top_k: int = 5) -> MemoryQueryResult:
+        raise SentinelMemoryError("database operation failed: ConnectionDoesNotExistError")
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -76,20 +126,13 @@ def _make_incident(
 
 
 @pytest.fixture()
-async def db_path(tmp_path: Path) -> Path:
-    path = tmp_path / "test_incident_search.db"
-    await create_tables(path)
-    return path
-
-
-@pytest.fixture()
 def client() -> EmbeddingClient:
     return EmbeddingClient(_KeywordFakeModel())
 
 
 @pytest.fixture()
-def mem(db_path: Path, client: EmbeddingClient) -> EpisodicMemory:
-    return EpisodicMemory(db_path, client)
+def mem(client: EmbeddingClient) -> EpisodicMemory:
+    return _InMemoryEpisodic(client)
 
 
 @pytest.fixture()
@@ -175,6 +218,25 @@ async def test_zero_top_k_returns_error(mem: EpisodicMemory) -> None:
 async def test_negative_top_k_returns_error(mem: EpisodicMemory) -> None:
     result = await _search_past_incidents(mem, "connection pool", -1)
     assert "ERROR" in result
+
+
+# ── _search_past_incidents — memory unavailable ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_memory_reports_unavailable(client: EmbeddingClient) -> None:
+    """No DATABASE_URL (pool None): a clear tool result, not a crash or an empty hit list."""
+    result = await _search_past_incidents(EpisodicMemory(None, client), "connection pool", 3)
+    assert result.startswith("ERROR: memory unavailable")
+    assert "no database configured" in result
+    assert "No similar past incidents found" not in result
+
+
+@pytest.mark.asyncio
+async def test_database_failure_reports_unavailable(client: EmbeddingClient) -> None:
+    result = await _search_past_incidents(_FailingEpisodic(None, client), "connection pool", 3)
+    assert result.startswith("ERROR: memory unavailable")
+    assert "ConnectionDoesNotExistError" in result
 
 
 # ── _search_past_incidents — successful retrieval ────────────────────────────

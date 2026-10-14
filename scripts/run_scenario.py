@@ -36,6 +36,7 @@ from sentinel.agents.remediation import build_remediation_agent  # noqa: E402
 from sentinel.agents.triage import build_triage_agent  # noqa: E402
 from sentinel.config import get_settings  # noqa: E402
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario  # noqa: E402
+from sentinel.infra.database import close_pool, init_pool_from_settings  # noqa: E402
 from sentinel.infra.db import create_tables  # noqa: E402
 from sentinel.infra.logging import configure_logging  # noqa: E402
 from sentinel.infra.tracing import SentinelTracer  # noqa: E402
@@ -151,7 +152,9 @@ async def run_scenario(
     # ── Memory clients ─────────────────────────────────────────────────────────
     embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
     semantic_memory = SemanticMemory(resolved_db)
-    episodic_memory = EpisodicMemory(resolved_db, embedding_client)
+    # Postgres pool for episodic memory; None without DATABASE_URL (memory unavailable).
+    pool = await init_pool_from_settings(settings)
+    episodic_memory = EpisodicMemory(pool, embedding_client)
     short_term_memory = ShortTermMemory()
     print(f"  [OK] embedding model: {settings.sentinel_embedding_model}")
 
@@ -255,6 +258,8 @@ async def run_scenario(
             short_term_memory.update_context(incident_id, status=IncidentStatus.ESCALATED)
         except KeyError:
             pass
+    finally:
+        await close_pool()
 
     # ── Print timeline ─────────────────────────────────────────────────────────
     _print_header("Incident Timeline")
