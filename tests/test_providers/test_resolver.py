@@ -122,3 +122,33 @@ def test_resolve_unsupported_provider_error_lists_supported() -> None:
     settings = _settings()
     with pytest.raises(ValueError, match="groq"):
         resolve_model("mistral/mistral-large", settings)
+
+
+# ── Missing keys fail at use, not at boot ─────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("model_string", "env_var"),
+    [
+        ("groq/llama-3.1-8b-instant", "GROQ_API_KEY"),
+        ("openai/gpt-4o-mini", "OPENAI_API_KEY"),
+        ("anthropic/claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
+        ("azure/gpt-4o-deployment", "AZURE_API_KEY"),
+    ],
+)
+def test_resolve_missing_key_raises_naming_env_var(model_string: str, env_var: str) -> None:
+    settings = Settings(
+        groq_api_key=None,
+        openai_api_key=None,
+        anthropic_api_key=None,
+        azure_api_key=None,
+        azure_api_base="https://myresource.openai.azure.com/",
+    )
+    with pytest.raises(ValueError, match=f"requires {env_var} to be set"):
+        resolve_model(model_string, settings)
+
+
+def test_resolve_azure_missing_api_base_raises() -> None:
+    settings = _settings(azure_api_key="azure-key-test", azure_api_base="")
+    with pytest.raises(ValueError, match="requires AZURE_API_BASE to be set"):
+        resolve_model("azure/gpt-4o-deployment", settings)

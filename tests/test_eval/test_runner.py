@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from sentinel.eval.runner import (
     EvalRunResult,
@@ -382,10 +383,10 @@ def _settings_mock(tmp_path: Path) -> MagicMock:
     s = MagicMock()
     s.sentinel_db_path = tmp_path / "test.db"
     s.sentinel_embedding_model = "all-MiniLM-L6-v2"
-    s.groq_api_key = "test-key"
+    s.groq_api_key = SecretStr("test-key")
     s.groq_base_url = "https://api.groq.com/openai/v1"
     s.sentinel_judge_model = "llama-3.1-8b-instant"
-    s.sentinel_max_tool_calls = 15
+    s.sentinel_max_tool_calls = 20
     s.sentinel_analysis_model = "llama-3.3-70b-versatile"
     s.sentinel_triage_model = "llama-3.1-8b-instant"
     s.sentinel_log_level = "INFO"

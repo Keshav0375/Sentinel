@@ -256,7 +256,7 @@ async def test_pipeline_fn_respects_max_turns() -> None:
 
 @pytest.mark.asyncio
 async def test_pipeline_fn_default_max_turns() -> None:
-    """Default max_turns matches the documented tool-call cap (15)."""
+    """Default max_turns matches the documented tool-call cap (20, §4.6)."""
     stm = _populated_stm()
     captured: list[dict[str, Any]] = []
 
@@ -271,4 +271,20 @@ async def test_pipeline_fn_default_max_turns() -> None:
         fn = _make_fn(stm)
         await fn("inc-test0001", _make_alert())
 
-    assert captured[0]["max_turns"] == 15
+    assert captured[0]["max_turns"] == 20
+
+
+@pytest.mark.asyncio
+async def test_pipeline_fn_escalates_when_provider_key_missing() -> None:
+    """Keys are optional at boot: a missing one fails the incident at use, not the task."""
+    stm = _populated_stm()
+
+    def keyless_settings() -> Settings:
+        return Settings(groq_api_key=None, _env_file=None)  # type: ignore[call-arg]
+
+    with patch("sentinel.main.Runner.run", new_callable=AsyncMock) as run:
+        fn = make_pipeline_fn(keyless_settings, MagicMock(), MagicMock(), stm)
+        await fn("inc-test0001", _make_alert())
+
+    run.assert_not_awaited()
+    assert stm.get_context("inc-test0001")["status"] == IncidentStatus.ESCALATED

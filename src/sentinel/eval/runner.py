@@ -30,7 +30,7 @@ from sentinel.agents.log_analyst import build_log_analyst_agent
 from sentinel.agents.orchestrator import build_orchestrator_agent
 from sentinel.agents.remediation import build_remediation_agent
 from sentinel.agents.triage import build_triage_agent
-from sentinel.config import Settings, get_settings
+from sentinel.config import Settings, get_settings, secret_value
 from sentinel.eval.judge import evaluate_trajectory
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario
 from sentinel.generator.scenarios import Scenario
@@ -73,7 +73,7 @@ async def run_scenario_eval(
     trajectories_dir: Path,
     settings: Settings,
     judge_model: str,
-    max_turns: int = 15,
+    max_turns: int = 20,
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
 ) -> EvalRunResult:
@@ -148,7 +148,7 @@ async def run_scenario_eval(
 
     # Judge uses Groq directly (not LiteLLM) — strip provider prefix if present.
     groq_client = AsyncOpenAI(
-        api_key=settings.groq_api_key,
+        api_key=secret_value(settings.groq_api_key, "GROQ_API_KEY"),
         base_url=settings.groq_base_url,
     )
 

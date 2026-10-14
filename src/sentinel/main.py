@@ -137,7 +137,7 @@ def make_pipeline_fn(
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     short_term_memory: ShortTermMemory,
-    max_turns: int = 15,
+    max_turns: int = 20,
     event_bus: EventBus | None = None,
     approval_fn: ApprovalFn | None = None,
 ) -> PipelineFn:
@@ -173,12 +173,13 @@ def make_pipeline_fn(
             except FileNotFoundError:
                 logger.warning("scenario_not_found", scenario_id=scenario_id)
 
-        orchestrator = _build_orchestrator_for_scenario(
-            scenario, settings, semantic_memory, episodic_memory, approval_fn
-        )
-
         token = set_current_incident(incident_id)
         try:
+            # Built inside the try: a provider key missing at use (keys are optional at
+            # boot) escalates this incident instead of escaping the background task.
+            orchestrator = _build_orchestrator_for_scenario(
+                scenario, settings, semantic_memory, episodic_memory, approval_fn
+            )
             input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
             with agent_trace(
                 "incident_pipeline",

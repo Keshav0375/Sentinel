@@ -44,5 +44,5 @@ def apply_sdk_defaults(settings: Settings) -> None:
         settings: Validated Settings instance from config.py.
     """
     set_default_openai_api("chat_completions")
-    if not settings.openai_api_key.strip():
+    if settings.openai_api_key is None:
         set_tracing_export_api_key("")

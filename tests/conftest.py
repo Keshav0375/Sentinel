@@ -38,8 +38,9 @@ _LANGFUSE_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Before collection: a dummy GROQ_API_KEY (Settings requires one), never a real one,
-    and no LangFuse keys — a keyless langfuse client is a disabled no-op (no network)."""
+    """Before collection: a dummy GROQ_API_KEY (Settings boots without one, but agents
+    built from the default groq/ models need one), and no LangFuse keys — a keyless
+    langfuse client is a disabled no-op (no network)."""
     os.environ.setdefault("GROQ_API_KEY", "fake-key-for-tests")
     for var in _LANGFUSE_KEYS:
         os.environ.pop(var, None)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from agents.extensions.models.litellm_model import LitellmModel
+from pydantic import SecretStr
 
 from sentinel.config import Settings
 
@@ -30,16 +31,16 @@ def resolve_model(model_string: str, settings: Settings) -> LitellmModel:
             - 'openai/gpt-4o'
             - 'anthropic/claude-sonnet-4-6'
             - 'azure/my-gpt4o-deployment'
-        settings: Fully-validated Settings instance. The model validator in
-            config.py ensures the matching API key is non-empty before this
-            function is called.
+        settings: Settings instance. Provider keys are optional at boot, so the
+            matching key is checked here, when an agent is actually built.
 
     Returns:
         LitellmModel configured with the correct API key for the provider.
 
     Raises:
-        ValueError: If model_string has no '/' separator or if the provider
-            prefix is not one of the four supported providers.
+        ValueError: If model_string has no '/' separator, if the provider
+            prefix is not one of the four supported providers, or if the
+            provider's API key (or, for Azure, AZURE_API_BASE) is not set.
     """
     if "/" not in model_string:
         raise ValueError(
@@ -56,10 +57,16 @@ def resolve_model(model_string: str, settings: Settings) -> LitellmModel:
             f"Supported providers: {sorted(_PROVIDER_KEY_FIELDS)}"
         )
 
-    api_key: str = getattr(settings, _PROVIDER_KEY_FIELDS[provider])
+    key_field = _PROVIDER_KEY_FIELDS[provider]
+    key: SecretStr | None = getattr(settings, key_field)
+    if key is None:
+        raise ValueError(f"{model_string!r} requires {key_field.upper()} to be set")
+    api_key = key.get_secret_value()
 
     # Azure requires endpoint + version in env for LiteLLM to route correctly.
     if provider == "azure":
+        if not settings.azure_api_base.strip():
+            raise ValueError(f"{model_string!r} requires AZURE_API_BASE to be set")
         os.environ["AZURE_API_BASE"] = settings.azure_api_base
         os.environ["AZURE_API_VERSION"] = settings.azure_api_version
 
