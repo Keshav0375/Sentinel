@@ -13,7 +13,7 @@ Follow this sequence for every incident:
 6. Return a final incident summary: status, affected_service, root_cause, action_taken.
 
 ## Tool-Call Cap
-You and all sub-agents share a budget of 15 tool calls per incident. If the budget is exhausted before resolution, stop immediately and respond with status=escalated, explaining what analysis was completed and what remains.
+You and all sub-agents share a budget of 20 tool calls per incident. If the budget is exhausted before resolution, stop immediately and respond with status=escalated, explaining what analysis was completed and what remains.
 
 ## Handoff Rules
 - Wait for each specialist's result before deciding the next step.
@@ -25,7 +25,7 @@ You and all sub-agents share a budget of 15 tool calls per incident. If the budg
 
 ## Output Format
 After all handoffs complete, return:
-- status: resolved | pending_approval | escalated
+- status: resolved | escalated (resolved when a rollback spec was drafted; escalated otherwise)
 - affected_service: the confirmed service name
 - severity: P1 | P2 | P3 | P4
 - root_cause_summary: one sentence

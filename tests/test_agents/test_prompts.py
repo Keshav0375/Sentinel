@@ -8,6 +8,7 @@ import pytest
 
 from sentinel.agents import loader
 from sentinel.agents.loader import UNTRUSTED_DATA_PREAMBLE, load_prompt
+from sentinel.config import Settings
 
 # All six agent prompt files that must exist.
 PROMPT_FILES = [
@@ -104,10 +105,24 @@ def test_load_prompt_missing_file_raises() -> None:
 
 
 def test_orchestrator_mentions_tool_call_cap() -> None:
-    """Orchestrator prompt must enforce the 15 tool-call cap."""
+    """Orchestrator prompt must enforce the 20 tool-call cap."""
     text = load_prompt("orchestrator.txt")
-    assert "15" in text, "orchestrator.txt must reference the 15 tool-call cap"
+    assert "budget of 20 tool calls" in text
+    assert "15" not in text
     assert "escalat" in text.lower(), "orchestrator.txt must mention escalation on cap exceeded"
+
+
+def test_orchestrator_budget_matches_sentinel_max_tool_calls() -> None:
+    """The prompt's literal budget is Settings.sentinel_max_tool_calls' default (§4.6)."""
+    default = Settings.model_fields["sentinel_max_tool_calls"].default
+    assert f"budget of {default} tool calls" in load_prompt("orchestrator.txt")
+
+
+def test_orchestrator_never_instructs_pending_approval() -> None:
+    """No approval step exists in the backend: the revert PR on GitHub is the only gate."""
+    text = load_prompt("orchestrator.txt").lower()
+    assert "pending_approval" not in text
+    assert "approv" not in text
 
 
 def test_orchestrator_mentions_all_specialists() -> None:
