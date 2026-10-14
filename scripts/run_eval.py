@@ -33,6 +33,7 @@ from sentinel.eval.runner import (  # noqa: E402
     scores_from_results,
     summary_stats,
 )
+from sentinel.infra.tracing import flush_traces  # noqa: E402
 
 _REPORTS_DIR = _PROJECT_ROOT / "reports"
 _PASS_THRESHOLD = 3.0
@@ -147,3 +148,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nAborted.")
         sys.exit(0)
+    finally:
+        flush_traces()

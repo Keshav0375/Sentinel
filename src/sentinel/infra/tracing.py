@@ -1,6 +1,35 @@
-"""Agent trace capture — records every tool call and handoff for eval.
+"""Tracing — LangFuse (observe, prompts, scores) and agent trace capture for eval.
 
-Usage::
+LangFuse (langfuse v3, backend §6) — the surface the agent pipeline uses::
+
+    from sentinel.infra.tracing import load_prompt, observe, push_score, trace_incident
+
+    with trace_incident(incident_id, correlation_id, service) as trace_id:
+        # root "incident-pipeline" observation; trace_id == incident_trace_id(incident_id)
+        # goes into RunContext and incidents.langfuse_trace_id
+        await Runner.run(orchestrator, ..., context=RunContext(..., langfuse_trace_id=trace_id))
+
+    @observe(name="triage-agent", as_type="agent")   # nests under the active trace
+    async def run_triage(...): ...
+
+    @observe(name="fetch-logs", as_type="tool")
+    async def fetch_logs(...): ...
+
+    prompt = await load_prompt("triage")      # TextPromptClient, or the prompts/ file text
+    push_score(trace_id, "triage_accuracy", 0.9)
+
+- ``observe`` / ``propagate_attributes`` / ``get_client`` are re-exported from ``langfuse``.
+  An ``@observe`` root call can instead take ``langfuse_trace_id=incident_trace_id(...)``.
+- ``shutdown_traces()`` runs in the FastAPI lifespan on exit; CLI/eval entry points call
+  ``flush_traces()`` before returning. Neither raises.
+- The client reads ``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY`` / ``LANGFUSE_BASE_URL``
+  from the environment. Without both keys it is disabled: ``@observe`` and ``push_score``
+  are no-ops, ``load_prompt`` serves the file, nothing touches the network. A blank key is
+  treated as absent, and the SDK's per-call "client will be disabled" warning is muted —
+  the lifespan reports the state once (``configure_langfuse()`` → ``langfuse_enabled``).
+- LLM generations (tokens, model, cost) are not captured here (R14, §6.2 gap).
+
+Agent trace capture (openai-agents ``TracingProcessor``) — unchanged::
 
     tracer = SentinelTracer(short_term_memory, trajectories_dir=Path("reports"))
     add_trace_processor(tracer)
@@ -19,9 +48,14 @@ The tracer then:
 from __future__ import annotations
 
 import json
+import logging
+import os
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 from agents import (
     FunctionSpanData,
@@ -31,13 +65,148 @@ from agents import (
     TracingProcessor,
 )
 
+# langfuse types observe's transform_to_string as Callable[[Iterable], str] — a bare
+# Iterable, which pyright reports as partially unknown.
+from langfuse import (
+    get_client,
+    observe,  # pyright: ignore[reportUnknownVariableType]
+    propagate_attributes,
+)
+from langfuse.model import TextPromptClient
+
 from sentinel.infra.logging import get_logger
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.incident import TimelineEntry
 
+__all__ = [
+    "PIPELINE_TRACE_NAME",
+    "SentinelTracer",
+    "configure_langfuse",
+    "flush_traces",
+    "get_client",
+    "incident_trace_id",
+    "langfuse_enabled",
+    "load_prompt",
+    "observe",
+    "propagate_attributes",
+    "push_score",
+    "shutdown_traces",
+    "trace_incident",
+]
+
 logger = get_logger("sentinel.infra.tracing")
 
 _SENTINEL_TRACE_KEY = "incident_id"
+
+# ── LangFuse (backend §6) ─────────────────────────────────────────────────────
+
+PIPELINE_TRACE_NAME = "incident-pipeline"
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents" / "prompts"
+_PROMPT_CACHE_TTL_SECONDS = 300
+_KEY_VARS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
+_ATTR_MAX_CHARS = 200  # propagate_attributes drops (not truncates) longer values
+
+
+class _MuteKeylessWarning(logging.Filter):
+    """Drop the SDK's "initialized without public_key/secret_key" warning.
+
+    A keyless client is a fresh object per ``get_client()`` call, so the SDK would log it on
+    every ``@observe`` call; the disabled state is reported once by the lifespan instead.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Client will be disabled" not in record.getMessage()
+
+
+def configure_langfuse() -> bool:
+    """Treat blank keys as absent and mute the per-call keyless warning; True if enabled.
+
+    The SDK only disables itself when a key is *missing*: a blank one (``KEY=`` in an env
+    file) would build a live client with empty credentials that exports to the network.
+    Idempotent. Runs at import, and again from the app lifespan — litellm loads ``.env``
+    into the environment when it is first imported, which can be after this module.
+    """
+    for var in _KEY_VARS:
+        if var in os.environ and not os.environ[var].strip():
+            del os.environ[var]
+    sdk_logger = logging.getLogger("langfuse")
+    if not any(isinstance(f, _MuteKeylessWarning) for f in sdk_logger.filters):
+        sdk_logger.addFilter(_MuteKeylessWarning())
+    return langfuse_enabled()
+
+
+def langfuse_enabled() -> bool:
+    """True when both LangFuse keys are set — otherwise the client is a disabled no-op."""
+    return all(os.environ.get(var, "").strip() for var in _KEY_VARS)
+
+
+configure_langfuse()
+
+
+def incident_trace_id(incident_id: UUID | str) -> str:
+    """The LangFuse trace id for an incident: the UUID as 32 lowercase hex (W3C, §4.5)."""
+    return UUID(str(incident_id)).hex
+
+
+@contextmanager
+def trace_incident(
+    incident_id: UUID | str, correlation_id: UUID | str, service: str
+) -> Generator[str]:
+    """Open the root ``incident-pipeline`` observation of an incident's trace.
+
+    Equivalent to an ``@observe(name="incident-pipeline")`` root called with
+    ``langfuse_trace_id=incident_trace_id(incident_id)``, plus the trace attributes of §6.2
+    (``correlation_id`` metadata, ``["incident", service]`` tags) propagated to every child
+    observation. Yields the trace id. With LangFuse disabled the observation is a no-op; it still
+    yields the same id.
+    """
+    trace_id = incident_trace_id(incident_id)
+    with (
+        get_client().start_as_current_observation(
+            name=PIPELINE_TRACE_NAME, trace_context={"trace_id": trace_id}
+        ),
+        propagate_attributes(
+            metadata={"correlation_id": str(correlation_id)[:_ATTR_MAX_CHARS]},
+            tags=["incident", service[:_ATTR_MAX_CHARS]],
+        ),
+    ):
+        yield trace_id
+
+
+async def load_prompt(agent_name: str) -> TextPromptClient | str:
+    """An agent's system prompt: LangFuse first, ``agents/prompts/{agent_name}.txt`` otherwise.
+
+    Returns the ``TextPromptClient`` (callers use ``.compile(**vars)``; it carries the
+    prompt version) or the file text. Any LangFuse failure falls back to the file — a
+    disabled client raises in ``get_prompt``. Raises ``FileNotFoundError`` only when both fail.
+    """
+    try:
+        return get_client().get_prompt(agent_name, cache_ttl_seconds=_PROMPT_CACHE_TTL_SECONDS)
+    except Exception as exc:
+        log = logger.warning if langfuse_enabled() else logger.debug
+        log("prompt_fallback_to_file", agent_name=agent_name, error=str(exc))
+        return (_PROMPTS_DIR / f"{agent_name}.txt").read_text(encoding="utf-8")
+
+
+def push_score(trace_id: str, name: str, value: float) -> None:
+    """Attach a numeric trace-level score (judge eval dimension, §6.4). No-op when disabled."""
+    get_client().create_score(trace_id=trace_id, name=name, value=value, data_type="NUMERIC")
+
+
+def flush_traces() -> None:
+    """Send pending spans and scores now — CLI/eval entry points call this before exiting."""
+    try:
+        get_client().flush()
+    except Exception as exc:
+        logger.warning("langfuse_flush_failed", error=str(exc))
+
+
+def shutdown_traces() -> None:
+    """Flush and stop the LangFuse client — the FastAPI lifespan calls this on exit."""
+    try:
+        get_client().shutdown()
+    except Exception as exc:
+        logger.warning("langfuse_shutdown_failed", error=str(exc))
 
 
 class SentinelTracer(TracingProcessor):

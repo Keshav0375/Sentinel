@@ -50,7 +50,7 @@ from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.db import create_tables
 from sentinel.infra.event_bus import EventBus
 from sentinel.infra.logging import configure_logging, get_logger
-from sentinel.infra.tracing import SentinelTracer
+from sentinel.infra.tracing import SentinelTracer, configure_langfuse, shutdown_traces
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
@@ -229,10 +229,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     6. Build specialist agents and orchestrator.
     7. Wire alert deduplicator and pipeline callback.
     8. Mount all API routers.
+
+    On exit (or a failed startup) the LangFuse client is shut down (flushing pending
+    spans) and the asyncpg pool is closed.
     """
     settings = get_settings()
     configure_logging(settings.sentinel_log_level)
-    logger.info("sentinel_startup", db_path=str(settings.sentinel_db_path))
+    logger.info(
+        "sentinel_startup",
+        db_path=str(settings.sentinel_db_path),
+        langfuse_enabled=configure_langfuse(),
+    )
 
     # ── Database ──────────────────────────────────────────────────────────────
     await create_tables(settings.sentinel_db_path)
@@ -253,6 +260,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("sentinel_ready")
         yield
     finally:
+        shutdown_traces()  # never raises, so the pool below is always closed
         await close_pool()
         logger.info("sentinel_shutdown")
 
