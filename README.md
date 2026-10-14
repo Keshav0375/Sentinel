@@ -145,7 +145,7 @@ _This is the architectural view of Phase 2._ Deep-dive docs live in the
 
 ---
 
-**Autonomous DevOps incident response agent** — multi-agent pipeline that triages alerts, diagnoses root causes, drafts remediation plans, and communicates status, with a mandatory human-approval gate before any destructive action.
+**Autonomous DevOps incident response agent** — multi-agent pipeline that triages alerts, diagnoses root causes, drafts a rollback or an escalation, and writes the incident summary. The backend never acts on the world: it drafts a rollback spec, GitHub Actions opens the revert PR on Sentinel-deployment, and a human merges (or closes) it.
 
 Built as a portfolio project demonstrating production-grade agentic engineering: multi-agent orchestration, HITL safety, episodic memory, trajectory evaluation, and real-time observability.
 
@@ -159,26 +159,24 @@ Alert fires
     ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      Orchestrator Agent                      │
-│  (coordinates handoffs, enforces 15-call cap, writes STM)   │
+│  (coordinates handoffs, enforces 20-call cap, writes STM)   │
 └──┬──────────┬──────────┬──────────┬──────────┬─────────────┘
    │          │          │          │          │
    ▼          ▼          ▼          ▼          ▼
 Triage    Log      Deploy    Remediation  Comms
 Agent   Analyst  Correlator   Agent      Agent
-   │       │          │          │          │
-   │    fetch_     list_      draft_    draft_
-get_    logs    recent_   rollback_  slack_
-service_         deploys      pr     summary
-metadata                       │
-search_                 request_human_
-past_                   approval ◄── HITL gate
+   │       │          │          │       (no tools:
+get_    fetch_     get_      prepare_   writes the
+service_ logs     deploy_   rollback_   summary)
+metadata          details    spec  or
+search_                     format_
+past_                       escalation
 incidents                      │
                                ▼
-                        Human approves / rejects
+              Rollback spec ──► GitHub Actions opens the revert PR
                                │
                                ▼
-                     Incident resolved + stored
-                     in episodic memory
+                     A human merges (or closes) it on GitHub
 ```
 
 Every tool call is captured as a trajectory. After resolution, an LLM judge scores the trajectory across 6 dimensions and writes a report viewable in the web dashboard.
@@ -287,7 +285,7 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 
 1. Select `bad_deploy_01` from the dropdown — a critical API gateway alert fires
 2. Watch the five agent cards light up in sequence as each specialist completes its analysis
-3. The Remediation Agent drafts a rollback spec (or an escalation) and the incident resolves — nothing is approved or executed from the dashboard
+3. The Remediation Agent drafts a rollback spec (or an escalation) and the incident resolves
 4. Switch to `/eval` to see the LLM judge's per-dimension scores
 
 ---
@@ -383,7 +381,6 @@ _Documented here for interview conversations about production readiness:_
 | Cache | Redis for short-term memory |
 | Model routing | LiteLLM done (Phase 9) — Kong AI Gateway for token budgets is Phase 2 |
 | Observability | Self-hosted LangFuse for trace dashboards |
-| HITL channel | Slack interactive buttons (real Slack app) |
 | PR creation | GitHub App for real PR creation |
 | Self-improvement | Nightly ACA Job — re-evals + auto-PR to improve failing prompts |
 | Alert source | Azure Service Bus + Datadog webhook for real alerts |
