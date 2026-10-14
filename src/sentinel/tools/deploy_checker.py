@@ -70,8 +70,9 @@ _MAX_FILES = 20  # files_changed entries per record; files_changed_total has the
 
 # The service is a bind parameter, but a non-name is refused before it reaches the DB.
 _SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
-# ``owner/name`` as GitHub allows them; the repo is spliced into the request path.
-_REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
+# ``owner/name`` as GitHub allows them; the repo is spliced into the request path, so a
+# "." or ".." name (a path traversal, never a real repo) is refused.
+_REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$")
 
 _DEPLOYS_SQL = """
     SELECT pr_number, commit_sha, author, deploy_status, deployed_at, files_changed,

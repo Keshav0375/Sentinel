@@ -740,6 +740,46 @@ async def test_service_without_a_repo_is_not_looked_up(pool: asyncpg.Pool, gh: F
     assert record.github_note == "not looked up: no GitHub repo recorded for no-registry-row"
 
 
+@pytest.mark.parametrize(
+    "repo",
+    ["Keshav0375/Sentinel-deployment", "a/b", "o-1/x.y_z", "o/.github", "o/..x", "o/a..b"],
+)
+def test_repo_pattern_accepts_github_names(repo: str) -> None:
+    assert deploy_checker._REPO_RE.fullmatch(repo)
+
+
+@pytest.mark.parametrize(
+    "repo",
+    ["o/.", "o/..", "./x", "../x", "o/../x", "o/x/..", "o", "o/", "/x", "-o/x", "o/x y"],
+)
+def test_repo_pattern_refuses_dot_segments_and_non_names(repo: str) -> None:
+    assert deploy_checker._REPO_RE.fullmatch(repo) is None
+
+
+@pytest.mark.parametrize("repo", ["Keshav0375/..", "Keshav0375/."])
+async def test_a_dot_segment_repo_is_not_looked_up(
+    pool: asyncpg.Pool, gh: FakeGitHub, repo: str
+) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), pr=42)
+    await pool.execute(
+        "UPDATE services SET metadata = jsonb_set(metadata, '{repo}', to_jsonb($2::text)) "
+        "WHERE name = $1",
+        SERVICE,
+        repo,
+    )
+    try:
+        [record] = _records(await _details(pool, gh, settings=_settings()))
+    finally:
+        await pool.execute(
+            "UPDATE services SET metadata = jsonb_set(metadata, '{repo}', to_jsonb($2::text)) "
+            "WHERE name = $1",
+            SERVICE,
+            REPO,
+        )
+    assert gh.requests == []
+    assert record.github_note == f"not looked up: no GitHub repo recorded for {SERVICE}"
+
+
 async def test_token_never_reaches_logs_results_or_notes(
     pool: asyncpg.Pool,
     gh: FakeGitHub,
