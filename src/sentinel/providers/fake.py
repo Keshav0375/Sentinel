@@ -37,6 +37,11 @@ agent names (decision 2026-10-15)::
 
 Unscripted, they answer with the cautious outcome: reflexion with confidence 0.0 and a
 ``fetch_logs`` next call, reverification with an ``ESCALATE``.
+
+The revert-PR writer (§3.4) has one too, keyed by ``PR_CONTENT_AGENT``: a compliant reply
+for a spec, or a deliberately non-compliant one that drives the deterministic fallbacks::
+
+    script.on(PR_CONTENT_AGENT, pr_content_turn(spec), pr_content_turn(spec, compliant=False))
 """
 
 from __future__ import annotations
@@ -78,9 +83,10 @@ from sentinel.models.reflexion import (
     SuspectDeploy,
 )
 from sentinel.models.reverification import ReverificationOutcome
-from sentinel.models.tools import LogFetchInput
+from sentinel.models.tools import LogFetchInput, RollbackSpec
 
 __all__ = [
+    "PR_CONTENT_AGENT",
     "REFLEXION_AGENT",
     "REVERIFICATION_AGENT",
     "FakeModel",
@@ -90,6 +96,7 @@ __all__ = [
     "FakeTurn",
     "active_script",
     "fake_script",
+    "pr_content_turn",
     "reflexion_turn",
     "reverification_turn",
 ]
@@ -100,6 +107,8 @@ _FAKE_ID = "__fake__"
 # Agent names of the orchestrator's loop checks (decision 2026-10-15).
 REFLEXION_AGENT = "reflexion"
 REVERIFICATION_AGENT = "reverification"
+# Agent name of the revert-PR writer (backend §3.4).
+PR_CONTENT_AGENT = "pr_content_generator"
 
 
 class FakeScriptError(RuntimeError):
@@ -212,6 +221,49 @@ def reverification_turn(
     (``reverification_turn("looks fine")``) and check that it parses to ESCALATE.
     """
     text = str(outcome) if reason is None else f"{outcome}: {reason}"
+    return FakeTurn(output=text, usage=usage)
+
+
+def pr_content_turn(
+    spec: RollbackSpec,
+    *,
+    compliant: bool = True,
+    title: str | None = None,
+    description: str | None = None,
+    usage: tuple[int, int] | None = None,
+) -> FakeTurn:
+    """A ``pr_content_generator`` reply (§3.4) for *spec*: the title, a blank line, the body.
+
+    Compliant: a ``revert:`` title under 72 characters with the PR # and incident id (for
+    PR numbers up to 6 digits and an id up to 36 characters), and a 100-200 word body with
+    the four sections and the confidence. ``compliant=False`` breaks every rule (no prefix,
+    PR # or id; no sections; no confidence). *title* / *description* replace either part.
+    """
+    pr, sha = spec.target_deploy.pr_number, spec.target_deploy.commit_sha
+    if compliant:
+        default_title = f"revert: undo PR #{pr} (incident {spec.incident_id})"
+        default_description = (
+            "## Incident\n\n"
+            f"Sentinel incident {spec.incident_id} found the service failing its health "
+            f"checks right after PR #{pr} shipped commit {sha}. The failures started with "
+            "that deploy and have not stopped since.\n\n"
+            "## Root Cause\n\n"
+            f"PR #{pr} (commit {sha}) changed how the service reports its health, so the "
+            "checks now fail whenever a dependency is degraded.\n\n"
+            "## Evidence\n\n"
+            f"- The first failed check came minutes after commit {sha} was deployed.\n"
+            "- No other deploy landed in the incident window.\n"
+            "- The previous version passed the same checks.\n\n"
+            "## Rollback\n\n"
+            f"Merging this pull request reverts commit {sha}, and the deployment pipeline "
+            "then redeploys the previous version. Closing it leaves the current deploy in "
+            "place and hands the incident to an engineer to handle manually. "
+            f"Confidence: {spec.confidence:.2f}. You decide whether to merge."
+        )
+    else:
+        default_title = "Rollback PR"
+        default_description = "The last deploy looks broken. Please revert it soon."
+    text = f"{title or default_title}\n\n{description or default_description}"
     return FakeTurn(output=text, usage=usage)
 
 

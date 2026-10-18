@@ -24,6 +24,7 @@ PROMPT_FILES = [
     "comms.txt",
     "reflexion.txt",
     "reverification.txt",
+    "pr_content_generator.txt",
 ]
 
 # ── Existence and basic structure ─────────────────────────────────────────────
