@@ -33,18 +33,20 @@ LangFuse (langfuse v3, backend §6) — the surface the agent pipeline uses::
   are no-ops, ``load_prompt`` serves the file, nothing touches the network. A blank key is
   treated as absent, and the SDK's per-call "client will be disabled" warning is muted —
   the lifespan reports the state once (``configure_langfuse()`` → ``langfuse_enabled``).
-- LLM generations (R14, decision 2026-10-15): ``LangfuseGenerationBridge`` is an add-only
+- LLM generations (R14, decision 2026-10-15): ``LangfuseGenerationBridge`` is an
   openai-agents ``TracingProcessor`` that turns each generation span into a LangFuse
   ``generation`` observation carrying the model, token usage and the agent's registered
-  ``TextPromptClient`` (``use_agent_prompts``) — never inputs or outputs. Register it once
-  with ``register_generation_bridge()``. It also sums usage into the incident's
-  ``track_incident_tokens`` accumulator, which logs ``incident_token_budget_exceeded``
-  past 50K tokens.
+  ``TextPromptClient`` (``use_agent_prompts``) — never inputs or outputs. It also sums
+  usage into the incident's ``track_incident_tokens`` accumulator, which logs
+  ``incident_token_budget_exceeded`` past 50K tokens.
+- ``install_trace_processors(...)`` is the one place the openai-agents processors are set:
+  exactly Sentinel's own (SentinelTracer, DashboardEventEmitter where wired) plus the
+  bridge. It drops the SDK's default exporter, which would upload every span to OpenAI.
 
 Agent trace capture (openai-agents ``TracingProcessor``) — unchanged::
 
     tracer = SentinelTracer(short_term_memory, trajectories_dir=Path("reports"))
-    add_trace_processor(tracer)
+    install_trace_processors(tracer)   # + DashboardEventEmitter in the app
 
     # In run_pipeline — wrap Runner.run with a named trace so the tracer
     # can associate spans with the correct incident:
@@ -80,7 +82,7 @@ from agents import (
     Span,
     Trace,
     TracingProcessor,
-    add_trace_processor,
+    set_trace_processors,
 )
 from langfuse import LangfuseGeneration, get_client, propagate_attributes
 
@@ -109,7 +111,8 @@ __all__ = [
     "observe",
     "propagate_attributes",
     "push_score",
-    "register_generation_bridge",
+    "generation_bridge",
+    "install_trace_processors",
     "shutdown_traces",
     "trace_incident",
     "track_incident_tokens",
@@ -387,9 +390,9 @@ class LangfuseGenerationBridge(TracingProcessor):
     LangFuse disabled it makes no client call at all. Either way the usage is added to the
     current :func:`track_incident_tokens` accumulator.
 
-    Add-only: registered with ``add_trace_processor`` (``register_generation_bridge``),
-    never ``set_trace_processors``, so SentinelTracer and the dashboard emitter keep firing.
-    A LangFuse failure is logged and never reaches the agent run.
+    Installed beside SentinelTracer and the dashboard emitter by
+    :func:`install_trace_processors`. A LangFuse failure is logged and never reaches the
+    agent run.
     """
 
     def __init__(self) -> None:
@@ -470,19 +473,32 @@ def _usage_tokens(usage: Mapping[str, Any] | None) -> tuple[int, int]:
 _bridge: LangfuseGenerationBridge | None = None
 
 
-def register_generation_bridge() -> LangfuseGenerationBridge:
-    """Add the :class:`LangfuseGenerationBridge` to openai-agents tracing, once per process."""
+def generation_bridge() -> LangfuseGenerationBridge:
+    """The process's :class:`LangfuseGenerationBridge` (one, so open generations survive
+    a re-install)."""
     global _bridge
     if _bridge is None:
         _bridge = LangfuseGenerationBridge()
-        add_trace_processor(_bridge)
     return _bridge
+
+
+def install_trace_processors(*processors: TracingProcessor) -> list[TracingProcessor]:
+    """Set openai-agents' trace processors to exactly *processors* plus the bridge.
+
+    The one place Sentinel wires tracing (decision 2026-10-15): it replaces the SDK's
+    default processor, whose exporter uploads every span (prompts, tool results, logs) to
+    OpenAI whenever ``OPENAI_API_KEY`` is in the environment. Callers pass all of
+    Sentinel's own processors — nothing else is kept.
+    """
+    installed: list[TracingProcessor] = [*processors, generation_bridge()]
+    set_trace_processors(installed)
+    return installed
 
 
 class SentinelTracer(TracingProcessor):
     """Captures every Agents SDK span and writes it to ShortTermMemory + disk.
 
-    Registered globally via ``add_trace_processor(SentinelTracer(...))``.
+    Registered globally via ``install_trace_processors(SentinelTracer(...), ...)``.
     Each incident pipeline wraps its ``Runner.run`` call with::
 
         with trace("incident_pipeline", metadata={"incident_id": inc_id}):

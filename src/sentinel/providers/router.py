@@ -19,11 +19,11 @@ replaces with a workload-identity token exchange (decision 2026-08-30).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final, Literal, get_args
 
 import openai
-from agents import Agent, Model, Runner, RunResult, TResponseInputItem
+from agents import Agent, Model, RunConfig, Runner, RunResult, TResponseInputItem
 from agents.extensions.models.litellm_model import LitellmModel
 
 from sentinel.config import Settings
@@ -270,7 +270,8 @@ async def call_with_fallback(
         role: The §4.7 role whose models to use.
         settings: Read for the primary provider and the credentials.
         run_kwargs: Extra ``Runner.run`` keyword arguments (``max_turns``, ``context``…),
-            passed unchanged to both attempts.
+            passed to both attempts. Their ``run_config`` (or a default one) always gets
+            ``trace_include_sensitive_data=False``.
 
     Returns:
         The run result and the ``provider/model`` string that actually produced it.
@@ -279,6 +280,12 @@ async def call_with_fallback(
         ProviderUnavailableError: Neither provider has a credential.
     """
     kwargs = dict(run_kwargs or {})
+    # Spans never carry model or tool inputs/outputs (decision 2026-10-15).
+    base_config = kwargs.get("run_config")
+    kwargs["run_config"] = replace(
+        base_config if isinstance(base_config, RunConfig) else RunConfig(),
+        trace_include_sensitive_data=False,
+    )
     primary, fallback = model_for(role, settings)
     try:
         result = await Runner.run(agent.clone(model=primary), input, **kwargs)

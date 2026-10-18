@@ -18,7 +18,7 @@ from typing import Any
 
 # asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
-from agents import add_trace_processor, handoff
+from agents import handoff
 from agents import trace as agent_trace
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -46,7 +46,7 @@ from sentinel.infra.logging import configure_logging, get_logger
 from sentinel.infra.tracing import (
     SentinelTracer,
     configure_langfuse,
-    register_generation_bridge,
+    install_trace_processors,
     shutdown_traces,
     track_incident_tokens,
 )
@@ -265,13 +265,13 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
     # ── Trajectory tracing ────────────────────────────────────────────────────
     trajectories_dir = Path("reports/trajectories")
     tracer = SentinelTracer(short_term_memory, trajectories_dir=trajectories_dir)
-    add_trace_processor(tracer)
-    # LLM generations → LangFuse (model, usage, prompt version; no inputs/outputs — R14).
-    register_generation_bridge()
 
     # ── Dashboard event emitter ───────────────────────────────────────────────
     dashboard_emitter = DashboardEventEmitter(event_bus)
-    add_trace_processor(dashboard_emitter)
+
+    # Exactly Sentinel's processors (+ the R14 LangFuse generation bridge): the SDK's
+    # default OpenAI trace exporter is dropped (decision 2026-10-15).
+    install_trace_processors(tracer, dashboard_emitter)
 
     # ── API wiring ────────────────────────────────────────────────────────────
     # Agents are built per-incident inside make_pipeline_fn.

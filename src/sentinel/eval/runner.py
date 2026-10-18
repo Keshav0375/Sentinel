@@ -22,7 +22,6 @@ from typing import Any
 
 # asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
-from agents import add_trace_processor
 from agents import trace as agent_trace
 
 from sentinel.agents.comms import build_comms_agent
@@ -38,7 +37,7 @@ from sentinel.generator.scenarios import Scenario
 from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.db import create_tables
 from sentinel.infra.logging import configure_logging, get_logger
-from sentinel.infra.tracing import SentinelTracer, register_generation_bridge
+from sentinel.infra.tracing import SentinelTracer, install_trace_processors
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
@@ -282,8 +281,7 @@ async def run_eval(
 
         # Register tracer once — it collects spans for all scenarios via incident_id.
         tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
-        add_trace_processor(tracer)
-        register_generation_bridge()
+        install_trace_processors(tracer)
 
         # ── Batch run ──────────────────────────────────────────────────────────
         results: list[EvalRunResult] = []

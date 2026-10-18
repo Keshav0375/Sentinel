@@ -243,7 +243,8 @@ async def test_primary_error_falls_back_and_logs(make_error: Any, router_log: Ma
     assert ran == [HAIKU, GPT4O_MINI]
     assert routed.model_used == GPT4O_MINI
     assert routed.fell_back is True
-    assert routed.result.kwargs == {"max_turns": 7}  # same run kwargs on the re-run
+    assert routed.result.kwargs["max_turns"] == 7  # same run kwargs on the re-run
+    assert routed.result.kwargs["run_config"].trace_include_sensitive_data is False
     router_log.warning.assert_called_once_with(
         "primary_provider_failed",
         provider="anthropic",
@@ -316,3 +317,26 @@ def test_role_capabilities_are_what_both_providers_support(primary: str) -> None
     caps = role_capabilities("triage", _settings(sentinel_primary_provider=primary))
     assert caps.supports_structured_outputs is False
     assert caps.strict_schemas is False
+
+
+async def test_every_run_turns_sensitive_trace_data_off() -> None:
+    """A caller's run_config is kept, but spans never get model or tool inputs/outputs."""
+    from agents import RunConfig  # noqa: PLC0415
+
+    seen: list[Any] = []
+
+    async def run(agent: Agent[Any], input: Any, **kwargs: Any) -> MagicMock:
+        seen.append(kwargs["run_config"])
+        return MagicMock()
+
+    with patch("agents.Runner.run", side_effect=run):
+        await call_with_fallback(_agent(), "a", role="triage", settings=_settings())
+        await call_with_fallback(
+            _agent(),
+            "a",
+            role="triage",
+            settings=_settings(),
+            run_kwargs={"run_config": RunConfig(workflow_name="incident", group_id="g-9")},
+        )
+    assert [c.trace_include_sensitive_data for c in seen] == [False, False]
+    assert (seen[1].workflow_name, seen[1].group_id) == ("incident", "g-9")

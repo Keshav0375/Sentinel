@@ -131,14 +131,141 @@ def test_disabled_langfuse_makes_no_client_call(monkeypatch: pytest.MonkeyPatch)
     assert (tokens.input_tokens, tokens.output_tokens) == (1200, 80)
 
 
-def test_register_is_add_only_and_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    add = MagicMock(name="add_trace_processor")
-    monkeypatch.setattr(tracing, "add_trace_processor", add)
-    monkeypatch.setattr(tracing, "_bridge", None)
-    first = tracing.register_generation_bridge()
-    second = tracing.register_generation_bridge()
-    assert first is second
-    add.assert_called_once_with(first)
+def test_install_sets_exactly_our_processors_and_drops_the_openai_exporter() -> None:
+    """After startup wiring the processor list is ours alone, the bridge last."""
+    from agents.tracing import get_trace_provider  # noqa: PLC0415
+    from agents.tracing.processors import BatchTraceProcessor  # noqa: PLC0415
+
+    provider: Any = get_trace_provider()
+    multi = provider._multi_processor  # pyright: ignore[reportPrivateUsage]
+    before = list(multi._processors)  # pyright: ignore[reportPrivateUsage]
+    ours = [MagicMock(name="SentinelTracer"), MagicMock(name="DashboardEventEmitter")]
+    try:
+        multi.set_processors([BatchTraceProcessor(MagicMock())])  # the SDK default's kind
+        installed = tracing.install_trace_processors(*ours)
+        current = list(multi._processors)  # pyright: ignore[reportPrivateUsage]
+        tracing.install_trace_processors(*ours)  # a second setup (e.g. app re-created)
+        again = list(multi._processors)  # pyright: ignore[reportPrivateUsage]
+    finally:
+        multi.set_processors(before)
+
+    assert current == installed == [*ours, tracing.generation_bridge()]
+    assert not any(isinstance(p, BatchTraceProcessor) for p in current)
+    assert again == current  # replaced, not appended: no duplicates
+    assert tracing.generation_bridge() is tracing.generation_bridge()
+
+
+async def test_litellm_generation_spans_carry_no_input_or_output() -> None:
+    """Through call_with_fallback the real LitellmModel records usage, never data."""
+    import litellm  # noqa: PLC0415
+    from agents import Agent  # noqa: PLC0415
+    from agents.extensions.models import litellm_model  # noqa: PLC0415
+
+    from sentinel.config import Settings  # noqa: PLC0415
+    from sentinel.providers.router import call_with_fallback  # noqa: PLC0415
+
+    spans: list[Any] = []
+    real_span = litellm_model.generation_span
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        span = real_span(*args, **kwargs)
+        spans.append(span)
+        return span
+
+    response = litellm.ModelResponse(
+        model="claude-haiku-4-5",
+        choices=[{"index": 0, "message": {"role": "assistant", "content": "SECRET out"}}],
+        usage={"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
+    )
+    settings = Settings(_env_file=None, anthropic_api_key="sk-ant-x", openai_api_key="sk-x")  # type: ignore[call-arg]
+    with (
+        patch.object(litellm_model, "generation_span", spy),
+        patch.object(litellm, "acompletion", return_value=response) as acompletion,
+    ):
+        routed = await call_with_fallback(
+            Agent(name="triage_agent", instructions="SECRET instructions"),
+            "SECRET logs",
+            role="triage",
+            settings=settings,
+        )
+
+    acompletion.assert_awaited_once()
+    assert routed.result.final_output == "SECRET out"
+    assert len(spans) == 1
+    data = spans[0].span_data
+    assert data.input is None and data.output is None
+    assert data.usage == {"input_tokens": 12, "output_tokens": 3}
+    assert data.model == HAIKU
+
+
+async def test_function_and_generation_spans_carry_no_input_or_output() -> None:
+    """A real agent loop (fake model + a tool) through call_with_fallback: the processors
+    see the tool call and the generations, but no arguments, results, prompts or replies."""
+    from agents import Agent, Span, TracingProcessor, function_tool  # noqa: PLC0415
+    from agents.tracing import get_trace_provider  # noqa: PLC0415
+
+    from sentinel.config import Settings  # noqa: PLC0415
+    from sentinel.providers.fake import FakeToolCall, FakeTurn, fake_script  # noqa: PLC0415
+    from sentinel.providers.router import call_with_fallback  # noqa: PLC0415
+
+    class _Recorder(TracingProcessor):
+        def __init__(self) -> None:
+            self.spans: list[Span[Any]] = []
+
+        def on_trace_start(self, trace: Any) -> None: ...
+        def on_trace_end(self, trace: Any) -> None: ...
+        def on_span_start(self, span: Span[Any]) -> None: ...
+
+        def on_span_end(self, span: Span[Any]) -> None:
+            self.spans.append(span)
+
+        def shutdown(self) -> None: ...
+        def force_flush(self) -> None: ...
+
+    @function_tool
+    def get_logs(service_name: str) -> str:
+        """Return the service's logs."""
+        return f"SECRET log line for {service_name}"
+
+    recorder = _Recorder()
+    multi: Any = get_trace_provider()._multi_processor  # type: ignore[attr-defined]
+    before = list(multi._processors)
+    settings = Settings(_env_file=None, sentinel_fake_llm=True)  # type: ignore[call-arg]
+    agent = Agent(name="triage_agent", instructions="SECRET instructions", tools=[get_logs])
+    try:
+        tracing.install_trace_processors(recorder)
+        with fake_script() as script:
+            script.on(
+                "triage_agent",
+                FakeTurn(tool_calls=[FakeToolCall("get_logs", {"service_name": "SECRET-api"})]),
+                FakeTurn(output="SECRET verdict"),
+            )
+            routed = await call_with_fallback(
+                agent, "SECRET alert", role="triage", settings=settings
+            )
+    finally:
+        multi.set_processors(before)
+
+    assert routed.result.final_output == "SECRET verdict"
+    functions = [s.span_data for s in recorder.spans if isinstance(s.span_data, FunctionSpanData)]
+    generations = [
+        s.span_data for s in recorder.spans if isinstance(s.span_data, GenerationSpanData)
+    ]
+    assert [f.name for f in functions] == ["get_logs"]
+    assert len(generations) == 2
+    for data in (*functions, *generations):
+        assert data.input is None and data.output is None
+    assert all(g.usage for g in generations)  # usage still flows to the bridge
+    assert "SECRET" not in repr([s.export() for s in recorder.spans])
+
+
+def test_requests_to_openai_are_blocked_in_tests() -> None:
+    """The suite-wide guard: nothing (the trace exporter included) reaches api.openai.com."""
+    import httpx  # noqa: PLC0415
+
+    # conftest's OpenAIRequestBlocked (an AssertionError; conftest is not importable).
+    with httpx.Client() as client, pytest.raises(AssertionError, match="api.openai.com"):
+        client.post("https://api.openai.com/v1/traces/ingest", json={})
 
 
 # ── Per-incident token accumulator ────────────────────────────────────────────
@@ -180,37 +307,23 @@ def test_budget_warning_fires_once_past_50k(tracing_log: MagicMock) -> None:
 async def test_fake_llm_usage_flows_into_the_incident_total(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End to end: a FakeModel run's generation spans, fed to the bridge, sum per incident."""
+    """End to end: the installed bridge sums a FakeModel run's usage per incident."""
     from agents import Agent, Runner  # noqa: PLC0415
+    from agents.tracing import get_trace_provider  # noqa: PLC0415
 
-    from sentinel.providers import fake as fake_module  # noqa: PLC0415
     from sentinel.providers.fake import FakeModel, FakeTurn, fake_script  # noqa: PLC0415
 
     monkeypatch.setattr(tracing, "langfuse_enabled", lambda: False)
-    bridge = LangfuseGenerationBridge()
-    real_span = fake_module.generation_span
-
-    class _Bridged:
-        """Wraps the fake model's generation span so the bridge sees its start and end."""
-
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self._span = real_span(*args, **kwargs)
-
-        def __enter__(self) -> Any:
-            span = self._span.__enter__()
-            bridge.on_span_start(span)
-            return span
-
-        def __exit__(self, *exc: Any) -> Any:
-            result = self._span.__exit__(*exc)
-            bridge.on_span_end(self._span)
-            return result
-
-    monkeypatch.setattr(fake_module, "generation_span", _Bridged)
+    multi: Any = get_trace_provider()._multi_processor  # type: ignore[attr-defined]
+    before = list(multi._processors)
     agent = Agent(name="triage_agent", instructions="x", model=FakeModel(HAIKU))
-    with fake_script() as script, track_incident_tokens("inc-fake") as tokens:
-        script.on("triage_agent", FakeTurn(output="a", usage=(30_000, 1_000)))
-        await Runner.run(agent, "alert")
-        script.on("triage_agent", FakeTurn(output="b", usage=(25_000, 500)))
-        await Runner.run(agent, "alert")
+    try:
+        tracing.install_trace_processors()  # the bridge alone
+        with fake_script() as script, track_incident_tokens("inc-fake") as tokens:
+            script.on("triage_agent", FakeTurn(output="a", usage=(30_000, 1_000)))
+            await Runner.run(agent, "alert")
+            script.on("triage_agent", FakeTurn(output="b", usage=(25_000, 500)))
+            await Runner.run(agent, "alert")
+    finally:
+        multi.set_processors(before)
     assert tokens.total_tokens == 56_500

@@ -7,7 +7,12 @@ The suite is independent of the caller's shell and of the developer's ``.env``:
 keys are removed so the client is disabled and nothing is ever sent, and the Datadog
 settings are removed so ``Settings`` falls back to its defaults (a test that needs keys
 passes fakes). The only database the suite touches is
-``TEST_DATABASE_URL``.
+``TEST_DATABASE_URL``. These variables are removed again before every test, so a test file
+run on its own (which may import litellm, and so load ``.env``, only mid-session) is as
+isolated as the full suite.
+
+openai-agents' default trace processor (which uploads spans to OpenAI) is dropped at
+start-up, as the app does, and any HTTP request to api.openai.com fails the test.
 """
 
 from __future__ import annotations
@@ -16,8 +21,16 @@ import os
 from collections.abc import Callable, Iterator
 from functools import cache
 from pathlib import Path
+from typing import Any
 
+import httpx
+
+# Imported first on purpose: litellm loads a developer .env into os.environ on its first
+# import. Doing that here, before pytest_configure and the fixtures below scrub the
+# environment, keeps a lazy import inside a test from re-adding DATABASE_URL or keys.
+import litellm  # noqa: F401  # pyright: ignore[reportUnusedImport]
 import pytest
+from agents import set_trace_processors
 from alembic import command
 from alembic.config import Config
 
@@ -54,6 +67,53 @@ def pytest_configure(config: pytest.Config) -> None:
     and no LangFuse keys — a keyless langfuse client is a disabled no-op (no network)."""
     for var in (*_LANGFUSE_KEYS, *_DATADOG_VARS, *_LLM_VARS):
         os.environ.pop(var, None)
+    # Drop the SDK's default OpenAI trace exporter for the whole run, as the app does at
+    # startup (infra/tracing.install_trace_processors); a test that needs processors sets
+    # its own.
+    set_trace_processors([])
+
+
+_OPENAI_HOST = "api.openai.com"
+
+
+class OpenAIRequestBlocked(AssertionError):
+    """A test tried to reach api.openai.com (model or trace upload)."""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_openai_requests() -> Iterator[None]:
+    """Fail any httpx request to api.openai.com — the trace exporter included."""
+    real_send = httpx.Client.send
+    real_async_send = httpx.AsyncClient.send
+
+    def send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        if request.url.host == _OPENAI_HOST:
+            raise OpenAIRequestBlocked(f"request to {request.url} during tests")
+        return real_send(self, request, **kwargs)
+
+    async def async_send(
+        self: httpx.AsyncClient, request: httpx.Request, **kwargs: Any
+    ) -> httpx.Response:
+        if request.url.host == _OPENAI_HOST:
+            raise OpenAIRequestBlocked(f"request to {request.url} during tests")
+        return await real_async_send(self, request, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(httpx.Client, "send", send)
+        mp.setattr(httpx.AsyncClient, "send", async_send)
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _scrubbed_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Before every test: no DATABASE_URL, LLM, LangFuse or Datadog variable.
+
+    litellm loads a developer ``.env`` into ``os.environ`` on first import, which for a
+    test file run alone can be inside a test (e.g. a lazy ``import sentinel.main``),
+    after the session fixture ran. A test that needs one of these sets it itself.
+    """
+    for var in ("DATABASE_URL", *_LANGFUSE_KEYS, *_DATADOG_VARS, *_LLM_VARS):
+        monkeypatch.delenv(var, raising=False)
 
 
 def _postgres_dsn() -> str | None:

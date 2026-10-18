@@ -381,8 +381,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.ShortTermMemory"),
             patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.add_trace_processor"),
-            patch("sentinel.eval.runner.register_generation_bridge"),
+            patch("sentinel.eval.runner.install_trace_processors"),
             patch("sentinel.eval.runner.list_scenarios", return_value=["bad_deploy_01"]),
             patch("sentinel.eval.runner.load_scenario", return_value=_make_scenario_mock()),
             patch(
@@ -420,8 +419,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.ShortTermMemory"),
             patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.add_trace_processor"),
-            patch("sentinel.eval.runner.register_generation_bridge"),
+            patch("sentinel.eval.runner.install_trace_processors"),
             patch("sentinel.eval.runner.load_scenario", side_effect=FileNotFoundError("x")),
             patch.dict(sys.modules, {"data": MagicMock(), "data.seed": _FAKE_SEED_MOD}),
         ):
@@ -443,8 +441,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.ShortTermMemory"),
             patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.add_trace_processor"),
-            patch("sentinel.eval.runner.register_generation_bridge"),
+            patch("sentinel.eval.runner.install_trace_processors"),
             patch(
                 "sentinel.eval.runner.load_scenario",
                 side_effect=FileNotFoundError("not found"),
@@ -472,8 +469,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.ShortTermMemory"),
             patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.add_trace_processor"),
-            patch("sentinel.eval.runner.register_generation_bridge"),
+            patch("sentinel.eval.runner.install_trace_processors"),
             patch("sentinel.eval.runner.list_scenarios", return_value=all_ids),
             patch(
                 "sentinel.eval.runner.load_scenario",

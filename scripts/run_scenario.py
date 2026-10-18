@@ -27,7 +27,7 @@ _SRC = _PROJECT_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from agents import add_trace_processor, handoff  # noqa: E402
+from agents import handoff  # noqa: E402
 from agents import trace as agent_trace  # noqa: E402
 
 from sentinel.agents.comms import build_comms_agent  # noqa: E402
@@ -41,7 +41,11 @@ from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_sc
 from sentinel.infra.database import close_pool, init_pool_from_settings  # noqa: E402
 from sentinel.infra.db import create_tables  # noqa: E402
 from sentinel.infra.logging import configure_logging  # noqa: E402
-from sentinel.infra.tracing import SentinelTracer, register_generation_bridge, flush_traces  # noqa: E402
+from sentinel.infra.tracing import (  # noqa: E402
+    SentinelTracer,
+    flush_traces,
+    install_trace_processors,
+)
 from sentinel.memory.embeddings import EmbeddingClient  # noqa: E402
 from sentinel.memory.episodic import EpisodicMemory  # noqa: E402
 from sentinel.memory.semantic import SemanticMemory  # noqa: E402
@@ -194,8 +198,7 @@ async def run_scenario(
         # ── Incident setup ─────────────────────────────────────────────────────────
         incident_id = f"smoke-{alert.alert_id[:8]}"
         tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
-        add_trace_processor(tracer)
-        register_generation_bridge()
+        install_trace_processors(tracer)
         short_term_memory.create(incident_id, alert)
         print(f"  [OK] incident: {incident_id}")
 
