@@ -6,6 +6,7 @@ Public API:
     role_capabilities(role, settings) → ProviderCapabilities
     judge_model_string(primary) → str
     FakeModel / FakeScript / fake_script() — SENTINEL_FAKE_LLM=1, no network
+    reflexion_turn / reverification_turn — scripted §4.3/§4.4 loop-check replies
     apply_sdk_defaults(settings) → None
     coerce_output(text, schema) → BaseModel | None
 """
@@ -16,7 +17,17 @@ from agents import set_default_openai_api, set_tracing_export_api_key
 
 from sentinel.config import Settings
 from sentinel.providers.capabilities import ProviderCapabilities, get_capabilities
-from sentinel.providers.fake import FakeModel, FakeScript, FakeToolCall, FakeTurn, fake_script
+from sentinel.providers.fake import (
+    REFLEXION_AGENT,
+    REVERIFICATION_AGENT,
+    FakeModel,
+    FakeScript,
+    FakeToolCall,
+    FakeTurn,
+    fake_script,
+    reflexion_turn,
+    reverification_turn,
+)
 from sentinel.providers.output_coercion import coerce_output
 from sentinel.providers.router import (
     Role,
@@ -28,6 +39,8 @@ from sentinel.providers.router import (
 )
 
 __all__ = [
+    "REFLEXION_AGENT",
+    "REVERIFICATION_AGENT",
     "FakeModel",
     "FakeScript",
     "FakeToolCall",
@@ -42,6 +55,8 @@ __all__ = [
     "get_capabilities",
     "judge_model_string",
     "model_for",
+    "reflexion_turn",
+    "reverification_turn",
     "role_capabilities",
 ]
 

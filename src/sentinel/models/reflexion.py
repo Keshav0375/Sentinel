@@ -1,0 +1,124 @@
+"""Reflexion models — the critique of an Analysis hypothesis (backend §4.3).
+
+Reflexion is a step of the orchestrator's loop, not a free agent: the ``reflexion`` prompt
+reads the Analysis hypothesis and its evidence and answers with exactly one
+:class:`ReflexionResult` as JSON. Below :data:`REFLEXION_CONFIDENCE_THRESHOLD` it names the
+one analysis-tool call (``fetch_logs`` or ``get_deploy_details``) that would raise
+confidence; the orchestrator passes that to the Analysis agent as guidance. Reflexion
+calls no tool itself, and nothing here acts on the world.
+"""
+
+from __future__ import annotations
+
+from typing import Literal, Self
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from sentinel.models.tools import DeployQuery, LogFetchInput
+
+__all__ = [
+    "ANALYSIS_TOOLS",
+    "REFLEXION_CONFIDENCE_THRESHOLD",
+    "DeployDetailsCall",
+    "FetchLogsCall",
+    "ReflexionResult",
+    "SuspectDeploy",
+]
+
+# §4.3: below this, reflexion must say which tool call to make next.
+REFLEXION_CONFIDENCE_THRESHOLD = 0.7
+
+# The only tools a next_tool_call may name — the Analysis agent's (decision 2026-10-15).
+ANALYSIS_TOOLS: tuple[str, ...] = ("fetch_logs", "get_deploy_details")
+
+
+class FetchLogsCall(BaseModel):
+    """A ``fetch_logs`` call for the Analysis agent to make next."""
+
+    tool: Literal["fetch_logs"] = Field(description='Always "fetch_logs".')
+    args: LogFetchInput = Field(description="The fetch_logs arguments.")
+
+
+class DeployDetailsCall(BaseModel):
+    """A ``get_deploy_details`` call for the Analysis agent to make next."""
+
+    tool: Literal["get_deploy_details"] = Field(description='Always "get_deploy_details".')
+    args: DeployQuery = Field(description="The get_deploy_details arguments.")
+
+
+class SuspectDeploy(BaseModel):
+    """The deploy the hypothesis blames, copied from a ``get_deploy_details`` row."""
+
+    commit_sha: str = Field(description="Deployed commit, copied exactly from get_deploy_details.")
+    pr_number: int | None = Field(
+        description="Pull request that was deployed, copied from get_deploy_details; "
+        "null for a direct push."
+    )
+
+    @field_validator("commit_sha")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("commit_sha must not be blank")
+        return value
+
+
+class ReflexionResult(BaseModel):
+    """Output of the ``reflexion`` prompt: the critique the orchestrator acts on.
+
+    Invariants (validated):
+    - ``confidence`` is in [0.0, 1.0].
+    - ``deploy`` is set exactly when ``specific_deploy_identified`` is true.
+    - ``next_tool_call`` is required below :data:`REFLEXION_CONFIDENCE_THRESHOLD`; at or
+      above it, any value is dropped (no further evidence is requested).
+    """
+
+    confidence: float = Field(
+        description="Confidence in the hypothesis, 0.0 (none) to 1.0 (certain)."
+    )
+    supporting_evidence: list[str] = Field(
+        description="Evidence items that support the hypothesis, each citing its tool result."
+    )
+    missing_or_contradictory: list[str] = Field(
+        description="Evidence that is missing, or that contradicts the hypothesis."
+    )
+    additional_data_needed: list[str] = Field(
+        description="Data that would raise confidence (service, source, time window)."
+    )
+    specific_deploy_identified: bool = Field(
+        description="True only when the evidence points at one specific deploy."
+    )
+    deploy: SuspectDeploy | None = Field(
+        description="The blamed deploy when specific_deploy_identified is true, else null."
+    )
+    next_tool_call: FetchLogsCall | DeployDetailsCall | None = Field(
+        description="When confidence < 0.7: the one analysis-tool call to make next. "
+        "Null otherwise."
+    )
+
+    @field_validator("confidence")
+    @classmethod
+    def _in_unit_interval(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("confidence must be between 0.0 and 1.0")
+        return value
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        if self.specific_deploy_identified and self.deploy is None:
+            raise ValueError("specific_deploy_identified is true but deploy is null")
+        if not self.specific_deploy_identified and self.deploy is not None:
+            raise ValueError("deploy is set but specific_deploy_identified is false")
+        if self.needs_more_evidence and self.next_tool_call is None:
+            raise ValueError(
+                f"confidence < {REFLEXION_CONFIDENCE_THRESHOLD} requires next_tool_call"
+            )
+        if not self.needs_more_evidence:
+            self.next_tool_call = None
+        return self
+
+    @property
+    def needs_more_evidence(self) -> bool:
+        """True below the §4.3 threshold: the orchestrator may loop back to Analysis."""
+        return self.confidence < REFLEXION_CONFIDENCE_THRESHOLD

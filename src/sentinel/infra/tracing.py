@@ -16,6 +16,7 @@ LangFuse (langfuse v3, backend §6) — the surface the agent pipeline uses::
     async def fetch_logs(...): ...
 
     prompt = await load_prompt("triage")      # TextPromptClient, or the prompts/ file text
+                                              # — either way ending in UNTRUSTED_DATA_PREAMBLE
     push_score(trace_id, "triage_accuracy", 0.9)
 
 - ``propagate_attributes`` / ``get_client`` are re-exported from ``langfuse``. ``observe`` is
@@ -25,7 +26,8 @@ LangFuse (langfuse v3, backend §6) — the surface the agent pipeline uses::
   (``@observe(name=..., capture_output=True)``). Spans still carry name, timing and errors.
   An ``@observe`` root call can instead take ``langfuse_trace_id=incident_trace_id(...)``.
 - ``load_prompt`` runs the SDK's synchronous ``get_prompt`` in a worker thread, so a slow or
-  unreachable LangFuse never blocks the event loop.
+  unreachable LangFuse never blocks the event loop. Both of its paths end the prompt with
+  ``agents.loader.UNTRUSTED_DATA_PREAMBLE`` (decision 2026-10-14), exactly once.
 - ``shutdown_traces()`` runs in the FastAPI lifespan on exit; CLI/eval entry points call
   ``flush_traces()`` before returning. Neither raises.
 - The client reads ``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY`` / ``LANGFUSE_BASE_URL``
@@ -62,6 +64,7 @@ The tracer then:
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -91,6 +94,8 @@ from langfuse import LangfuseGeneration, get_client, propagate_attributes
 from langfuse import observe as _langfuse_observe  # pyright: ignore[reportUnknownVariableType]
 from langfuse.model import TextPromptClient
 
+from sentinel.agents.loader import UNTRUSTED_DATA_PREAMBLE
+from sentinel.agents.loader import load_prompt as load_prompt_file
 from sentinel.infra.logging import get_logger
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.incident import TimelineEntry
@@ -126,7 +131,6 @@ _SENTINEL_TRACE_KEY = "incident_id"
 # ── LangFuse (backend §6) ─────────────────────────────────────────────────────
 
 PIPELINE_TRACE_NAME = "incident-pipeline"
-_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents" / "prompts"
 _PROMPT_CACHE_TTL_SECONDS = 300
 _KEY_VARS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
 _ATTR_MAX_CHARS = 200  # propagate_attributes drops (not truncates) longer values
@@ -261,19 +265,44 @@ async def load_prompt(agent_name: str) -> TextPromptClient | str:
     Returns the ``TextPromptClient`` (callers use ``.compile(**vars)``; it carries the
     prompt version) or the file text. Any LangFuse failure falls back to the file — a
     disabled client raises in ``get_prompt``. Raises ``FileNotFoundError`` only when both fail.
+
+    Either way the prompt ends with ``UNTRUSTED_DATA_PREAMBLE`` exactly once (decision
+    2026-10-14): the file through ``agents.loader.load_prompt``, the LangFuse prompt as a
+    copy whose template has the preamble appended (so ``.compile()`` yields it, and the
+    name and version stay for the §6.3 link) unless the stored template already ends with it.
     """
     try:
         # get_prompt is synchronous and, on a cache miss, does network I/O with retries:
         # run it off the event loop so concurrent incidents keep going meanwhile.
-        return await asyncio.to_thread(_fetch_prompt, agent_name)
+        prompt = await asyncio.to_thread(_fetch_prompt, agent_name)
     except Exception as exc:
         log = logger.warning if langfuse_enabled() else logger.debug
         log("prompt_fallback_to_file", agent_name=agent_name, error=str(exc))
-        return (_PROMPTS_DIR / f"{agent_name}.txt").read_text(encoding="utf-8")
+        return load_prompt_file(f"{agent_name}.txt")
+    return _with_preamble(prompt)
 
 
 def _fetch_prompt(agent_name: str) -> TextPromptClient:
-    return get_client().get_prompt(agent_name, cache_ttl_seconds=_PROMPT_CACHE_TTL_SECONDS)
+    prompt = get_client().get_prompt(agent_name, cache_ttl_seconds=_PROMPT_CACHE_TTL_SECONDS)
+    # Typed as text, but the SDK builds a ChatPromptClient when the stored prompt is a chat
+    # prompt; that has no single template to append the preamble to, so use the file.
+    if not isinstance(prompt, TextPromptClient):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TypeError(f"LangFuse prompt {agent_name!r} is not a text prompt")
+    return prompt
+
+
+def _with_preamble(prompt: TextPromptClient) -> TextPromptClient:
+    """*prompt* with the untrusted-data rule appended to its template.
+
+    A copy: the SDK caches and returns the same client on every ``get_prompt``, which
+    must stay unchanged so later loads do not append twice.
+    """
+    template = prompt.prompt.strip()
+    if template.endswith(UNTRUSTED_DATA_PREAMBLE):
+        return prompt
+    preambled = copy.copy(prompt)
+    preambled.prompt = f"{template}\n\n{UNTRUSTED_DATA_PREAMBLE}"
+    return preambled
 
 
 def push_score(trace_id: str, name: str, value: float) -> None:

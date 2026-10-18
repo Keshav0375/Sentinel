@@ -14,15 +14,27 @@ from agents import Agent, RunConfig, Runner, function_tool
 from agents.items import ToolCallItem
 from pydantic import BaseModel, Field
 
+from sentinel.agents.loader import load_prompt
 from sentinel.config import Settings
 from sentinel.models.incident import IncidentSummary, Severity, TriageResult
+from sentinel.models.reflexion import FetchLogsCall, ReflexionResult, SuspectDeploy
+from sentinel.models.reverification import (
+    UNPARSEABLE_REASON,
+    ReverificationOutcome,
+    parse_reverification,
+)
+from sentinel.models.tools import LogFetchInput
 from sentinel.providers import fake as fake_module
 from sentinel.providers.fake import (
+    REFLEXION_AGENT,
+    REVERIFICATION_AGENT,
     FakeModel,
     FakeScriptError,
     FakeToolCall,
     FakeTurn,
     fake_script,
+    reflexion_turn,
+    reverification_turn,
 )
 from sentinel.providers.router import ROLES, call_with_fallback, model_for, model_name
 
@@ -248,3 +260,101 @@ async def test_fake_model_does_not_stream() -> None:
             None,  # type: ignore[arg-type]
         ):
             pass
+
+
+# ── Reflexion and reverification turns (backend §4.3, §4.4) ──────────────────
+
+SONNET = "anthropic/claude-sonnet-4-6"
+_LOGS_CALL = FetchLogsCall(
+    tool="fetch_logs", args=LogFetchInput(service="sentinel-watchtower", window_minutes=30)
+)
+
+
+def _reflexion_agent() -> Agent[Any]:
+    return Agent(
+        name=REFLEXION_AGENT,
+        instructions=load_prompt("reflexion.txt"),
+        model=FakeModel(SONNET),
+        output_type=ReflexionResult,
+    )
+
+
+def _reverification_agent() -> Agent[Any]:
+    return Agent(
+        name=REVERIFICATION_AGENT,
+        instructions=load_prompt("reverification.txt"),
+        model=FakeModel(SONNET),
+    )
+
+
+async def test_scripted_reflexion_turns_drive_a_loop_back_then_a_confident_result() -> None:
+    deploy = SuspectDeploy(commit_sha="a1b2c3d", pr_number=42)
+    with fake_script() as script:
+        script.on(
+            REFLEXION_AGENT,
+            reflexion_turn(0.4, next_tool_call=_LOGS_CALL, missing_or_contradictory=["timing"]),
+            reflexion_turn(0.85, deploy=deploy, supporting_evidence=["pr-42 before failure"]),
+        )
+        first = await Runner.run(_reflexion_agent(), "hypothesis + evidence", run_config=NO_TRACING)
+        second = await Runner.run(
+            _reflexion_agent(), "hypothesis + evidence", run_config=NO_TRACING
+        )
+
+    low, high = first.final_output, second.final_output
+    assert isinstance(low, ReflexionResult) and isinstance(high, ReflexionResult)
+    assert low.needs_more_evidence and low.next_tool_call == _LOGS_CALL
+    assert low.missing_or_contradictory == ["timing"]
+    assert not high.needs_more_evidence and high.next_tool_call is None
+    assert high.specific_deploy_identified and high.deploy == deploy
+    assert script.calls == [(REFLEXION_AGENT, SONNET)] * 2
+
+
+def test_reflexion_turn_validates_the_contract_up_front() -> None:
+    with pytest.raises(ValueError, match="requires next_tool_call"):
+        reflexion_turn(0.3)
+    with pytest.raises(ValueError, match="between 0.0 and 1.0"):
+        reflexion_turn(1.5)
+
+
+async def test_unscripted_reflexion_is_low_confidence_and_valid() -> None:
+    with fake_script():
+        result = await Runner.run(_reflexion_agent(), "x", run_config=NO_TRACING)
+    output = result.final_output
+    assert isinstance(output, ReflexionResult)
+    assert output.confidence == 0.0 and not output.specific_deploy_identified
+    assert output.next_tool_call is not None and output.next_tool_call.tool == "fetch_logs"
+
+
+@pytest.mark.parametrize(
+    ("turn", "outcome", "reason"),
+    [
+        (reverification_turn("PASS"), ReverificationOutcome.PASS, None),
+        (reverification_turn(ReverificationOutcome.PASS), ReverificationOutcome.PASS, None),
+        (reverification_turn("FAIL", "wrong target"), ReverificationOutcome.FAIL, "wrong target"),
+        (
+            reverification_turn(ReverificationOutcome.ESCALATE, "too uncertain"),
+            ReverificationOutcome.ESCALATE,
+            "too uncertain",
+        ),
+        (
+            reverification_turn("looks fine to me"),
+            ReverificationOutcome.ESCALATE,
+            UNPARSEABLE_REASON,
+        ),
+    ],
+)
+async def test_scripted_reverification_replies_parse(
+    turn: FakeTurn, outcome: ReverificationOutcome, reason: str | None
+) -> None:
+    with fake_script() as script:
+        script.on(REVERIFICATION_AGENT, turn)
+        result = await Runner.run(_reverification_agent(), "fix + target", run_config=NO_TRACING)
+    verdict = parse_reverification(result.final_output)
+    assert (verdict.outcome, verdict.reason) == (outcome, reason)
+
+
+async def test_unscripted_reverification_escalates() -> None:
+    with fake_script():
+        result = await Runner.run(_reverification_agent(), "x", run_config=NO_TRACING)
+    verdict = parse_reverification(result.final_output)
+    assert verdict.outcome is ReverificationOutcome.ESCALATE and verdict.parsed

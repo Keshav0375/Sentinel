@@ -23,13 +23,27 @@ that satisfies the agent's output schema::
 Every response reports token usage — scripted, or estimated from the text (4 chars per
 token) — on ``ModelResponse.usage`` and on the generation span, exactly where
 ``LitellmModel`` puts it, so the token bridge and per-incident totals are testable.
+
+The orchestrator's two loop checks (backend §4.3, §4.4) have turn builders, keyed by their
+agent names (decision 2026-10-15)::
+
+    script.on(
+        REFLEXION_AGENT,
+        reflexion_turn(0.4, next_tool_call=FetchLogsCall(...)),   # loop back to Analysis
+        reflexion_turn(0.85, deploy=SuspectDeploy(commit_sha="a1b2c3d", pr_number=42)),
+    )
+    script.on(REVERIFICATION_AGENT, reverification_turn("FAIL", "wrong target"),
+              reverification_turn("PASS"))
+
+Unscripted, they answer with the cautious outcome: reflexion with confidence 0.0 and a
+``fetch_logs`` next call, reverification with an ``ESCALATE``.
 """
 
 from __future__ import annotations
 
 import json
 from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Generator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -57,7 +71,18 @@ from openai.types.responses import (
 )
 from pydantic import BaseModel
 
+from sentinel.models.reflexion import (
+    DeployDetailsCall,
+    FetchLogsCall,
+    ReflexionResult,
+    SuspectDeploy,
+)
+from sentinel.models.reverification import ReverificationOutcome
+from sentinel.models.tools import LogFetchInput
+
 __all__ = [
+    "REFLEXION_AGENT",
+    "REVERIFICATION_AGENT",
     "FakeModel",
     "FakeScript",
     "FakeScriptError",
@@ -65,10 +90,16 @@ __all__ = [
     "FakeTurn",
     "active_script",
     "fake_script",
+    "reflexion_turn",
+    "reverification_turn",
 ]
 
 _CHARS_PER_TOKEN = 4
 _FAKE_ID = "__fake__"
+
+# Agent names of the orchestrator's loop checks (decision 2026-10-15).
+REFLEXION_AGENT = "reflexion"
+REVERIFICATION_AGENT = "reverification"
 
 
 class FakeScriptError(RuntimeError):
@@ -128,7 +159,7 @@ class FakeScript:
         for key in (agent_name, output_type):
             if key is not None and self._turns[key]:
                 return self._turns[key].popleft()
-        return FakeTurn()
+        return _unscripted_turn(agent_name, output_type)
 
     def next_call_id(self, tool: str) -> str:
         """A tool-call id unique within this script, deterministic across runs."""
@@ -140,6 +171,79 @@ class FakeScript:
         self._failures.clear()
         self.calls.clear()
         self._call_ids = 0
+
+
+def reflexion_turn(
+    confidence: float,
+    *,
+    deploy: SuspectDeploy | None = None,
+    next_tool_call: FetchLogsCall | DeployDetailsCall | None = None,
+    supporting_evidence: Sequence[str] = (),
+    missing_or_contradictory: Sequence[str] = (),
+    additional_data_needed: Sequence[str] = (),
+    usage: tuple[int, int] | None = None,
+) -> FakeTurn:
+    """A ``reflexion`` reply (§4.3), validated as a :class:`ReflexionResult` now.
+
+    ``specific_deploy_identified`` follows ``deploy``. Below the 0.7 threshold
+    ``next_tool_call`` is required, as the model's own reply would need it.
+    """
+    result = ReflexionResult(
+        confidence=confidence,
+        supporting_evidence=list(supporting_evidence),
+        missing_or_contradictory=list(missing_or_contradictory),
+        additional_data_needed=list(additional_data_needed),
+        specific_deploy_identified=deploy is not None,
+        deploy=deploy,
+        next_tool_call=next_tool_call,
+    )
+    return FakeTurn(output=result, usage=usage)
+
+
+def reverification_turn(
+    outcome: ReverificationOutcome | str,
+    reason: str | None = None,
+    *,
+    usage: tuple[int, int] | None = None,
+) -> FakeTurn:
+    """A ``reverification`` reply (§4.4): ``PASS``, or ``<outcome>: <reason>``.
+
+    The text is sent as-is, unvalidated, so a test can script a malformed reply
+    (``reverification_turn("looks fine")``) and check that it parses to ESCALATE.
+    """
+    text = str(outcome) if reason is None else f"{outcome}: {reason}"
+    return FakeTurn(output=text, usage=usage)
+
+
+def _unscripted_reflexion() -> ReflexionResult:
+    return ReflexionResult(
+        confidence=0.0,
+        supporting_evidence=[],
+        missing_or_contradictory=["unscripted fake reflexion: no evidence assessed"],
+        additional_data_needed=[],
+        specific_deploy_identified=False,
+        deploy=None,
+        next_tool_call=FetchLogsCall(tool="fetch_logs", args=LogFetchInput(service="unknown")),
+    )
+
+
+# Unscripted replies the generic defaults cannot give: structured outputs whose model
+# validator the schema-minimal value breaks (by output type name), and plain-text tokens
+# (by agent name, for agents with no structured output).
+_UNSCRIPTED_STRUCTURED: dict[str, Callable[[], BaseModel]] = {
+    ReflexionResult.__name__: _unscripted_reflexion,
+}
+_UNSCRIPTED_TEXT: dict[str, str] = {
+    REVERIFICATION_AGENT: "ESCALATE: unscripted fake reverification",
+}
+
+
+def _unscripted_turn(agent_name: str, output_type: str | None) -> FakeTurn:
+    if output_type in _UNSCRIPTED_STRUCTURED:
+        return FakeTurn(output=_UNSCRIPTED_STRUCTURED[output_type]())
+    if output_type in (None, "str") and agent_name in _UNSCRIPTED_TEXT:
+        return FakeTurn(output=_UNSCRIPTED_TEXT[agent_name])
+    return FakeTurn()
 
 
 _DEFAULT_SCRIPT = FakeScript()

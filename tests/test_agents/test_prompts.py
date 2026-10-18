@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -9,8 +11,10 @@ import pytest
 from sentinel.agents import loader
 from sentinel.agents.loader import UNTRUSTED_DATA_PREAMBLE, load_prompt
 from sentinel.config import Settings
+from sentinel.models.reflexion import ANALYSIS_TOOLS, ReflexionResult
+from sentinel.models.reverification import ReverificationOutcome, parse_reverification
 
-# All six agent prompt files that must exist.
+# Every agent prompt file that must exist.
 PROMPT_FILES = [
     "orchestrator.txt",
     "triage.txt",
@@ -18,6 +22,8 @@ PROMPT_FILES = [
     "deploy_correlator.txt",
     "remediation.txt",
     "comms.txt",
+    "reflexion.txt",
+    "reverification.txt",
 ]
 
 # ── Existence and basic structure ─────────────────────────────────────────────
@@ -221,3 +227,87 @@ def test_comms_mentions_incidents_channel() -> None:
     """Comms prompt must specify the #incidents channel."""
     text = load_prompt("comms.txt")
     assert "#incidents" in text
+
+
+# ── Reflexion and reverification (backend §4.3, §4.4) ────────────────────────
+
+LOOP_PROMPTS = ["reflexion.txt", "reverification.txt"]
+
+
+def _estimated_tokens(text: str) -> int:
+    """The larger of two estimates: 4 chars per token, and 0.75 words per token."""
+    return max(len(text) // 4, round(len(text.split()) / 0.75))
+
+
+@pytest.mark.parametrize("filename", LOOP_PROMPTS)
+def test_loop_prompt_under_800_tokens_by_chars(filename: str) -> None:
+    """The char/4 estimate is stricter than words/0.75 for prompts dense with JSON."""
+    assert _estimated_tokens(load_prompt(filename)) < 800
+
+
+@pytest.mark.parametrize("filename", LOOP_PROMPTS)
+def test_loop_prompt_keeps_the_human_gate(filename: str) -> None:
+    """The prompt says the backend never executes and a human merges the revert PR."""
+    text = " ".join(load_prompt(filename).split())
+    assert "The backend never executes anything" in text
+    assert "a human" in text and "merges it" in text
+
+
+@pytest.mark.parametrize("filename", LOOP_PROMPTS)
+def test_loop_prompt_carries_no_secret(filename: str) -> None:
+    raw = (_PROMPTS_DIR / filename).read_text(encoding="utf-8")
+    for pattern in (
+        r"sk-[A-Za-z0-9_-]{8,}",
+        r"pk-lf-",
+        r"gh[pousr]_[A-Za-z0-9]{8,}",
+        r"api[_-]?key",
+    ):
+        assert not re.search(pattern, raw, re.IGNORECASE), pattern
+
+
+def test_reflexion_names_every_result_field() -> None:
+    """Every ReflexionResult field the orchestrator parses is named in the prompt."""
+    text = load_prompt("reflexion.txt")
+    for field in ReflexionResult.model_fields:
+        assert field in text, f"reflexion.txt must name output field {field!r}"
+    assert "commit_sha" in text and "pr_number" in text
+    assert "0.0-1.0" in text and "confidence < 0.7" in text
+
+
+def test_reflexion_next_tool_call_offers_only_the_analysis_tools() -> None:
+    text = load_prompt("reflexion.txt")
+    named = set(re.findall(r'"tool": "([a-z_]+)"', text))
+    assert named == set(ANALYSIS_TOOLS)
+    for other in ("prepare_rollback_spec", "format_escalation", "get_service_metadata"):
+        assert other not in text
+
+
+def test_reflexion_example_is_a_valid_result() -> None:
+    """The prompt's example reply validates as the contract it documents."""
+    example = next(
+        line for line in load_prompt("reflexion.txt").splitlines() if line.startswith('{"conf')
+    )
+    result = ReflexionResult.model_validate(json.loads(example))
+    assert result.needs_more_evidence
+    assert result.next_tool_call is not None and result.next_tool_call.tool in ANALYSIS_TOOLS
+
+
+def test_reverification_documents_the_three_tokens() -> None:
+    text = load_prompt("reverification.txt")
+    assert "exactly one line" in text
+    for line in ("- PASS", "- FAIL: <reason>", "- ESCALATE: <reason>"):
+        assert line in text.splitlines(), f"reverification.txt must document {line!r}"
+    assert "Any other reply is treated as ESCALATE" in text
+
+
+def test_reverification_examples_parse_as_documented() -> None:
+    """The quoted example replies parse to the outcome they illustrate."""
+    examples = re.findall(r'"((?:FAIL|ESCALATE): [^"]+)"', load_prompt("reverification.txt"))
+    outcomes = {parse_reverification(example).outcome for example in examples}
+    assert outcomes == {ReverificationOutcome.FAIL, ReverificationOutcome.ESCALATE}
+
+
+def test_reverification_names_the_three_checks() -> None:
+    lower = load_prompt("reverification.txt").lower()
+    for check in ("root cause", "timing", "service", "files", "new issues"):
+        assert check in lower, f"reverification.txt must cover {check!r}"
