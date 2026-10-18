@@ -171,6 +171,8 @@ async def run_scenario(
             semantic_memory=semantic_memory,
             episodic_memory=episodic_memory,
             pool=pool,
+            # A synthetic run is not a past incident: search_past_incidents must not recall it.
+            persist=False,
         )
         # run_pipeline never raises: a failure inside it is an escalated result.
         result = await run_pipeline(request, deps)

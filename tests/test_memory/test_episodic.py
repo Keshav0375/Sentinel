@@ -33,7 +33,7 @@ from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
 from sentinel.models.incident import Incident, IncidentStatus, Severity, TimelineEntry
-from sentinel.models.memory import EpisodicRecord, MemoryQueryResult
+from sentinel.models.memory import EpisodicRecord, IncidentOutcome, MemoryQueryResult
 from sentinel.models.tools import IncidentSearchInput, SimilarIncident, ToolFailure
 from sentinel.tools.incident_search import _search_past_incidents
 
@@ -731,3 +731,59 @@ async def test_incident_search_tool_reports_memory_unavailable(client: Embedding
     )
     assert isinstance(result, ToolFailure)
     assert result.kind == "unavailable"
+
+
+# ── store_incident(outcome=…) — the phase-4 pipeline's columns ────────────────
+
+
+def _outcome(**overrides: Any) -> IncidentOutcome:
+    fields: dict[str, Any] = {
+        "correlation_id": str(uuid.uuid4()),
+        "root_cause": "pr-42 changed GET / to return HTML",
+        "root_cause_by": "resolution",
+        "root_cause_confidence": 0.85,
+        "resolution": "revert pr-42",
+        "resolution_by": "resolution",
+        "resolution_type": "rollback",
+        "reflexion_loops": 1,
+        "langfuse_trace_id": uuid.uuid4().hex,
+        "pipeline_result": {"status": "rollback_proposed"},
+    }
+    return IncidentOutcome(**(fields | overrides))
+
+
+async def test_an_outcome_writes_its_columns_and_provenance(
+    mem: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    inc = _make_incident("api-gateway", "error_rate", status=IncidentStatus.ROLLBACK_PROPOSED)
+    outcome = _outcome()
+    await mem.store_incident(inc, outcome=outcome)
+
+    row = await _raw_row(pool, inc.id)
+    assert row["status"] == "rollback_proposed"
+    assert row["correlation_id"] == uuid.UUID(outcome.correlation_id)
+    assert row["root_cause"] == outcome.root_cause and row["resolution"] == outcome.resolution
+    assert row["root_cause_confidence"] == pytest.approx(0.85)
+    assert row["resolution_type"] == "rollback"
+    assert row["reflexion_loops"] == 1
+    assert row["langfuse_trace_id"] == outcome.langfuse_trace_id
+    trajectory = json.loads(row["trajectory"])
+    assert trajectory["pipeline_result"] == {"status": "rollback_proposed"}
+    assert trajectory["provenance"]["root_cause_by"] == "resolution"
+    record = await mem.get_incident(inc.id)
+    assert record is not None and record.resolution_type == "rollback"
+
+
+async def test_a_store_without_an_outcome_leaves_the_outcome_columns(
+    mem: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    inc = _make_incident("api-gateway", "error_rate", status=IncidentStatus.ESCALATED)
+    await mem.store_incident(
+        inc, outcome=_outcome(resolution_type="escalated", correlation_id=None)
+    )
+    await mem.store_incident(inc)
+
+    row = await _raw_row(pool, inc.id)
+    assert row["resolution_type"] == "escalated" and row["reflexion_loops"] == 1
+    assert row["correlation_id"] is None
+    assert "pipeline_result" not in json.loads(row["trajectory"])

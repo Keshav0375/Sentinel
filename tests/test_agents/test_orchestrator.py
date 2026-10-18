@@ -9,12 +9,13 @@ real ``deployments`` rows.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -876,3 +877,118 @@ async def test_a_mismatched_or_missing_row_escalates(
     assert result.escalation is not None
     assert problem in result.escalation.missing[0]
     assert _runs(script, REVERIFICATION_AGENT) == 0
+
+
+# ── Persistence (store_incident with the outcome) ─────────────────────────────
+
+
+class _Embedder:
+    """A 384-dim embedding client stand-in: one fixed non-zero vector, no model load."""
+
+    async def embed(self, text: str) -> list[float]:
+        return [1.0] + [0.0] * 383
+
+
+def _stored_deps(pool: asyncpg.Pool) -> PipelineDeps:
+    deps = _deps(pool)
+    return dataclasses.replace(deps, episodic_memory=EpisodicMemory(pool, _Embedder()))  # type: ignore[arg-type]
+
+
+async def _incident_row(pool: asyncpg.Pool, incident_id: str) -> asyncpg.Record:
+    row = await pool.fetchrow("SELECT * FROM incidents WHERE id = $1", uuid.UUID(incident_id))
+    assert row is not None
+    return row
+
+
+async def test_a_proposed_rollback_is_stored_with_its_outcome(pool: asyncpg.Pool) -> None:
+    await _deploy_row(pool)
+    request = _request()
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, _stored_deps(pool))
+
+    assert result.status == "rollback_proposed"
+    row = await _incident_row(pool, request.incident_id)
+    assert row["status"] == "rollback_proposed"
+    assert row["resolution_type"] == "rollback"
+    assert row["root_cause"] == "pr-42 changed GET / to return HTML"
+    assert row["root_cause_confidence"] == pytest.approx(0.9)
+    assert row["resolution"] == "the previous version passed the same checks"
+    assert row["reflexion_loops"] == 0
+    assert row["langfuse_trace_id"] == uuid.UUID(request.incident_id).hex
+    assert row["correlation_id"] == uuid.UUID(request.correlation_id)
+    assert row["service"] == SERVICE and row["severity"] == "P2"  # triage's severity
+    trajectory = json.loads(row["trajectory"])
+    assert PipelineResult.model_validate(trajectory["pipeline_result"]) == result
+    assert trajectory["provenance"]["root_cause_by"] == "resolution"
+    assert trajectory["provenance"]["resolution_by"] == "resolution"
+    assert trajectory["provenance"]["model_generated"] is True
+    actions = [e["action"] for e in trajectory["timeline"]["timeline"]]
+    assert "prepare_rollback_spec" in actions and "reverification" in actions
+
+
+async def test_an_escalation_is_stored_with_its_loops_and_reason(pool: asyncpg.Pool) -> None:
+    request = _request()
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis(), *_analysis(), *_analysis())
+        script.on(REFLEXION_AGENT, _low(), _low(), _low())
+        result = await run_pipeline(request, _stored_deps(pool))
+
+    assert result.status == "escalated"
+    row = await _incident_row(pool, request.incident_id)
+    assert row["status"] == "escalated" and row["resolution_type"] == "escalated"
+    assert row["reflexion_loops"] == 2
+    assert row["root_cause"] == "GET / returns HTML since pr-42"
+    assert row["root_cause_confidence"] == pytest.approx(0.4)
+    assert row["resolution"].startswith("escalated: decision gate: confidence 0.40")
+    provenance = json.loads(row["trajectory"])["provenance"]
+    assert provenance["root_cause_by"] == "analysis"
+    assert provenance["resolution_by"] == orchestrator.ORCHESTRATOR
+
+
+async def test_unavailable_memory_is_logged_and_the_result_still_returned(
+    target_ok: list[TargetDeploy], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = MagicMock()
+    monkeypatch.setattr(orchestrator, "logger", log)
+    request = _request()
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, _deps())  # EpisodicMemory(None): no database
+
+    assert result.status == "rollback_proposed"
+    warning = log.warning.call_args
+    assert warning.args == ("incident_not_stored",)
+    assert warning.kwargs["error_type"] == "SentinelMemoryError"
+
+
+async def test_persist_false_stores_nothing(target_ok: list[TargetDeploy]) -> None:
+    episodic = MagicMock()
+    episodic.store_incident = AsyncMock()
+    deps = dataclasses.replace(_deps(), episodic_memory=episodic, persist=False)
+    request = _request()
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, deps)
+    assert result.status == "rollback_proposed"
+    episodic.store_incident.assert_not_awaited()
+
+
+async def test_the_stored_outcome_mirrors_the_result(target_ok: list[TargetDeploy]) -> None:
+    episodic = MagicMock()
+    episodic.store_incident = AsyncMock()
+    deps = dataclasses.replace(_deps(), episodic_memory=episodic)
+    request = _request()
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, deps)
+
+    episodic.store_incident.assert_awaited_once()
+    (incident,), kwargs = episodic.store_incident.call_args
+    outcome = kwargs["outcome"]
+    assert incident.id == request.incident_id and incident.status == "rollback_proposed"
+    assert outcome.resolution_type == result.resolution_type == "rollback"
+    assert outcome.root_cause_confidence == result.confidence
+    assert outcome.reflexion_loops == result.reflexion_loops
+    assert outcome.pipeline_result == result.model_dump(mode="json")

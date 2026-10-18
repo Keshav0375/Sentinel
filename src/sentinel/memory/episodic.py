@@ -7,9 +7,12 @@ is ``ORDER BY embedding <=> $1`` (cosine distance) in PostgreSQL, served by the
 Mapping (decision 2026-10-12, "Phase-1 models ↔ §5.3 schema"): the symptom text and the
 timeline have no columns of their own and live in ``trajectory`` JSONB as
 ``{"symptoms": <text>, "timeline": <raw_timeline>, "provenance": {...}}``. Columns an
-:class:`Incident` cannot supply (correlation_id, dd_event_id, langfuse_trace_id, pr_*,
-eval_score, …) stay NULL/default until the phase-4 pipeline writes them; ``resolved_at`` is
-written when the incident has one, since ``mttr_seconds`` is derived from it.
+:class:`Incident` cannot supply stay NULL/default: the phase-4 pipeline passes an
+:class:`~sentinel.models.memory.IncidentOutcome` for correlation_id, root_cause_confidence,
+resolution_type, reflexion_loops and langfuse_trace_id (and its result, in ``trajectory`` as
+``pipeline_result``); dd_event_id, pr_* and eval_score are written by later phases.
+``resolved_at`` is written when the incident has one, since ``mttr_seconds`` is derived
+from it.
 
 Provenance: ``root_cause`` and ``resolution`` are agent output, not verified fact. The
 stored ``provenance`` records ``root_cause_by`` / ``resolution_by`` (the agent, from the
@@ -41,7 +44,7 @@ from sentinel.infra import database
 from sentinel.memory.base import MemoryStore
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.models.incident import Incident
-from sentinel.models.memory import EpisodicRecord, MemoryQueryResult
+from sentinel.models.memory import EpisodicRecord, IncidentOutcome, MemoryQueryResult
 
 # IVFFlat only searches `probes` of the index's lists; at the default of 1 a small or
 # freshly built table can miss its nearest rows. Probing every list (= lists of
@@ -75,13 +78,21 @@ class EpisodicMemory:
 
     # ── Domain-specific API ───────────────────────────────────────────────────
 
-    async def store_incident(self, incident: Incident) -> None:
+    async def store_incident(
+        self, incident: Incident, *, outcome: IncidentOutcome | None = None
+    ) -> None:
         """Embed the incident's observed symptoms and upsert its row into ``incidents``.
 
         Storing an incident with the same ID again overwrites the mapped columns, except
         ``created_at``: the first store's value is kept (when the incident was first
         recorded), and ``mttr_seconds`` is measured from it. The columns this model does
         not supply are left as they are.
+
+        With *outcome* (the phase-4 pipeline's), its root cause, resolution and
+        provenance replace the ones derived from the incident, its columns
+        (correlation_id, root_cause_confidence, resolution_type, reflexion_loops,
+        langfuse_trace_id) are written too, and ``trajectory`` also holds
+        ``pipeline_result``.
 
         Raises:
             SentinelMemoryError: no database, the ID is not a UUID, or the write failed.
@@ -101,31 +112,44 @@ class EpisodicMemory:
         if incident.resolved_at and incident.created_at:
             mttr_seconds = int((incident.resolved_at - incident.created_at).total_seconds())
 
-        root_cause, root_cause_role = _root_cause_with_source(incident)
-        resolution, resolution_role = _resolution_with_source(incident)
+        if outcome is None:
+            root_cause, root_cause_role = _root_cause_with_source(incident)
+            resolution, resolution_role = _resolution_with_source(incident)
+            root_cause_by = _agent_for_role(incident, root_cause_role)
+            resolution_by = _agent_for_role(incident, resolution_role)
+        else:
+            root_cause, root_cause_by = outcome.root_cause, outcome.root_cause_by
+            resolution, resolution_by = outcome.resolution, outcome.resolution_by
         raw_timeline: dict[str, Any] = {
             "id": incident.id,
             "status": incident.status.value,
             "timeline": [e.model_dump(mode="json") for e in incident.timeline],
         }
-        trajectory = {
+        trajectory: dict[str, Any] = {
             "symptoms": symptoms,
             "timeline": raw_timeline,
             "provenance": {
-                "root_cause_by": _agent_for_role(incident, root_cause_role),
-                "resolution_by": _agent_for_role(incident, resolution_role),
+                "root_cause_by": root_cause_by,
+                "resolution_by": resolution_by,
                 "model_generated": True,
                 "stored_at": datetime.now(UTC).isoformat(),
             },
         }
+        if outcome is not None:
+            trajectory["pipeline_result"] = outcome.pipeline_result
+        outcome_columns, outcome_values = _outcome_columns(outcome)
+        # $13… are the outcome's columns, in _OUTCOME_COLUMNS order (none without one).
+        extra_names = "".join(f", {name}" for name in outcome_columns)
+        extra_params = "".join(f", ${13 + i}" for i in range(len(outcome_columns)))
+        extra_updates = "".join(f",\n{name} = EXCLUDED.{name}" for name in outcome_columns)
 
         async with database.acquire(pool) as conn:
             await conn.execute(
-                """
+                f"""
                 INSERT INTO incidents
                     (id, alert_id, severity, service, status, root_cause, resolution,
-                     trajectory, created_at, resolved_at, mttr_seconds, embedding)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12)
+                     trajectory, created_at, resolved_at, mttr_seconds, embedding{extra_names})
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12{extra_params})
                 ON CONFLICT (id) DO UPDATE SET
                     alert_id = EXCLUDED.alert_id,
                     severity = EXCLUDED.severity,
@@ -142,7 +166,7 @@ class EpisodicMemory:
                         ELSE FLOOR(EXTRACT(EPOCH FROM
                             EXCLUDED.resolved_at - incidents.created_at))::int
                     END,
-                    embedding = EXCLUDED.embedding
+                    embedding = EXCLUDED.embedding{extra_updates}
                 """,
                 incident_uuid,
                 incident.alert.alert_id,
@@ -156,6 +180,7 @@ class EpisodicMemory:
                 incident.resolved_at,
                 mttr_seconds,
                 Vector(embedding),
+                *outcome_values,
             )
 
     async def search_similar(self, symptoms: str, *, top_k: int = 5) -> list[EpisodicRecord]:
@@ -335,6 +360,30 @@ def _as_uuid(value: str) -> uuid.UUID | None:
         return uuid.UUID(value)
     except ValueError:
         return None
+
+
+# The incidents columns only the phase-4 pipeline supplies (IncidentOutcome), in SQL order.
+_OUTCOME_COLUMNS = (
+    "correlation_id",
+    "root_cause_confidence",
+    "resolution_type",
+    "reflexion_loops",
+    "langfuse_trace_id",
+)
+
+
+def _outcome_columns(outcome: IncidentOutcome | None) -> tuple[tuple[str, ...], list[Any]]:
+    """The outcome's column names and values; none without an outcome (left as they are)."""
+    if outcome is None:
+        return (), []
+    correlation = None if outcome.correlation_id is None else _as_uuid(outcome.correlation_id)
+    return _OUTCOME_COLUMNS, [
+        correlation,
+        outcome.root_cause_confidence,
+        outcome.resolution_type,
+        outcome.reflexion_loops,
+        outcome.langfuse_trace_id,
+    ]
 
 
 def _as_vector(value: Any) -> list[float] | None:

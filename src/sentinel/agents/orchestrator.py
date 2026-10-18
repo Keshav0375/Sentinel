@@ -25,8 +25,11 @@ Every cap is enforced here, in code (decision 2026-10-15):
   its next model call, and the incident escalates with the context gathered so far.
 
 Every agent call goes through ``call_with_fallback`` (spans carry no sensitive data). An
-exception anywhere escalates. One root LangFuse trace per incident (``trace_incident``), one
-openai-agents trace (``SentinelTracer``, the dashboard), per-incident token totals
+exception anywhere escalates. At the end the incident is stored (``store_incident`` with its
+outcome: status, root cause, confidence, resolution type, reflexion loops, LangFuse trace id,
+timeline and provenance); memory being unavailable is logged, never fatal. One root
+LangFuse trace per incident (``trace_incident``), one openai-agents trace
+(``SentinelTracer``, the dashboard), per-incident token totals
 (``track_incident_tokens``), and each agent's LangFuse prompt registered for the generation
 link (``use_agent_prompts``). Nothing here acts on the world: the outcome is a rollback spec
 GitHub Actions turns into a revert PR a human merges or closes, or an escalation.
@@ -39,6 +42,7 @@ import dataclasses
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
@@ -68,6 +72,7 @@ from sentinel.config import Settings
 from sentinel.exceptions import ToolBudgetExhausted
 from sentinel.infra.logging import get_logger
 from sentinel.infra.tracing import (
+    incident_trace_id,
     load_prompt,
     trace_incident,
     track_incident_tokens,
@@ -76,7 +81,8 @@ from sentinel.infra.tracing import (
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.analysis import AnalysisResult
-from sentinel.models.incident import TimelineEntry, TriageResult
+from sentinel.models.incident import Incident, IncidentStatus, TimelineEntry, TriageResult
+from sentinel.models.memory import IncidentOutcome
 from sentinel.models.pipeline import PipelineInput, PipelineResult
 from sentinel.models.reflexion import (
     REFLEXION_CONFIDENCE_THRESHOLD,
@@ -159,12 +165,16 @@ class PipelineDeps:
         pool: The ``deployments`` pool for ``get_deploy_details`` and the rollback-target
             cross-check; None without ``DATABASE_URL`` (the tool reports "unavailable" and
             no rollback can be proposed).
+        persist: Store the incident in episodic memory at the end. False for synthetic
+            runs (eval, scenario scripts): a stored run would be recalled by
+            ``search_past_incidents`` as a past incident of the service.
     """
 
     settings: Settings
     semantic_memory: SemanticMemory
     episodic_memory: EpisodicMemory
     pool: asyncpg.Pool | None = None
+    persist: bool = True
 
 
 # ── The tool-call budget (§4.6) ───────────────────────────────────────────────
@@ -272,6 +282,9 @@ class _IncidentRun:
         self.models_used: list[str] = []
         self.reflexion_loops = 0
         self.stage = "plan"
+        self.started_at = datetime.now(UTC)
+        # True when the resolution agent drafted the escalation (format_escalation).
+        self.escalation_drafted = False
         self.triage: TriageResult | None = None
         self.analysis: AnalysisResult | None = None
         self.critique: ReflexionResult | None = None
@@ -334,6 +347,7 @@ class _IncidentRun:
         for _ in range(REVERIFICATION_MAX_RETRIES + 1):
             draft = await self._resolve(correction)
             if isinstance(draft, EscalationContext):
+                self.escalation_drafted = True
                 self._note("escalate", "the resolution agent drafted an escalation")
                 return draft
             if draft is None:
@@ -602,12 +616,65 @@ class _IncidentRun:
             **common,
         )
 
+    def stored(self, result: PipelineResult) -> tuple[Incident, IncidentOutcome]:
+        """The incident row and outcome ``store_incident`` writes for *result*."""
+        triage = self.triage
+        incident = Incident(
+            id=self.request.incident_id,
+            alert=self.request.alert,
+            status=IncidentStatus(result.status),
+            severity=None if triage is None else triage.severity,
+            timeline=list(self.timeline),
+            created_at=self.started_at,
+        )
+        if result.rollback_spec is not None:
+            root_cause_by = resolution_by = RESOLUTION_AGENT_NAME
+            resolution = result.rollback_spec.justification
+        else:
+            assert result.escalation is not None  # the validator guarantees one outcome
+            if self.escalation_drafted:
+                root_cause_by = resolution_by = RESOLUTION_AGENT_NAME
+            else:
+                hypothesis = self.analysis.hypothesis if self.analysis is not None else ""
+                root_cause_by = ANALYSIS_AGENT_NAME if hypothesis else ORCHESTRATOR
+                resolution_by = ORCHESTRATOR
+            missing = result.escalation.missing
+            resolution = f"escalated: {missing[0]}" if missing else "escalated"
+        outcome = IncidentOutcome(
+            correlation_id=self.request.correlation_id,
+            root_cause=result.root_cause,
+            root_cause_by=root_cause_by,
+            root_cause_confidence=result.confidence,
+            resolution=resolution,
+            resolution_by=resolution_by,
+            resolution_type=result.resolution_type,
+            reflexion_loops=result.reflexion_loops,
+            langfuse_trace_id=incident_trace_id(self.request.incident_id),
+            pipeline_result=result.model_dump(mode="json"),
+        )
+        return incident, outcome
+
+
+async def _store(run: _IncidentRun, result: PipelineResult) -> None:
+    """Store the incident and its outcome; a failure (no memory) is logged, never raised."""
+    try:
+        incident, outcome = run.stored(result)
+        await run.deps.episodic_memory.store_incident(incident, outcome=outcome)
+    except Exception as exc:
+        logger.warning(
+            "incident_not_stored",
+            incident_id=result.incident_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
 
 async def run_pipeline(request: PipelineInput, deps: PipelineDeps) -> PipelineResult:
     """Run one incident through the §4.2 pipeline; returns its outcome, never raises.
 
     Opens the incident's root LangFuse trace (id = the incident UUID as hex, §4.5) and the
-    openai-agents trace every run nests in, and sums every LLM call's tokens.
+    openai-agents trace every run nests in, and sums every LLM call's tokens. With
+    ``deps.persist`` the incident is then stored in episodic memory (see :func:`_store`).
     """
     run = _IncidentRun(request, deps)
     logger.info(
@@ -629,6 +696,8 @@ async def run_pipeline(request: PipelineInput, deps: PipelineDeps) -> PipelineRe
         ):
             outcome = await run.outcome()
         result = run.result(outcome, tokens.total_tokens)
+    if deps.persist:
+        await _store(run, result)
     logger.info(
         "pipeline_complete",
         incident_id=request.incident_id,

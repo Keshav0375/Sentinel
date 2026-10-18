@@ -109,6 +109,8 @@ async def run_scenario_eval(
         semantic_memory=semantic_memory,
         episodic_memory=episodic_memory,
         pool=pool,
+        # A synthetic run is not a past incident: search_past_incidents must not recall it.
+        persist=False,
     )
     result = await run_pipeline(PipelineInput.from_alert(incident_id, alert), deps)
     pipeline_error: str | None = None
