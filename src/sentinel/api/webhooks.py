@@ -12,11 +12,12 @@ from fastapi import APIRouter, BackgroundTasks
 from sentinel.infra.logging import get_logger
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import AlertAck, AlertPayload
+from sentinel.models.pipeline import PipelineInput
 
 logger = get_logger("sentinel.api.webhooks")
 
 # Type alias for the async pipeline callback injected at app startup.
-PipelineFn = Callable[[str, AlertPayload], Awaitable[None]]
+PipelineFn = Callable[[PipelineInput], Awaitable[None]]
 
 _DEDUP_TTL_SECONDS: float = 60.0
 
@@ -112,8 +113,10 @@ def make_alert_router(
     Args:
         deduplicator: ``AlertDeduplicator`` for idempotency checks.
         short_term_memory: ``ShortTermMemory`` to register new incidents.
-        pipeline_fn: Optional async callback ``(incident_id, alert) → None``
-            that runs the full orchestrator pipeline in the background. When
+        pipeline_fn: Optional async callback ``(PipelineInput) → None`` that runs the
+            orchestrator pipeline in the background. The input's ``signal_type`` and
+            ``correlation_id`` come from the alert's metadata when present
+            (``PipelineInput.from_alert``) until phase 5's webhook body carries them. When
             ``None``, the endpoint logs a warning and skips the pipeline (useful
             for testing the API layer in isolation, or before 6.3 is wired).
 
@@ -157,7 +160,7 @@ def make_alert_router(
         )
 
         if pipeline_fn is not None:
-            background_tasks.add_task(pipeline_fn, incident_id, payload)
+            background_tasks.add_task(pipeline_fn, PipelineInput.from_alert(incident_id, payload))
         else:
             logger.warning(
                 "pipeline_not_wired",

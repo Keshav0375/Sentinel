@@ -14,21 +14,13 @@ import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 # asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
-from agents import handoff
-from agents import trace as agent_trace
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-from sentinel.agents.comms import build_comms_agent
-from sentinel.agents.deploy_correlator import build_deploy_correlator_agent
-from sentinel.agents.log_analyst import build_log_analyst_agent
-from sentinel.agents.orchestrator import build_orchestrator_agent
-from sentinel.agents.remediation import build_remediation_agent
-from sentinel.agents.triage import build_triage_agent
+from sentinel.agents.orchestrator import ORCHESTRATOR, PipelineDeps, run_pipeline
 from sentinel.api.config_view import make_config_router
 from sentinel.api.eval_report import make_eval_report_router
 from sentinel.api.events import make_events_router
@@ -41,22 +33,21 @@ from sentinel.config import Settings, get_settings
 from sentinel.infra.dashboard_emitter import DashboardEventEmitter
 from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.db import create_tables
-from sentinel.infra.event_bus import EventBus
+from sentinel.infra.event_bus import EventBus, EventType, PipelineEvent
 from sentinel.infra.logging import configure_logging, get_logger
 from sentinel.infra.tracing import (
     SentinelTracer,
     configure_langfuse,
     install_trace_processors,
     shutdown_traces,
-    track_incident_tokens,
 )
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload
 from sentinel.models.incident import IncidentStatus
-from sentinel.providers import apply_sdk_defaults, call_with_fallback, role_capabilities
+from sentinel.models.pipeline import PipelineInput, PipelineResult
+from sentinel.providers import apply_sdk_defaults
 
 _DASHBOARD_HTML = Path(__file__).resolve().parent / "dashboard" / "index.html"
 _EVAL_HTML = Path(__file__).resolve().parent / "dashboard" / "eval.html"
@@ -64,129 +55,75 @@ _EVAL_HTML = Path(__file__).resolve().parent / "dashboard" / "eval.html"
 logger = get_logger("sentinel.main")
 
 
-def _build_orchestrator(
-    settings: Settings,
-    semantic_memory: SemanticMemory,
-    episodic_memory: EpisodicMemory,
-    pool: asyncpg.Pool | None,
-) -> Any:
-    """Build a full orchestrator pipeline with its dependencies injected.
-
-    Rebuilt per incident, so provider credentials are read at use (§4.7 router), never
-    at boot. The construction cost is negligible — it's just Python object creation, not
-    LLM calls.
-    """
-    triage_agent = build_triage_agent(semantic_memory, episodic_memory, settings=settings)
-    log_analyst_agent = build_log_analyst_agent(semantic_memory, settings=settings)
-    deploy_correlator_agent = build_deploy_correlator_agent(pool, settings=settings)
-    remediation_agent = build_remediation_agent(settings=settings)
-    comms_agent = build_comms_agent(settings=settings)
-    orchestrator = build_orchestrator_agent(
-        triage_agent,
-        log_analyst_agent,
-        deploy_correlator_agent,
-        remediation_agent,
-        comms_agent,
-        settings=settings,
-    )
-
-    caps = role_capabilities("orchestrator", settings)
-    back = handoff(orchestrator)
-    back.strict_json_schema = caps.strict_schemas
-    back_handoff: Any = [back]
-    for specialist in [
-        triage_agent,
-        log_analyst_agent,
-        deploy_correlator_agent,
-        remediation_agent,
-        comms_agent,
-    ]:
-        specialist.handoffs = back_handoff
-
-    return orchestrator
-
-
 def make_pipeline_fn(
     settings_fn: Callable[[], Settings],
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     short_term_memory: ShortTermMemory,
-    max_turns: int = 20,
     event_bus: EventBus | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> PipelineFn:
     """Build the async pipeline callback fired by the webhook for each new alert.
 
-    Agents are rebuilt per-incident so each run reads the provider credentials at use.
+    Each incident runs the Python orchestrator (``agents/orchestrator.run_pipeline``),
+    which builds its agents per run, so provider credentials are read at use (§4.7), never
+    at boot. On completion the incident's short-term memory gets the terminal status
+    (``rollback_proposed`` | ``escalated``) and the result, and the dashboard stream is
+    closed with an ``incident_completed`` event.
 
     Args:
         settings_fn: Callable returning the current Settings.
         semantic_memory: Shared semantic memory for service lookups.
         episodic_memory: Shared episodic memory for past incident search.
         short_term_memory: Live STM — updated with terminal status on completion.
-        max_turns: Maximum agent turns before the SDK raises an error.
         event_bus: Optional EventBus for dashboard streaming.
-        pool: asyncpg pool for ``get_deploy_details``; None without ``DATABASE_URL``
-            (the tool then reports "unavailable").
+        pool: asyncpg pool for ``get_deploy_details`` and the rollback-target check; None
+            without ``DATABASE_URL`` (the tool then reports "unavailable" and the
+            pipeline can only escalate).
 
     Returns:
-        Async callable ``(incident_id, alert) → None`` suitable for passing to
+        Async callable ``(PipelineInput) → None`` suitable for passing to
         ``make_alert_router`` as ``pipeline_fn``.
     """
 
-    async def run_pipeline(incident_id: str, alert: AlertPayload) -> None:
-        settings = settings_fn()
-        logger.info("pipeline_start", incident_id=incident_id, service=alert.service)
-
+    async def run_incident(request: PipelineInput) -> None:
+        incident_id = request.incident_id
+        status = IncidentStatus.ESCALATED
+        result: PipelineResult | None = None
         try:
-            # Built inside the try: no provider credential at use (keys are optional at
-            # boot) raises ProviderUnavailableError, which escalates this incident instead
-            # of escaping the background task.
-            orchestrator = _build_orchestrator(settings, semantic_memory, episodic_memory, pool)
-            input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
-            with (
-                track_incident_tokens(incident_id) as tokens,
-                agent_trace("incident_pipeline", metadata={"incident_id": incident_id}),
-            ):
-                routed = await call_with_fallback(
-                    orchestrator,
-                    input_text,
-                    role="orchestrator",
-                    settings=settings,
-                    run_kwargs={"max_turns": max_turns},
-                )
-            logger.info(
-                "pipeline_complete",
-                incident_id=incident_id,
-                model_used=routed.model_used,
-                tokens_used=tokens.total_tokens,
+            deps = PipelineDeps(
+                settings=settings_fn(),
+                semantic_memory=semantic_memory,
+                episodic_memory=episodic_memory,
+                pool=pool,
             )
-            try:
-                short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
-            except KeyError:
-                pass
-            if event_bus is not None:
-                from sentinel.infra.event_bus import EventType, PipelineEvent  # noqa: PLC0415
-
-                await event_bus.publish(
-                    incident_id,
-                    PipelineEvent(
-                        type=EventType.INCIDENT_RESOLVED,
-                        agent_name="orchestrator",
-                        incident_id=incident_id,
-                    ),
-                )
-                await event_bus.close_incident(incident_id)
+            # run_pipeline never raises: a failure inside it is an escalated result.
+            result = await run_pipeline(request, deps)
+            status = IncidentStatus(result.status)
         except Exception as exc:
             logger.error("pipeline_error", incident_id=incident_id, error=str(exc))
-            try:
-                short_term_memory.update_context(incident_id, status=IncidentStatus.ESCALATED)
-            except KeyError:
-                pass
-            if event_bus is not None:
-                await event_bus.close_incident(incident_id)
 
-    return run_pipeline
+        try:
+            short_term_memory.update_context(
+                incident_id,
+                status=status,
+                result=None if result is None else result.model_dump(mode="json"),
+            )
+        except KeyError:
+            pass  # the incident was cleared mid-pipeline
+        if event_bus is not None:
+            await event_bus.publish(
+                incident_id,
+                PipelineEvent(
+                    type=EventType.INCIDENT_COMPLETED,
+                    agent_name=ORCHESTRATOR,
+                    incident_id=incident_id,
+                    data={"status": status.value},
+                ),
+            )
+            await event_bus.close_incident(incident_id)
+
+    return run_incident
 
 
 @asynccontextmanager
@@ -281,7 +218,6 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
         semantic_memory,
         episodic_memory,
         short_term_memory,
-        max_turns=settings.sentinel_max_tool_calls + 5,
         event_bus=event_bus,
         pool=pool,
     )

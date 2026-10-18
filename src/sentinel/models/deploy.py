@@ -1,4 +1,4 @@
-"""Deploy models — CorrelatedDeploy, DeployCorrelation (and the Phase-1 generator's Deploy)."""
+"""Deploy models — CorrelatedDeploy (and the Phase-1 generator's Deploy)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ class Deploy(BaseModel):
     {"id": "...", "service": "...", "ts": "...", "author": "...", ...}
 
     Used only by ``sentinel.generator.deploy_gen``; backend task 9.1 deletes both.
-    The Deploy Correlator's output uses :class:`CorrelatedDeploy`.
+    The Analysis agent's ``suspect_deploy`` uses :class:`CorrelatedDeploy`.
     """
 
     id: str
@@ -27,7 +27,7 @@ class Deploy(BaseModel):
 
 
 class CorrelatedDeploy(BaseModel):
-    """A deploy the correlator reviewed: identifying fields of a ``get_deploy_details`` row.
+    """A deploy the Analysis agent blames: identifying fields of a ``get_deploy_details`` row.
 
     A field-compatible subset of :class:`~sentinel.models.tools.DeployRecord` (same names
     and types), so a record validates into one unchanged, and ``pr_number``,
@@ -49,17 +49,3 @@ class CorrelatedDeploy(BaseModel):
     failed_stage: str | None = Field(
         default=None, description='Stage that failed (build, deploy, verify) or "none".'
     )
-
-
-class DeployCorrelation(BaseModel):
-    """Output of the Deploy Correlator agent.
-
-    suspect_deploy is None when no deploy is convincingly correlated to the
-    incident (e.g. a downstream outage scenario with no recent deploys).
-    confidence is in [0.0, 1.0].
-    """
-
-    recent_deploys: list[CorrelatedDeploy] = []
-    suspect_deploy: CorrelatedDeploy | None = None
-    confidence: float = 0.0
-    evidence: str

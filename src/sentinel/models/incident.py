@@ -1,11 +1,11 @@
-"""Incident models — Severity, IncidentStatus, TimelineEntry, Incident."""
+"""Incident models — Severity, IncidentStatus, TimelineEntry, TriageResult, Incident."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -29,12 +29,18 @@ class Severity(StrEnum):
 
 
 class IncidentStatus(StrEnum):
-    """Lifecycle state of an incident as it moves through the pipeline."""
+    """Lifecycle state of an incident as it moves through the pipeline.
+
+    The pipeline ends in ``ROLLBACK_PROPOSED`` (a rollback spec for GitHub Actions to turn
+    into a revert PR a human merges or closes) or ``ESCALATED`` (decision 2026-10-15).
+    ``RESOLVED`` is reserved for a later "revert deploy succeeded" signal; the backend never
+    sets it, and there is no approval state — the revert PR on GitHub is the human gate.
+    """
 
     TRIAGE = "triage"
     INVESTIGATING = "investigating"
     REMEDIATING = "remediating"
-    PENDING_APPROVAL = "pending_approval"
+    ROLLBACK_PROPOSED = "rollback_proposed"
     RESOLVED = "resolved"
     ESCALATED = "escalated"
 
@@ -65,21 +71,6 @@ class TriageResult(BaseModel):
     affected_service: str
     is_duplicate: bool
     recommended_action: str
-
-
-class IncidentSummary(BaseModel):
-    """Final outcome returned by the Orchestrator Agent after the full pipeline runs.
-
-    This is what the API layer surfaces to callers and what the eval system
-    uses to determine whether the pipeline reached a terminal state correctly.
-    """
-
-    status: Literal["resolved", "pending_approval", "escalated"]
-    affected_service: str
-    severity: Severity
-    root_cause_summary: str
-    action_taken: str
-    next_steps: list[str] = []
 
 
 class Incident(BaseModel):

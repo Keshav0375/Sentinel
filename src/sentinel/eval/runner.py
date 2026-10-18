@@ -15,6 +15,7 @@ Usage (CLI)::
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,14 +23,8 @@ from typing import Any
 
 # asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
-from agents import trace as agent_trace
 
-from sentinel.agents.comms import build_comms_agent
-from sentinel.agents.deploy_correlator import build_deploy_correlator_agent
-from sentinel.agents.log_analyst import build_log_analyst_agent
-from sentinel.agents.orchestrator import build_orchestrator_agent
-from sentinel.agents.remediation import build_remediation_agent
-from sentinel.agents.triage import build_triage_agent
+from sentinel.agents.orchestrator import PIPELINE_ERROR, PipelineDeps, run_pipeline
 from sentinel.config import Settings, get_settings
 from sentinel.eval.judge import evaluate_trajectory, make_judge_client
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario
@@ -44,7 +39,8 @@ from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.eval_result import TrajectoryScore
 from sentinel.models.incident import IncidentStatus
-from sentinel.providers import apply_sdk_defaults, call_with_fallback
+from sentinel.models.pipeline import PipelineInput
+from sentinel.providers import apply_sdk_defaults
 
 logger = get_logger("sentinel.eval.runner")
 
@@ -66,15 +62,14 @@ async def run_scenario_eval(
     short_term_memory: ShortTermMemory,
     trajectories_dir: Path,
     settings: Settings,
-    max_turns: int = 20,
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     pool: asyncpg.Pool | None = None,
 ) -> EvalRunResult:
     """Run one scenario end-to-end and return a scored result.
 
-    Builds a fresh agent set, runs the pipeline on the scenario's alert, reads the
-    trajectory written by SentinelTracer, and calls the LLM judge.
+    Runs the orchestrator pipeline on the scenario's alert (it builds its agents per
+    run), reads the trajectory written by SentinelTracer, and calls the LLM judge.
 
     Args:
         scenario: Loaded scenario (with ground truth).
@@ -83,7 +78,6 @@ async def run_scenario_eval(
         trajectories_dir: Directory where SentinelTracer writes trajectory JSON.
         settings: Validated Settings — selects the primary provider (the judge runs on
             the other one) and supplies the provider credentials.
-        max_turns: Tool-call cap per pipeline run.
         semantic_memory: Service metadata store.
         episodic_memory: Past-incident similarity store.
         pool: asyncpg pool ``get_deploy_details`` reads; None without ``DATABASE_URL``.
@@ -93,27 +87,13 @@ async def run_scenario_eval(
     """
     scenario_id = scenario.scenario_id
     alert = generate_alert(scenario)
-    incident_id = f"eval-{scenario_id}-{alert.alert_id[:8]}"
+    # A UUID, as every incident id is (incidents.id; the LangFuse trace id is its hex).
+    incident_id = str(uuid.uuid4())
 
     logger.info(
         "eval_scenario_start",
         scenario_id=scenario_id,
         incident_id=incident_id,
-    )
-
-    # ── Build fresh agents ─────────────────────────────────────────────────────
-    triage_agent = build_triage_agent(semantic_memory, episodic_memory, settings=settings)
-    log_analyst_agent = build_log_analyst_agent(semantic_memory, settings=settings)
-    deploy_correlator_agent = build_deploy_correlator_agent(pool, settings=settings)
-    remediation_agent = build_remediation_agent(settings=settings)
-    comms_agent = build_comms_agent(settings=settings)
-    orchestrator = build_orchestrator_agent(
-        triage_agent,
-        log_analyst_agent,
-        deploy_correlator_agent,
-        remediation_agent,
-        comms_agent,
-        settings=settings,
     )
 
     # The judge runs on the non-primary provider (§4.7, decision 2026-10-15).
@@ -123,35 +103,34 @@ async def run_scenario_eval(
     short_term_memory.create(incident_id, alert)
 
     # ── Run pipeline ───────────────────────────────────────────────────────────
-    input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
+    # run_pipeline never raises: a failure inside it is an escalated result.
+    deps = PipelineDeps(
+        settings=settings,
+        semantic_memory=semantic_memory,
+        episodic_memory=episodic_memory,
+        pool=pool,
+    )
+    result = await run_pipeline(PipelineInput.from_alert(incident_id, alert), deps)
     pipeline_error: str | None = None
-
-    try:
-        with agent_trace(
-            "incident_pipeline",
-            metadata={"incident_id": incident_id},
-        ):
-            await call_with_fallback(
-                orchestrator,
-                input_text,
-                role="orchestrator",
-                settings=settings,
-                run_kwargs={"max_turns": max_turns},
-            )
-        short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
-        logger.info("eval_pipeline_complete", incident_id=incident_id)
-    except Exception as exc:  # noqa: BLE001
-        pipeline_error = str(exc)
+    reason = result.escalation.missing[0] if result.escalation and result.escalation.missing else ""
+    if reason.startswith(PIPELINE_ERROR):
+        pipeline_error = reason
         logger.error(
             "eval_pipeline_error",
             incident_id=incident_id,
             scenario_id=scenario_id,
             error=pipeline_error,
         )
-        try:
-            short_term_memory.update_context(incident_id, status=IncidentStatus.ESCALATED)
-        except KeyError:
-            pass
+    else:
+        logger.info("eval_pipeline_complete", incident_id=incident_id, status=result.status)
+    try:
+        short_term_memory.update_context(
+            incident_id,
+            status=IncidentStatus(result.status),
+            result=result.model_dump(mode="json"),
+        )
+    except KeyError:
+        pass
 
     # ── Load trajectory from disk ──────────────────────────────────────────────
     traj_path = trajectories_dir / f"{incident_id}.json"
@@ -177,7 +156,8 @@ async def run_scenario_eval(
                 incident_id=incident_id,
             )
 
-    # Enrich trajectory with STM context for the judge
+    # Enrich trajectory with the outcome and the STM context for the judge
+    trajectory["pipeline_result"] = result.model_dump(mode="json")
     try:
         ctx = short_term_memory.get_context(incident_id)
         trajectory["stm_context"] = {
@@ -302,7 +282,6 @@ async def run_eval(
                     short_term_memory=short_term_memory,
                     trajectories_dir=resolved_traj,
                     settings=settings,
-                    max_turns=settings.sentinel_max_tool_calls + 5,
                     semantic_memory=semantic_memory,
                     episodic_memory=episodic_memory,
                     pool=pool,

@@ -158,19 +158,18 @@ Alert fires
     │
     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      Orchestrator Agent                      │
-│  (coordinates handoffs, enforces 20-call cap, writes STM)   │
+│          Orchestrator (Python code, not an LLM agent)        │
+│  plans on signal_type · reflexion ≤ 2 loops · decision gate  │
+│  reverification (1 retry) · hard 20-tool-call budget         │
 └──┬──────────┬──────────┬──────────┬──────────┬─────────────┘
-   │          │          │          │          │
    ▼          ▼          ▼          ▼          ▼
-Triage    Log      Deploy    Remediation  Comms
-Agent   Analyst  Correlator   Agent      Agent
-   │       │          │          │       (no tools:
-get_    fetch_     get_      prepare_   writes the
-service_ logs     deploy_   rollback_   summary)
-metadata          details    spec  or
-search_                     format_
-past_                       escalation
+Triage    Analysis   Reflexion  Resolution  Reverification
+   │          │      (critique,     │       (PASS / FAIL /
+get_      fetch_      no tools)  prepare_    ESCALATE,
+service_  logs                   rollback_   no tools)
+metadata  get_                   spec  or
+search_   deploy_                format_
+past_     details                escalation
 incidents                      │
                                ▼
               Rollback spec ──► GitHub Actions opens the revert PR
@@ -185,7 +184,7 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 
 ## Features
 
-- **Multi-agent pipeline** — 5 specialist agents (Triage, Log Analyst, Deploy Correlator, Remediation, Comms) orchestrated via OpenAI Agents SDK handoffs
+- **Multi-agent pipeline** — 5 pipeline agents (Triage, Analysis, Reflexion, Resolution, Reverification) run by a Python orchestrator that enforces every cap in code; a sixth, the PR content generator, writes the revert PR for `/generate/pr-content`
 - **HITL safety gate** — the backend only drafts a rollback spec or an escalation; GitHub Actions opens the revert PR and a human merges or closes it on GitHub. No agent has a tool that acts on the world
 - **Episodic memory** — past incidents embedded and stored in SQLite; similar incidents surface automatically during triage
 - **Semantic memory** — service map, dependency graph, and runbooks loaded from seed data
@@ -276,8 +275,8 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 **What you'll see:**
 
 1. Select `bad_deploy_01` from the dropdown — a critical API gateway alert fires
-2. Watch the five agent cards light up in sequence as each specialist completes its analysis
-3. The Remediation Agent drafts a rollback spec (or an escalation) and the incident resolves
+2. Watch the agent cards light up as triage, analysis and the reflexion critique run
+3. The Resolution Agent drafts a rollback spec, reverification checks it, and the incident ends `rollback_proposed` (or `escalated`)
 4. Switch to `/eval` to see the LLM judge's per-dimension scores
 
 ---
@@ -328,7 +327,7 @@ Pass threshold: **3.0 / 5.0** (60%)
 ```
 sentinel/
 ├── src/sentinel/
-│   ├── agents/          # 5 specialist agents + orchestrator
+│   ├── agents/          # 6 LLM agents + the Python orchestrator
 │   ├── tools/           # Tool implementations (fetch_logs, prepare_rollback_spec, …)
 │   ├── memory/          # Episodic (SQLite + embeddings), semantic, short-term
 │   ├── eval/            # Rubric, LLM-as-judge, batch runner, report generator
@@ -352,7 +351,7 @@ sentinel/
 
 ## Architecture Decisions
 
-**Why multi-agent, not single agent?** Each specialist has a focused system prompt and constrained tool set. This makes each agent independently testable and improvable — changing the Log Analyst's prompt doesn't risk breaking Triage.
+**Why multi-agent, not single agent?** Each specialist has a focused system prompt and constrained tool set. This makes each agent independently testable and improvable — changing the Analysis prompt doesn't risk breaking Triage.
 
 **Why HITL at the tool level, not the prompt level?** There is no "execute rollback" tool — only `prepare_rollback_spec` and `format_escalation`, which draft and return. An agent can't bypass the gate by ignoring a prompt instruction: it has no tool that acts, and the revert PR a human merges on GitHub is the only path to a rollback.
 

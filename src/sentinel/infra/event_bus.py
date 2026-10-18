@@ -34,7 +34,8 @@ class EventType(StrEnum):
     AGENT_COMPLETED = "agent_completed"
     TOOL_CALLED = "tool_called"
     TOOL_RESULT = "tool_result"
-    INCIDENT_RESOLVED = "incident_resolved"
+    # The pipeline finished; data["status"] is rollback_proposed | escalated.
+    INCIDENT_COMPLETED = "incident_completed"
 
 
 class PipelineEvent(BaseModel):

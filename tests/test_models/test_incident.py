@@ -40,9 +40,27 @@ def test_incident_status_values() -> None:
     assert IncidentStatus.TRIAGE == "triage"
     assert IncidentStatus.INVESTIGATING == "investigating"
     assert IncidentStatus.REMEDIATING == "remediating"
-    assert IncidentStatus.PENDING_APPROVAL == "pending_approval"
+    assert IncidentStatus.ROLLBACK_PROPOSED == "rollback_proposed"
     assert IncidentStatus.RESOLVED == "resolved"
     assert IncidentStatus.ESCALATED == "escalated"
+
+
+def test_terminal_statuses_are_the_pipeline_statuses() -> None:
+    """Every PipelineResult status is an IncidentStatus; there is no approval state."""
+    from typing import get_args  # noqa: PLC0415
+
+    from sentinel.models.pipeline import PipelineStatus  # noqa: PLC0415
+
+    for status in get_args(PipelineStatus):
+        assert IncidentStatus(status).value == status
+    assert {s.value for s in IncidentStatus} == {
+        "triage",
+        "investigating",
+        "remediating",
+        "rollback_proposed",
+        "resolved",
+        "escalated",
+    }
 
 
 # ── TimelineEntry ─────────────────────────────────────────────────────────────

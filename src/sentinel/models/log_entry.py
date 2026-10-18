@@ -1,4 +1,4 @@
-"""Log models — LogLevel, LogEntry, LogQuery, LogAnalysis."""
+"""Log models — LogLevel, LogEntry, LogQuery."""
 
 from __future__ import annotations
 
@@ -40,16 +40,3 @@ class LogQuery(BaseModel):
     end_time: datetime
     level_filter: LogLevel | None = None
     keyword_filter: str | None = None
-
-
-class LogAnalysis(BaseModel):
-    """Findings produced by the Log Analyst agent after processing raw logs.
-
-    key_log_lines are the specific entries most relevant to the hypothesis —
-    stack traces, the first error occurrence, rate-change boundaries, etc.
-    """
-
-    error_patterns: list[str] = []
-    anomaly_summary: str
-    key_log_lines: list[LogEntry] = []
-    hypothesis: str

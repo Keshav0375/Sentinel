@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from agents import Agent
 
@@ -15,7 +15,8 @@ from sentinel.providers import Role, model_for, role_capabilities
 from sentinel.tools.incident_search import make_incident_search_tool
 from sentinel.tools.service_lookup import make_service_lookup_tool
 
-TRIAGE_AGENT_NAME = "triage_agent"
+# The agent name is also its prompt file and LangFuse prompt name (decision 2026-10-15).
+TRIAGE_AGENT_NAME: Final = "triage"
 # The §4.7 role whose model pair this agent runs on (providers/router.py).
 _ROLE: Role = "triage"
 
@@ -25,7 +26,8 @@ def build_triage_agent(
     episodic_memory: EpisodicMemory,
     *,
     settings: Settings,
-) -> Agent[TriageResult]:
+    instructions: str | None = None,
+) -> Agent[Any]:
     """Create a configured Triage Agent with injected dependencies.
 
     The agent receives the alert payload as its input, calls
@@ -38,10 +40,12 @@ def build_triage_agent(
         semantic_memory: Service map lookups for tier and oncall enrichment.
         episodic_memory: Past-incident similarity search for dedup and hints.
         settings: Validated Settings — selects the primary provider and supplies its key.
+        instructions: The system prompt (``infra/tracing.load_prompt``, preamble included);
+            None reads ``prompts/triage.txt``.
 
     Returns:
         Configured Agent that produces a ``TriageResult`` as structured output
-        when the provider supports it, or plain text otherwise.
+        when the provider supports it, or its JSON as plain text otherwise.
     """
     llm, _ = model_for(_ROLE, settings)
     caps = role_capabilities(_ROLE, settings)
@@ -52,7 +56,7 @@ def build_triage_agent(
 
     return Agent(
         name=TRIAGE_AGENT_NAME,
-        instructions=load_prompt("triage.txt"),
+        instructions=instructions or load_prompt(f"{TRIAGE_AGENT_NAME}.txt"),
         tools=[
             make_service_lookup_tool(semantic_memory),
             make_incident_search_tool(episodic_memory),

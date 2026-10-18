@@ -600,7 +600,7 @@ async def test_list_incidents_filters_by_status_and_service(mem: EpisodicMemory)
     assert ids(await mem.list_incidents(status="resolved", service="api-gateway")) == {
         api_resolved.id
     }
-    assert await mem.list_incidents(status="pending_approval") == []
+    assert await mem.list_incidents(status="rollback_proposed") == []
     assert await mem.list_incidents(service="no-such-service") == []
 
 

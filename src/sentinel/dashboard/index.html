@@ -340,7 +340,7 @@
 
       <div id="pipeline">
         <div id="res-banner" onclick="openResolution()">
-          &#10003; Incident resolved &mdash; pipeline complete
+          <span id="res-banner-text">&#10003; Pipeline complete</span>
           <span class="banner-hint">Click for summary</span>
         </div>
         <div class="pipeline-label">Agent Pipeline</div>
@@ -397,16 +397,16 @@
    ══════════════════════════════════════════════════════════════════════════ */
 
 const AGENTS = [
-  {key:'triage_agent',            label:'Triage Agent',      icon:'\u{1f50d}',
+  {key:'triage',          label:'Triage',          icon:'\u{1f50d}',
    desc:'Classifies incident severity and identifies the affected service using metadata and past patterns'},
-  {key:'log_analyst_agent',       label:'Log Analyst',       icon:'\u{1f4cb}',
-   desc:'Analyzes application logs around the alert timestamp to identify root cause patterns'},
-  {key:'deploy_correlator_agent', label:'Deploy Correlator', icon:'\u{1f680}',
-   desc:'Checks recent deployments and correlates suspicious changes with the incident timeline'},
-  {key:'remediation_agent',       label:'Remediation',       icon:'\u{1f527}',
+  {key:'analysis',        label:'Analysis',        icon:'\u{1f4cb}',
+   desc:'Reads the Datadog evidence and the deploy history and forms one root-cause hypothesis'},
+  {key:'reflexion',       label:'Reflexion',       icon:'\u{1f914}',
+   desc:'Critiques the hypothesis; below 0.7 confidence it sends Analysis back (at most twice)'},
+  {key:'resolution',      label:'Resolution',      icon:'\u{1f527}',
    desc:'Drafts a rollback spec or an escalation; a human merges the revert PR on GitHub'},
-  {key:'comms_agent',             label:'Comms Agent',       icon:'\u{1f4e2}',
-   desc:'Summarises the full incident in plain language (sends nothing)'},
+  {key:'reverification',  label:'Reverification',  icon:'\u{2705}',
+   desc:'Checks the rollback spec against the root cause: PASS, FAIL (one retry) or ESCALATE'},
 ];
 
 const SEV_MAP = {critical:'critical',high:'high',warning:'warning',low:'low',info:'info'};
@@ -691,7 +691,7 @@ function dispatch(ev, incId) {
     case 'agent_completed':   onCompleted(ev);           break;
     case 'tool_called':       onToolCalled(ev);          break;
     case 'tool_result':       onToolResult(ev);          break;
-    case 'incident_resolved': onResolved(ev);            break;
+    case 'incident_completed': onPipelineDone(ev);       break;
     default:
       addEvent('system', ev.agent_name || '', `${ev.type}: ${ev.agent_name || ''}`);
   }
@@ -760,14 +760,19 @@ function onToolResult(ev) {
     `${humanizeToolName(toolName)} → <span style="color:var(--muted)">${esc(summary)}</span>`);
 }
 
-function onResolved(ev) {
+function onPipelineDone(ev) {
+  // data.status is rollback_proposed (a revert PR for a human to merge) or escalated.
+  const proposed = (ev.data || {}).status === 'rollback_proposed';
+  const label = proposed ? 'Rollback proposed' : 'Escalated';
   document.getElementById('res-banner').classList.add('on');
-  document.getElementById('ib-status').className = 'pill pill-resolved';
-  document.getElementById('ib-status').textContent = 'Resolved';
+  document.getElementById('res-banner-text').textContent =
+    proposed ? '\u2713 Rollback proposed \u2014 a human reviews the revert PR'
+             : '\u26a0 Escalated \u2014 a human takes over';
+  document.getElementById('ib-status').className = proposed ? 'pill pill-resolved' : 'pill pill-escalated';
+  document.getElementById('ib-status').textContent = label;
   if (elTimer) { clearInterval(elTimer); elTimer = null; }
   if (eventSource) { eventSource.close(); eventSource = null; }
-  addEvent('resolved', 'orchestrator',
-    '<strong>Incident resolved</strong> &mdash; all agents completed successfully');
+  addEvent('resolved', 'orchestrator', `<strong>${label}</strong> &mdash; pipeline complete`);
 
   const btn = document.getElementById('fire-btn');
   btn.disabled = false;
@@ -805,25 +810,20 @@ function openResolution() {
            : 'Alert details not available');
 
   html += section('Root Cause',
-    agentOutputs.log_analyst_agent
-      ? esc(cleanMd(agentOutputs.log_analyst_agent))
-      : agentOutputs.triage_agent
-        ? esc(cleanMd(agentOutputs.triage_agent))
+    agentOutputs.analysis
+      ? esc(cleanMd(agentOutputs.analysis))
+      : agentOutputs.triage
+        ? esc(cleanMd(agentOutputs.triage))
         : 'Root cause analysis not available');
 
-  html += section('Action Taken',
-    agentOutputs.remediation_agent
-      ? esc(cleanMd(agentOutputs.remediation_agent))
-      : 'No remediation action recorded');
-
-  html += section('Communication',
-    agentOutputs.comms_agent
-      ? esc(cleanMd(agentOutputs.comms_agent))
-      : 'Slack summary not available');
+  html += section('Drafted',
+    agentOutputs.resolution
+      ? esc(cleanMd(agentOutputs.resolution))
+      : 'No rollback spec drafted (escalated)');
 
   const elapsed = document.getElementById('m-elapsed').textContent;
   html += section('Pipeline Stats',
-    `Completed in <strong>${elapsed}</strong> with <strong>${nTools}</strong> tool calls across <strong>5</strong> agents`);
+    `Completed in <strong>${elapsed}</strong> with <strong>${nTools}</strong> tool calls across <strong>${AGENTS.length}</strong> agents`);
 
   body.innerHTML = html;
   document.getElementById('resolve-modal').classList.add('on');

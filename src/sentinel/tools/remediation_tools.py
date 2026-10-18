@@ -82,6 +82,15 @@ def make_remediation_tools() -> list[FunctionTool]:
     return [prepare_rollback_spec, format_escalation]
 
 
+def escalation_context(request: EscalationInput) -> EscalationContext | ToolFailure:
+    """What ``format_escalation`` returns for *request*, without an agent turn.
+
+    For code that escalates on its own (the orchestrator's decision gate, budget and error
+    paths): the same validation and tidying, and it counts against no tool budget.
+    """
+    return _format_escalation(request)
+
+
 def _prepare_rollback_spec(request: RollbackSpecInput) -> RollbackSpec | ToolFailure:
     """Validate the request and return the RollbackSpec, or a ToolFailure — never raise.
 

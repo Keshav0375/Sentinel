@@ -16,14 +16,14 @@ from pydantic import BaseModel, Field
 
 from sentinel.agents.loader import load_prompt
 from sentinel.config import Settings
-from sentinel.models.incident import IncidentSummary, Severity, TriageResult
+from sentinel.models.incident import Severity, TriageResult
 from sentinel.models.reflexion import FetchLogsCall, ReflexionResult, SuspectDeploy
 from sentinel.models.reverification import (
     UNPARSEABLE_REASON,
     ReverificationOutcome,
     parse_reverification,
 )
-from sentinel.models.tools import LogFetchInput
+from sentinel.models.tools import EscalationContext, LogFetchInput
 from sentinel.providers import fake as fake_module
 from sentinel.providers.fake import (
     REFLEXION_AGENT,
@@ -149,7 +149,7 @@ async def test_unscripted_structured_output_is_schema_valid() -> None:
 
 
 async def test_unscripted_sentinel_output_types_validate() -> None:
-    for output_type in (TriageResult, IncidentSummary):
+    for output_type in (TriageResult, EscalationContext):
         agent = Agent(name="a", instructions="x", model=FakeModel(HAIKU), output_type=output_type)
         with fake_script():
             result = await Runner.run(agent, "alert", run_config=NO_TRACING)

@@ -187,11 +187,7 @@ def test_get_incident_detail_fields() -> None:
     assert data["status"] == "triage"
     assert data["alert"]["service"] == "payment-service"
     assert data["timeline"] == []
-    assert data["triage_result"] is None
-    assert data["log_analysis"] is None
-    assert data["deploy_correlation"] is None
-    assert data["remediation_plan"] is None
-    assert data["slack_summary"] is None
+    assert data["result"] is None
 
 
 def test_get_incident_detail_with_timeline_entry() -> None:
@@ -212,20 +208,17 @@ def test_get_incident_detail_with_timeline_entry() -> None:
     assert data["timeline"][0]["action"] == "get_service_metadata"
 
 
-def test_get_incident_detail_with_triage_result() -> None:
+def test_get_incident_detail_with_the_pipeline_result() -> None:
     stm = ShortTermMemory()
     stm.create("inc-99999999", _make_alert())
-    stm.update_context(
-        "inc-99999999",
-        triage_result={"severity": "P1", "affected_service": "api-gateway"},
-        status=IncidentStatus.INVESTIGATING,
-    )
+    result = {"status": "escalated", "resolution_type": "escalated", "reflexion_loops": 2}
+    stm.update_context("inc-99999999", result=result, status=IncidentStatus.ESCALATED)
 
     client = TestClient(_make_test_app(stm))
     data = client.get("/incidents/inc-99999999").json()
 
-    assert data["triage_result"] == {"severity": "P1", "affected_service": "api-gateway"}
-    assert data["status"] == "investigating"
+    assert data["result"] == result
+    assert data["status"] == "escalated"
 
 
 def test_get_incident_detail_model_valid() -> None:
@@ -235,11 +228,7 @@ def test_get_incident_detail_model_valid() -> None:
         alert=alert,
         status="triage",
         timeline=[],
-        triage_result=None,
-        log_analysis=None,
-        deploy_correlation=None,
-        remediation_plan=None,
-        slack_summary=None,
+        result=None,
     )
     assert detail.incident_id == "inc-test0001"
     assert detail.alert.service == "api-gateway"
