@@ -28,6 +28,7 @@ def _make_score(
     total: float = 4.0,
     dim_score: float | None = None,
     judge_model: str = "test-judge",
+    judge_conflict: bool = False,
 ) -> TrajectoryScore:
     """Create a TrajectoryScore with uniform dimension scores."""
     s = dim_score if dim_score is not None else total
@@ -39,6 +40,7 @@ def _make_score(
         ],
         total_score=total,
         judge_model=judge_model,
+        judge_conflict=judge_conflict,
     )
 
 
@@ -302,3 +304,29 @@ class TestPassThreshold:
         score_above = _make_score("b", 3.0)
         report = build_report([score_below, score_above])
         assert report.pass_rate == pytest.approx(0.5)
+
+
+# ── judge_conflict exclusion (decision 2026-10-18) ────────────────────────────
+
+
+class TestJudgeConflictExcluded:
+    def test_conflicts_are_kept_but_not_aggregated(self) -> None:
+        scores = [
+            _make_score("bad_deploy_01", 4.0),
+            _make_score("db_pool_01", 0.0, judge_conflict=True),
+        ]
+        report = build_report(scores)
+        assert report.scenarios_run == 1
+        assert report.judge_conflicts == 1
+        assert report.avg_total_score == pytest.approx(4.0)
+        assert report.pass_rate == pytest.approx(1.0)
+        assert all(ds.scenario_count == 1 for ds in report.dimension_stats)
+        assert len(report.scores) == 2
+        assert to_json_dict(report)["summary"]["judge_conflicts"] == 1
+        assert "JUDGE_CONFLICT" in to_markdown(report)
+
+    def test_only_conflicts_reports_zero_scenarios(self) -> None:
+        report = build_report([_make_score(total=5.0, judge_conflict=True)])
+        assert report.scenarios_run == 0
+        assert report.avg_total_score == 0.0
+        assert report.judge_conflicts == 1

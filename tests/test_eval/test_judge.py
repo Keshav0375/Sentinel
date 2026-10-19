@@ -15,6 +15,7 @@ from sentinel.eval.judge import (
     _strip_code_fences,
     _zero_score,
     evaluate_trajectory,
+    is_judge_conflict,
     make_judge_client,
 )
 from sentinel.exceptions import ProviderUnavailableError
@@ -191,7 +192,7 @@ class TestEvaluateTrajectory:
             incident_id="inc-001",
             scenario_id="bad_deploy_01",
             client=client,
-            model="openai/gpt-4o",
+            model="openai/gpt-4.1",
         )
         assert isinstance(result, TrajectoryScore)
 
@@ -203,7 +204,7 @@ class TestEvaluateTrajectory:
             incident_id="inc-test",
             scenario_id="my_scenario",
             client=client,
-            model="openai/gpt-4o",
+            model="openai/gpt-4.1",
         )
         assert result.incident_id == "inc-test"
         assert result.scenario_id == "my_scenario"
@@ -228,7 +229,7 @@ class TestEvaluateTrajectory:
             incident_id="i",
             scenario_id="s",
             client=client,
-            model="openai/gpt-4o",
+            model="openai/gpt-4.1",
         )
         assert result.total_score == pytest.approx(5.0)
 
@@ -240,7 +241,7 @@ class TestEvaluateTrajectory:
             incident_id="i",
             scenario_id="s",
             client=client,
-            model="openai/gpt-4o",
+            model="openai/gpt-4.1",
         )
         call_args = client.complete.call_args
         messages = call_args.kwargs["messages"]
@@ -255,7 +256,7 @@ class TestEvaluateTrajectory:
             incident_id="i",
             scenario_id="s",
             client=client,
-            model="openai/gpt-4o",
+            model="openai/gpt-4.1",
         )
         call_args = client.complete.call_args
         messages = call_args.kwargs["messages"]
@@ -275,7 +276,7 @@ class TestEvaluateTrajectory:
                 incident_id="i",
                 scenario_id="s",
                 client=client,
-                model="openai/gpt-4o",
+                model="openai/gpt-4.1",
             )
 
         assert result.total_score == pytest.approx(2.0)
@@ -293,7 +294,7 @@ class TestEvaluateTrajectory:
                 incident_id="i",
                 scenario_id="s",
                 client=client,
-                model="openai/gpt-4o",
+                model="openai/gpt-4.1",
             )
 
         assert result.total_score == pytest.approx(0.0)
@@ -310,7 +311,7 @@ class TestEvaluateTrajectory:
                 incident_id="i",
                 scenario_id="s",
                 client=client,
-                model="openai/gpt-4o",
+                model="openai/gpt-4.1",
             )
 
         assert result.total_score == 0.0
@@ -323,7 +324,7 @@ class TestEvaluateTrajectory:
             incident_id="i",
             scenario_id="s",
             client=client,
-            model="openai/gpt-4o",
+            model="openai/gpt-4.1",
         )
         call_kwargs = client.complete.call_args.kwargs
         assert call_kwargs.get("temperature") == 0.0
@@ -341,12 +342,12 @@ def _keys(**kwargs: Any) -> Settings:
 class TestMakeJudgeClient:
     def test_primary_anthropic_judges_on_openai(self) -> None:
         model, client = make_judge_client(_keys())
-        assert model == "openai/gpt-4o"
+        assert model == "openai/gpt-4.1"
         assert isinstance(client, LitellmJudgeClient)
 
     def test_primary_openai_judges_on_anthropic(self) -> None:
         model, _ = make_judge_client(_keys(sentinel_primary_provider="openai"))
-        assert model == "anthropic/claude-sonnet-4-6"
+        assert model == "anthropic/claude-opus-4-1"
 
     def test_missing_judge_key_raises_without_falling_back(self) -> None:
         """No fallback for the judge: it would land on the agents' provider."""
@@ -362,12 +363,62 @@ class TestMakeJudgeClient:
         ) as acompletion:
             acompletion.return_value = response
             text = await client.complete(
-                model="openai/gpt-4o",
+                model="openai/gpt-4.1",
                 messages=[{"role": "user", "content": "x"}],
                 temperature=0.0,
                 max_tokens=10,
             )
         assert text == "{}"
         kwargs = acompletion.call_args.kwargs
-        assert kwargs["model"] == "openai/gpt-4o"
+        assert kwargs["model"] == "openai/gpt-4.1"
         assert kwargs["api_key"] == "sk-test"
+
+
+# ── Runtime judge_conflict guard (decision 2026-10-18) ────────────────────────
+
+
+class TestJudgeConflictGuard:
+    def test_is_judge_conflict(self) -> None:
+        assert is_judge_conflict("openai/gpt-4.1", ["anthropic/claude-haiku-4-5", "openai/gpt-4.1"])
+        assert not is_judge_conflict("openai/gpt-4.1", ["openai/gpt-4o", "openai/gpt-4o-mini"])
+        assert not is_judge_conflict("openai/gpt-4.1", [])
+
+    async def test_a_run_that_used_the_judge_model_is_not_judged(self) -> None:
+        client = _make_client()
+        trajectory = {
+            **_sample_trajectory(),
+            "pipeline_result": {"models_used": ["anthropic/claude-haiku-4-5", "openai/gpt-4.1"]},
+        }
+        with patch("sentinel.eval.judge.logger") as log:
+            result = await evaluate_trajectory(
+                trajectory,
+                _sample_ground_truth(),
+                incident_id="inc-001",
+                scenario_id="bad_deploy_01",
+                client=client,
+                model="openai/gpt-4.1",
+            )
+        client.complete.assert_not_awaited()
+        assert result.judge_conflict is True
+        assert result.total_score == 0.0
+        assert all(ds.score == 0.0 for ds in result.dimension_scores)
+        log.error.assert_called_once()
+        assert log.error.call_args.args[0] == "judge_conflict"
+
+    async def test_a_run_on_other_models_is_judged(self) -> None:
+        client = _make_client()
+        trajectory = {
+            **_sample_trajectory(),
+            "pipeline_result": {"models_used": ["openai/gpt-4o-mini", "openai/gpt-4o"]},
+        }
+        result = await evaluate_trajectory(
+            trajectory,
+            _sample_ground_truth(),
+            incident_id="inc-001",
+            scenario_id="bad_deploy_01",
+            client=client,
+            model="anthropic/claude-opus-4-1",
+        )
+        client.complete.assert_awaited_once()
+        assert result.judge_conflict is False
+        assert result.total_score == pytest.approx(4.0)

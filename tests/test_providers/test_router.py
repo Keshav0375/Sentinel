@@ -27,6 +27,7 @@ from sentinel.providers.router import (
     MODEL_MAP,
     ROLES,
     RetryingModel,
+    agent_models,
     build_model,
     call_with_fallback,
     judge_model_string,
@@ -42,6 +43,8 @@ SONNET = "anthropic/claude-sonnet-4-6"
 HAIKU = "anthropic/claude-haiku-4-5"
 GPT4O = "openai/gpt-4o"
 GPT4O_MINI = "openai/gpt-4o-mini"
+GPT41 = "openai/gpt-4.1"
+OPUS41 = "anthropic/claude-opus-4-1"
 
 # backend.md §4.7 "Per-Agent Model Assignment", transcribed: role → (Anthropic, OpenAI).
 SECTION_4_7 = {
@@ -138,27 +141,40 @@ def test_model_for_primary_openai() -> None:
     assert fallback is not None and model_name(fallback) == SONNET
 
 
-# ── Judge: always the non-primary provider, never an agent model ─────────────
+# ── Judge: the non-primary provider, and no role's primary or fallback ──────
 
 
-def test_judge_is_the_non_primary_provider() -> None:
-    assert judge_model_string("anthropic") == GPT4O
-    assert judge_model_string("openai") == SONNET
+def test_judge_models_follow_decision_2026_10_18() -> None:
+    assert judge_model_string("anthropic") == GPT41
+    assert judge_model_string("openai") == OPUS41
 
 
 @pytest.mark.parametrize("primary", ["anthropic", "openai"])
-def test_judge_differs_from_every_agent_model(primary: str) -> None:
+def test_judge_is_no_roles_primary_or_fallback(primary: str) -> None:
+    """The static invariant: even after any fallback no agent ran the judge's model."""
     judge = judge_model_string(primary)  # type: ignore[arg-type]
+    assert provider_of(judge) != primary
     for role in ROLES:
-        assert judge != role_models(role, primary)[0]  # type: ignore[arg-type]
-        assert provider_of(role_models(role, primary)[0]) != provider_of(judge)  # type: ignore[arg-type]
+        for p in ("anthropic", "openai"):
+            assert judge not in role_models(role, p)  # type: ignore[arg-type]
+    assert judge not in agent_models()
 
 
-def test_judge_equal_to_an_agent_model_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The self-grading guard fires if the judge map ever names an agent model."""
-    monkeypatch.setattr(router, "JUDGE_MODELS", {**JUDGE_MODELS, "anthropic": HAIKU})
+def test_agent_models_covers_every_primary_and_fallback() -> None:
+    assert agent_models() == {GPT4O, GPT4O_MINI, SONNET, HAIKU}
+
+
+@pytest.mark.parametrize("model", [HAIKU, GPT4O])
+def test_judge_equal_to_an_agent_model_is_refused(
+    monkeypatch: pytest.MonkeyPatch, model: str
+) -> None:
+    """The self-grading guard fires for a role's primary (haiku) AND for a fallback-only
+    model (gpt-4o is every Sonnet role's fallback — the 2026-10-15 judge)."""
+    monkeypatch.setattr(router, "JUDGE_MODELS", {**JUDGE_MODELS, "anthropic": model})
     with pytest.raises(RuntimeError, match="self-grading"):
         judge_model_string("anthropic")
+    with pytest.raises(RuntimeError, match="self-grading"):
+        router._check_model_map()  # pyright: ignore[reportPrivateUsage]
 
 
 def test_model_map_check_rejects_a_judge_on_the_primary(monkeypatch: pytest.MonkeyPatch) -> None:

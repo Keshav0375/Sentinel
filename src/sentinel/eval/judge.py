@@ -20,7 +20,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, Protocol
+from collections.abc import Sequence
+from typing import Any, Protocol, cast
 
 import litellm
 
@@ -80,8 +81,9 @@ class LitellmJudgeClient:
 def make_judge_client(settings: Settings) -> tuple[str, JudgeClient]:
     """The judge's model string and a client for it, credential read now.
 
-    The judge runs on the provider the agents do not (decision 2026-10-15) and has no
-    fallback: falling back would put it on the agents' provider.
+    The judge runs on a model no agent role uses, on the provider the agents do not
+    (decision 2026-10-18), and has no fallback: falling back would put it on the agents'
+    provider.
 
     Raises:
         ProviderUnavailableError: The judge provider's credential is not set.
@@ -93,6 +95,26 @@ def make_judge_client(settings: Settings) -> tuple[str, JudgeClient]:
             f"the eval judge runs on {model!r}; set {provider_of(model).upper()}_API_KEY"
         )
     return model, LitellmJudgeClient(credential)
+
+
+def is_judge_conflict(judge_model: str, models_used: Sequence[str]) -> bool:
+    """True when the run being scored used the judge's own model (decision 2026-10-18).
+
+    The static map check keeps the judge off every role's (primary, fallback); this is the
+    runtime half — any model that actually ran, however it got chosen, is checked.
+    """
+    return judge_model in models_used
+
+
+def _run_models_used(trajectory: dict[str, Any]) -> list[str]:
+    """The ``models_used`` of the PipelineResult carried in *trajectory*, or []."""
+    result: Any = trajectory.get("pipeline_result")
+    if not isinstance(result, dict):
+        return []
+    used: Any = cast("dict[str, Any]", result).get("models_used")
+    if not isinstance(used, list):
+        return []
+    return [str(m) for m in cast("list[Any]", used)]
 
 
 def _strip_code_fences(text: str) -> str:
@@ -186,6 +208,10 @@ async def evaluate_trajectory(
     zero-scored ``TrajectoryScore`` so the eval runner can continue with remaining
     scenarios.
 
+    A run whose ``pipeline_result.models_used`` contains *model* is never judged: the judge
+    would grade itself, so the result is a zero score marked ``judge_conflict`` (logged),
+    which every aggregate excludes (decision 2026-10-18).
+
     Args:
         trajectory: Full incident trajectory dict (timeline, tool calls,
             agent outputs). Typically loaded from the trajectory JSON written
@@ -201,6 +227,17 @@ async def evaluate_trajectory(
     Returns:
         ``TrajectoryScore`` with per-dimension scores, reasoning, and total.
     """
+    models_used = _run_models_used(trajectory)
+    if is_judge_conflict(model, models_used):
+        logger.error(
+            "judge_conflict",
+            incident_id=incident_id,
+            scenario_id=scenario_id,
+            judge_model=model,
+            models_used=models_used,
+        )
+        return _zero_score(incident_id, scenario_id, model, judge_conflict=True)
+
     user_message = format_judge_input(trajectory, ground_truth)
 
     last_exc: Exception | None = None
@@ -261,8 +298,15 @@ async def evaluate_trajectory(
     return _zero_score(incident_id, scenario_id, model)
 
 
-def _zero_score(incident_id: str, scenario_id: str, model: str) -> TrajectoryScore:
-    """Return a TrajectoryScore of 0 for all dimensions (judge failure fallback)."""
+def _zero_score(
+    incident_id: str, scenario_id: str, model: str, *, judge_conflict: bool = False
+) -> TrajectoryScore:
+    """Return a TrajectoryScore of 0 for all dimensions (judge failure or conflict)."""
+    reasoning = (
+        "Judge conflict — the run used the judge's model; score invalid."
+        if judge_conflict
+        else "Judge failed — score defaulted to 0."
+    )
     return TrajectoryScore(
         incident_id=incident_id,
         scenario_id=scenario_id,
@@ -270,10 +314,11 @@ def _zero_score(incident_id: str, scenario_id: str, model: str) -> TrajectorySco
             DimensionScore(
                 dimension=dim,
                 score=0.0,
-                reasoning="Judge failed — score defaulted to 0.",
+                reasoning=reasoning,
             )
             for dim in EvalDimension
         ],
         total_score=0.0,
         judge_model=model,
+        judge_conflict=judge_conflict,
     )

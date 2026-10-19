@@ -13,8 +13,9 @@ attempts, 1s then 2s apart — CONVENTIONS "3 attempts") under a per-call timeou
 (:data:`LLM_CALL_TIMEOUT_S`), and each ``Runner.run`` has an overall bound
 (:data:`AGENT_RUN_TIMEOUT_S`); a run that times out falls back like a provider error.
 
-The judge is not a role here: it always runs on the provider the agents do NOT use
-(decision 2026-10-15), so an agent never grades itself — see :func:`judge_model_string`.
+The judge is not a role here: it runs on a model NO role uses, primary or fallback, and on
+the non-primary provider (decision 2026-10-18), so an agent never grades itself even after a
+fallback — see :func:`judge_model_string` (the eval judge also guards each run at runtime).
 
 Credentials are read when a model is built, never at boot (§8.2; decision 2026-10-14), and
 only through :func:`provider_credential`. That function is the single seam backend phase 7
@@ -64,6 +65,7 @@ __all__ = [
     "RetryingModel",
     "Role",
     "RoutedRun",
+    "agent_models",
     "build_model",
     "call_with_fallback",
     "judge_model_string",
@@ -111,12 +113,13 @@ MODEL_MAP: Final[Mapping[Role, Mapping[Provider, str]]] = {
     },
 }
 
-# §4.7 Judge row (decision 2026-10-15): primary provider → the judge model, always on the
-# OTHER provider. The judge has no fallback — falling back would put it on the agents'
-# provider.
+# §4.7 Judge row (decision 2026-10-18): primary provider → the judge model, on the OTHER
+# provider and a model no role uses as primary or fallback (gpt-4o is every Sonnet role's
+# fallback, so the 2026-10-15 judge self-graded after any failover). The judge has no
+# fallback — falling back would put it on the agents' provider.
 JUDGE_MODELS: Final[Mapping[Provider, str]] = {
-    "anthropic": "openai/gpt-4o",
-    "openai": "anthropic/claude-sonnet-4-6",
+    "anthropic": "openai/gpt-4.1",
+    "openai": "anthropic/claude-opus-4-1",
 }
 
 # Settings field holding each provider's API key (until phase 7 federates the pod).
@@ -169,26 +172,31 @@ def role_models(role: Role, primary: Provider) -> tuple[str, str]:
     return models[primary], models[other_provider(primary)]
 
 
+def agent_models() -> frozenset[str]:
+    """Every model any role can run on: each role's primary AND fallback, either provider."""
+    return frozenset(model for role in ROLES for model in MODEL_MAP[role].values())
+
+
 def judge_model_string(primary: Provider) -> str:
-    """The judge's model: on the non-primary provider, and never an agent's model.
+    """The judge's model: on the non-primary provider, and no role's primary or fallback.
 
     Raises:
-        RuntimeError: The judge model equals the model some agent role runs on under
-            *primary* — that would be self-grading (decision 2026-10-15).
+        RuntimeError: The judge model is a model some role runs on (as primary or after a
+            fallback) — that would be self-grading (decision 2026-10-18).
     """
     judge = JUDGE_MODELS[primary]
-    agent_models = {role_models(role, primary)[0] for role in ROLES}
-    if judge in agent_models:
+    if judge in agent_models():
         raise RuntimeError(
-            f"judge model {judge!r} is also an agent model under primary={primary!r} "
-            "(self-grading is forbidden, decision 2026-10-15)"
+            f"judge model {judge!r} is also an agent model (primary or fallback) "
+            "(self-grading is forbidden, decision 2026-10-18)"
         )
     return judge
 
 
 def _check_model_map() -> None:
     """Fail at import if the map breaks a §4.7 invariant: every role has a model on each
-    provider, under the right prefix, and the judge differs from every agent model."""
+    provider, under the right prefix, and the judge is off the primary provider and differs
+    from every role's (primary, fallback) model (decision 2026-10-18)."""
     for role in ROLES:
         for provider in PROVIDERS:
             if provider_of(MODEL_MAP[role][provider]) != provider:

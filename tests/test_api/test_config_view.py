@@ -41,7 +41,7 @@ def test_get_shows_the_role_map_and_judge_without_any_key() -> None:
         "reverification",
         "pr_content_generator",
     }
-    assert body["judge_model"] == "openai/gpt-4o"
+    assert body["judge_model"] == "openai/gpt-4.1"
 
 
 def test_get_follows_the_primary_provider() -> None:
@@ -51,7 +51,7 @@ def test_get_follows_the_primary_provider() -> None:
         "primary": "openai/gpt-4o",
         "fallback": "anthropic/claude-sonnet-4-6",
     }
-    assert body["judge_model"] == "anthropic/claude-sonnet-4-6"
+    assert body["judge_model"] == "anthropic/claude-opus-4-1"
 
 
 def test_put_can_no_longer_repoint_models() -> None:
@@ -60,7 +60,7 @@ def test_put_can_no_longer_repoint_models() -> None:
         put = client.put("/api/config", json={"judge_model": "anthropic/claude-haiku-4-5"})
         body = client.get("/api/config").json()
     assert put.status_code == 405
-    assert body["judge_model"] == "openai/gpt-4o"
+    assert body["judge_model"] == "openai/gpt-4.1"
 
 
 def test_dashboard_no_longer_offers_model_switching() -> None:

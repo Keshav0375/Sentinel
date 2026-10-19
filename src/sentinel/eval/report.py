@@ -61,6 +61,7 @@ class EvalReport:
     scenarios_run: int
     generated_at: str
     judge_model: str
+    judge_conflicts: int = 0
 
 
 # ── Builder ───────────────────────────────────────────────────────────────────
@@ -79,14 +80,20 @@ def build_report(
 
     Returns:
         ``EvalReport`` with per-dimension stats, pass rate, and metadata.
+
+    A ``judge_conflict`` score (the run used the judge's model, decision 2026-10-18) stays
+    in ``scores`` for visibility but is left out of every aggregate and of
+    ``scenarios_run``; ``judge_conflicts`` counts them.
     """
-    n = len(scores)
+    valid = [s for s in scores if not s.judge_conflict]
+    conflicts = len(scores) - len(valid)
+    n = len(valid)
     generated_at = datetime.now(UTC).isoformat()
     judge_model = scores[0].judge_model if scores else "unknown"
 
     if n == 0:
         return EvalReport(
-            scores=[],
+            scores=scores,
             dimension_stats=_empty_dimension_stats(),
             avg_total_score=0.0,
             pass_rate=0.0,
@@ -94,12 +101,13 @@ def build_report(
             scenarios_run=0,
             generated_at=generated_at,
             judge_model=judge_model,
+            judge_conflicts=conflicts,
         )
 
-    avg_total = sum(s.total_score for s in scores) / n
-    pass_rate = sum(1 for s in scores if s.total_score >= pass_threshold) / n
+    avg_total = sum(s.total_score for s in valid) / n
+    pass_rate = sum(1 for s in valid if s.total_score >= pass_threshold) / n
 
-    dimension_stats = _compute_dimension_stats(scores)
+    dimension_stats = _compute_dimension_stats(valid)
 
     return EvalReport(
         scores=scores,
@@ -110,6 +118,7 @@ def build_report(
         scenarios_run=n,
         generated_at=generated_at,
         judge_model=judge_model,
+        judge_conflicts=conflicts,
     )
 
 
@@ -173,6 +182,7 @@ def to_json_dict(report: EvalReport) -> dict[str, Any]:
             "pass_rate": report.pass_rate,
             "pass_threshold": report.pass_threshold,
             "judge_model": report.judge_model,
+            "judge_conflicts": report.judge_conflicts,
         },
         "dimension_stats": [
             {
@@ -207,6 +217,7 @@ def to_markdown(report: EvalReport) -> str:
     lines.append("| Metric | Value |")
     lines.append("|--------|-------|")
     lines.append(f"| Scenarios evaluated | {report.scenarios_run} |")
+    lines.append(f"| Judge conflicts (excluded) | {report.judge_conflicts} |")
     lines.append(f"| Average total score | {report.avg_total_score:.2f} / 5.00 |")
     lines.append(f"| Pass rate (≥{report.pass_threshold}) | {report.pass_rate * 100:.0f}% |")
     pf = "PASS" if report.avg_total_score >= report.pass_threshold else "FAIL"
@@ -230,7 +241,10 @@ def to_markdown(report: EvalReport) -> str:
 
     for score in report.scores:
         by_dim = {str(ds.dimension): ds.score for ds in score.dimension_scores}
-        passed = "PASS" if score.total_score >= report.pass_threshold else "FAIL"
+        if score.judge_conflict:
+            passed = "JUDGE_CONFLICT"
+        else:
+            passed = "PASS" if score.total_score >= report.pass_threshold else "FAIL"
         row = [score.scenario_id, f"{score.total_score:.2f}", passed]
         row += [f"{by_dim.get(d, 0.0):.1f}" for d in dim_labels]
         lines.append("| " + " | ".join(row) + " |")

@@ -51,6 +51,10 @@ class TrajectoryScore(BaseModel):
     known ground truth.
 
     total_score is the mean of all dimension scores (0-5 scale).
+
+    judge_conflict marks a run the judge would have graded itself on — its model is in the
+    run's ``models_used`` (decision 2026-10-18). Such a score is invalid: it is zeroed,
+    never judged, and excluded from every aggregate.
     """
 
     incident_id: str
@@ -58,6 +62,7 @@ class TrajectoryScore(BaseModel):
     dimension_scores: list[DimensionScore] = []
     total_score: float = 0.0
     judge_model: str
+    judge_conflict: bool = False
 
     @field_validator("total_score")
     @classmethod

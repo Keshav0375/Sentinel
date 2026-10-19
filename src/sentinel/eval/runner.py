@@ -96,7 +96,8 @@ async def run_scenario_eval(
         incident_id=incident_id,
     )
 
-    # The judge runs on the non-primary provider (§4.7, decision 2026-10-15).
+    # The judge runs on a model no role uses, off the primary provider (§4.7, decision
+    # 2026-10-18).
     judge_model, judge_client = make_judge_client(settings)
 
     # ── Set up incident in STM ─────────────────────────────────────────────────
@@ -177,6 +178,9 @@ async def run_scenario_eval(
         pass
 
     # ── Judge the trajectory ───────────────────────────────────────────────────
+    # The trajectory carries result.models_used: evaluate_trajectory refuses to grade a run
+    # that used the judge's model and returns a score marked judge_conflict (runtime guard,
+    # decision 2026-10-18); aggregates below and in eval.report drop it.
     ground_truth = scenario.ground_truth.model_dump()
     score = await evaluate_trajectory(
         trajectory,
@@ -192,6 +196,7 @@ async def run_scenario_eval(
         scenario_id=scenario_id,
         incident_id=incident_id,
         total_score=score.total_score,
+        judge_conflict=score.judge_conflict,
     )
     return EvalRunResult(
         scenario_id=scenario_id,
@@ -304,7 +309,8 @@ async def run_eval(
         "eval_run_complete",
         scenarios_run=len(results),
         scenarios_requested=len(resolved_ids),
-        avg_score=(sum(r.score.total_score for r in results) / len(results) if results else 0.0),
+        judge_conflicts=sum(1 for r in results if r.score.judge_conflict),
+        avg_score=summary_stats(results)["avg_total"],
     )
     return results
 
@@ -318,24 +324,30 @@ def summary_stats(results: list[EvalRunResult]) -> dict[str, Any]:
     """Compute aggregate statistics from a list of EvalRunResults.
 
     Returns a dict with keys: ``avg_total``, ``pass_rate``, ``failure_rate``,
-    ``generated_at``. Pass threshold is 3.0 (60% of the 0-5 scale).
+    ``judge_conflicts``, ``generated_at``. Pass threshold is 3.0 (60% of the 0-5 scale).
+    A ``judge_conflict`` score is invalid (decision 2026-10-18): it is counted in
+    ``judge_conflicts`` and left out of every other figure.
     """
-    if not results:
+    valid = [r for r in results if not r.score.judge_conflict]
+    conflicts = len(results) - len(valid)
+    if not valid:
         return {
             "avg_total": 0.0,
             "pass_rate": 0.0,
             "failure_rate": 0.0,
+            "judge_conflicts": conflicts,
             "generated_at": datetime.now(UTC).isoformat(),
         }
 
-    total_sum = sum(r.score.total_score for r in results)
-    pass_count = sum(1 for r in results if r.score.total_score >= 3.0)
-    error_count = sum(1 for r in results if r.pipeline_error is not None)
+    total_sum = sum(r.score.total_score for r in valid)
+    pass_count = sum(1 for r in valid if r.score.total_score >= 3.0)
+    error_count = sum(1 for r in valid if r.pipeline_error is not None)
 
-    n = len(results)
+    n = len(valid)
     return {
         "avg_total": round(total_sum / n, 4),
         "pass_rate": round(pass_count / n, 4),
         "failure_rate": round(error_count / n, 4),
+        "judge_conflicts": conflicts,
         "generated_at": datetime.now(UTC).isoformat(),
     }

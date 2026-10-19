@@ -33,7 +33,7 @@ from sentinel.models.tools import EscalationContext
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _make_trajectory_score(total: float = 4.0) -> TrajectoryScore:
+def _make_trajectory_score(total: float = 4.0, *, judge_conflict: bool = False) -> TrajectoryScore:
     return TrajectoryScore(
         incident_id="inc-001",
         scenario_id="bad_deploy_01",
@@ -42,6 +42,7 @@ def _make_trajectory_score(total: float = 4.0) -> TrajectoryScore:
         ],
         total_score=total,
         judge_model="test-model",
+        judge_conflict=judge_conflict,
     )
 
 
@@ -50,11 +51,12 @@ def _make_eval_result(
     total: float = 4.0,
     pipeline_error: str | None = None,
     trajectory_missing: bool = False,
+    judge_conflict: bool = False,
 ) -> EvalRunResult:
     return EvalRunResult(
         scenario_id=scenario_id,
         incident_id=f"eval-{scenario_id}-abc12345",
-        score=_make_trajectory_score(total),
+        score=_make_trajectory_score(total, judge_conflict=judge_conflict),
         pipeline_error=pipeline_error,
         trajectory_missing=trajectory_missing,
     )
@@ -97,7 +99,7 @@ def _judge() -> tuple[str, MagicMock]:
     """What make_judge_client returns: the judge model and a mock JudgeClient."""
     client = MagicMock()
     client.complete = AsyncMock()
-    return "openai/gpt-4o", client
+    return "openai/gpt-4.1", client
 
 
 # ── scores_from_results ───────────────────────────────────────────────────────
@@ -165,6 +167,23 @@ class TestSummaryStats:
     def test_all_fail(self) -> None:
         results = [_make_eval_result("a", 0.0), _make_eval_result("b", 1.0)]
         assert summary_stats(results)["pass_rate"] == pytest.approx(0.0)
+
+    def test_judge_conflicts_are_counted_and_excluded(self) -> None:
+        """Decision 2026-10-18: a judge_conflict score is invalid — not in any figure."""
+        results = [
+            _make_eval_result("a", 4.0),
+            _make_eval_result("b", 0.0, pipeline_error="x", judge_conflict=True),
+        ]
+        stats = summary_stats(results)
+        assert stats["avg_total"] == pytest.approx(4.0)
+        assert stats["pass_rate"] == pytest.approx(1.0)
+        assert stats["failure_rate"] == pytest.approx(0.0)
+        assert stats["judge_conflicts"] == 1
+
+    def test_only_conflicts_gives_zeros(self) -> None:
+        stats = summary_stats([_make_eval_result("a", 5.0, judge_conflict=True)])
+        assert stats["avg_total"] == pytest.approx(0.0)
+        assert stats["judge_conflicts"] == 1
 
 
 # ── run_scenario_eval ─────────────────────────────────────────────────────────
@@ -247,6 +266,48 @@ async def _run(
 
 
 class TestRunScenarioEval:
+    @pytest.mark.parametrize("ran_judge_model", [True, False])
+    async def test_the_judge_conflict_guard_runs_on_models_used(
+        self, tmp_path: Path, ran_judge_model: bool
+    ) -> None:
+        """The real evaluate_trajectory: a run whose models_used holds the judge's model is
+        never sent to the judge and comes back marked judge_conflict."""
+        judge_model, client = _judge()
+        client.complete = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "dimension_scores": [
+                        {"dimension": str(d), "score": 4, "reasoning": "ok"} for d in EvalDimension
+                    ]
+                }
+            )
+        )
+        result = _escalated()
+        result.models_used = ["anthropic/claude-haiku-4-5"] + (
+            [judge_model] if ran_judge_model else []
+        )
+        with (
+            patch("sentinel.eval.runner.generate_alert", return_value=_alert()),
+            patch("sentinel.eval.runner.uuid.uuid4", return_value=_INCIDENT),
+            patch("sentinel.eval.runner.make_judge_client", return_value=(judge_model, client)),
+            patch("sentinel.eval.runner.run_pipeline", new_callable=AsyncMock, return_value=result),
+        ):
+            run = await run_scenario_eval(
+                _make_scenario_mock(),
+                short_term_memory=_make_stm_mock(),
+                trajectories_dir=tmp_path,
+                settings=_fake_settings(tmp_path),
+                semantic_memory=MagicMock(),
+                episodic_memory=MagicMock(),
+            )
+        assert run.score.judge_conflict is ran_judge_model
+        if ran_judge_model:
+            client.complete.assert_not_awaited()
+            assert run.score.total_score == 0.0
+        else:
+            client.complete.assert_awaited_once()
+            assert run.score.total_score == pytest.approx(4.0)
+
     async def test_returns_eval_run_result(self, tmp_path: Path) -> None:
         result = await _run(tmp_path)
         assert isinstance(result, EvalRunResult)
