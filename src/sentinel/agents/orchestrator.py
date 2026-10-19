@@ -20,8 +20,12 @@ Every cap is enforced here, in code (decision 2026-10-15):
 - **Decision gate (§4.2).** Confidence ≥ 0.7 and one specific deploy → resolution; anything
   else escalates.
 - **Resolution.** The draft is read from the ``prepare_rollback_spec`` tool output, never
-  from the agent's reply, and its ``target_deploy`` must match a ``deployments`` row of the
-  incident's service (commit SHA prefix, PR number, deploy time; failed deploys allowed).
+  from the agent's reply. Its ``target_deploy`` must be the deploy the decision gate
+  approved (the critique's commit SHA prefix and PR number) and must match a
+  ``deployments`` row of the incident's service (commit SHA prefix, PR number, deploy time;
+  failed deploys allowed); on the ``deploy_failure`` fast path that row must be the failed
+  deploy. Any mismatch escalates. The spec returned carries the verified row's full commit
+  SHA, PR number and deploy time, never the model's copy.
 - **Reverification (§4.4).** PASS → ``rollback_proposed``; FAIL → resolution once more with
   the reason (:data:`REVERIFICATION_MAX_RETRIES`); a second FAIL or ESCALATE → escalate.
 - **Tool-call budget (§4.6).** Every tool invocation — every ``Runner.run``, fallback
@@ -93,6 +97,7 @@ from sentinel.models.reflexion import (
     REFLEXION_CONFIDENCE_THRESHOLD,
     FetchLogsCall,
     ReflexionResult,
+    SuspectDeploy,
 )
 from sentinel.models.reverification import (
     ReverificationOutcome,
@@ -104,6 +109,7 @@ from sentinel.models.tools import (
     EscalationInput,
     LogFetchInput,
     RollbackSpec,
+    TargetDeploy,
     ToolFailure,
 )
 from sentinel.providers import Role, RoutedRun, call_with_fallback, coerce_output
@@ -378,9 +384,20 @@ class _IncidentRun:
                     f"the rollback spec's confidence {draft.confidence:.2f} is below "
                     f"{REFLEXION_CONFIDENCE_THRESHOLD}"
                 )
+            assert critique.deploy is not None  # the gate passed: one specific deploy
+            problem = _target_mismatch(draft.target_deploy, critique.deploy)
+            if problem is not None:
+                return self._escalate(problem)
             check = await check_rollback_target(self.deps.pool, self.service, draft.target_deploy)
             if check.problem is not None:
                 return self._escalate(check.problem)
+            assert check.record is not None  # a check without a problem has its row
+            if fast and check.record.deploy_status != "failed":
+                return self._escalate(
+                    f"deploy_failure fast path: the rollback target {check.record.commit_sha} "
+                    f"is a {check.record.deploy_status} deploy, not the failed one"
+                )
+            draft = _pinned(draft, check)
             self._note("target_check", f"deployments row {check.deploy_id}")
 
             verdict = await self._reverify(draft, check)
@@ -780,6 +797,49 @@ def _gate_problem(critique: ReflexionResult) -> str | None:
     if not critique.specific_deploy_identified or critique.deploy is None:
         return "decision gate: the evidence does not point at one specific deploy"
     return None
+
+
+# The shortest commit prefix two SHAs must share to name one commit (as check_rollback_target).
+_MIN_SHA_PREFIX: Final = 7
+
+
+def _same_commit(a: str, b: str) -> bool:
+    """True when *a* and *b* agree on their common prefix of at least 7 characters."""
+    a, b = a.strip().lower(), b.strip().lower()
+    n = min(len(a), len(b))
+    return n >= _MIN_SHA_PREFIX and a[:n] == b[:n]
+
+
+def _target_mismatch(target: TargetDeploy, approved: SuspectDeploy) -> str | None:
+    """Why the drafted *target* is not the deploy the decision gate *approved*, or None.
+
+    The gate approved one deploy (the critique's); a draft that names another — even a
+    real, recorded one — never reaches the cross-check.
+    """
+    if _same_commit(target.commit_sha, approved.commit_sha) and (
+        target.pr_number == approved.pr_number
+    ):
+        return None
+    return (
+        f"the rollback spec targets commit {target.commit_sha} (PR #{target.pr_number}), "
+        f"not the deploy the decision gate approved: commit {approved.commit_sha} "
+        f"(PR #{approved.pr_number})"
+    )
+
+
+def _pinned(spec: RollbackSpec, check: TargetDeployCheck) -> RollbackSpec:
+    """*spec* with its target set to the verified ``deployments`` row: the full commit SHA
+    (GHA's TARGET_SHA), PR number and deploy time — not the model's prefix or copy."""
+    assert check.record is not None
+    record = check.record
+    target = TargetDeploy(
+        pr_number=record.pr_number
+        if record.pr_number is not None
+        else spec.target_deploy.pr_number,
+        commit_sha=record.commit_sha,
+        deployed_at=record.deployed_at,
+    )
+    return spec.model_copy(update={"target_deploy": target})
 
 
 def _structured[T: BaseModel](output: object, schema: type[T]) -> T | None:

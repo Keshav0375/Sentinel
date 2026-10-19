@@ -197,9 +197,15 @@ def _runs(script: FakeScript, agent: str) -> int:
     return sum(1 for name, _ in script.calls if name == agent)
 
 
-@pytest.fixture
-def target_ok(monkeypatch: pytest.MonkeyPatch) -> list[TargetDeploy]:
-    """The cross-check finds a matching row for whatever target it is given."""
+FULL_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"  # the row behind the SHA prefix
+ROW_DEPLOYED_AT = DEPLOYED_AT + timedelta(seconds=40)  # the row's time, not the model's copy
+
+
+def _stub_target_check(
+    monkeypatch: pytest.MonkeyPatch, *, status: str = "succeeded", row: bool = False
+) -> list[TargetDeploy]:
+    """The cross-check finds a matching row for whatever target it is given: a *status*
+    row echoing the target, or with *row* the recorded FULL_SHA at ROW_DEPLOYED_AT."""
     seen: list[TargetDeploy] = []
 
     async def check(
@@ -208,15 +214,27 @@ def target_ok(monkeypatch: pytest.MonkeyPatch) -> list[TargetDeploy]:
         seen.append(target)
         record = DeployRecord(
             pr_number=target.pr_number,
-            commit_sha=target.commit_sha,
-            deploy_status="succeeded",
-            deployed_at=target.deployed_at,
+            commit_sha=FULL_SHA if row else target.commit_sha,
+            deploy_status=status,
+            deployed_at=ROW_DEPLOYED_AT if row else target.deployed_at,
             files_changed=["app/main.py"],
         )
         return TargetDeployCheck(deploy_id="deploy-1", record=record)
 
     monkeypatch.setattr(orchestrator, "check_rollback_target", check)
     return seen
+
+
+@pytest.fixture
+def target_ok(monkeypatch: pytest.MonkeyPatch) -> list[TargetDeploy]:
+    """The cross-check finds a matching (succeeded) row for whatever target it is given."""
+    return _stub_target_check(monkeypatch)
+
+
+@pytest.fixture
+def failed_target_ok(monkeypatch: pytest.MonkeyPatch) -> list[TargetDeploy]:
+    """As target_ok, the row being a failed deploy (the deploy_failure fast path's)."""
+    return _stub_target_check(monkeypatch, status="failed")
 
 
 @pytest.fixture
@@ -709,7 +727,7 @@ async def test_without_a_database_no_rollback_can_be_proposed() -> None:
 
 
 async def test_deploy_failure_fast_path_is_gated_and_reverified(
-    target_ok: list[TargetDeploy], inputs: list[tuple[str, str]]
+    failed_target_ok: list[TargetDeploy], inputs: list[tuple[str, str]]
 ) -> None:
     request = _request("deploy_failure")
     with fake_script() as script:
@@ -719,7 +737,7 @@ async def test_deploy_failure_fast_path_is_gated_and_reverified(
     assert result.status == "rollback_proposed"
     assert result.reflexion_loops == 0
     assert _runs(script, REVERIFICATION_AGENT) == 1
-    assert target_ok and target_ok[0].commit_sha == SHA
+    assert failed_target_ok and failed_target_ok[0].commit_sha == SHA
     analysis_input = next(text for name, text in inputs if name == "analysis")
     assert "Signal type: deploy_failure" in analysis_input
 
@@ -739,6 +757,81 @@ async def test_deploy_failure_low_confidence_escalates_without_a_loop(
     assert _runs(script, REFLEXION_AGENT) == 1
     assert _runs(script, "analysis") == 2  # one pass only
     assert _runs(script, "resolution") == 0
+
+
+async def test_the_fast_path_rollback_is_pinned_to_the_failed_deploy(
+    target_ok: list[TargetDeploy],
+) -> None:
+    """deploy_failure: the spec must revert the failed deploy — a recorded green deploy,
+    even the gate-approved one, escalates before reverification."""
+    request = _request("deploy_failure")
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, _deps())
+
+    assert result.status == "escalated"
+    assert result.escalation is not None
+    assert "is a succeeded deploy, not the failed one" in result.escalation.missing[0]
+    assert _runs(script, REVERIFICATION_AGENT) == 0
+
+
+# ── Rollback target pinned to the gate-approved, verified deploy ──────────────
+
+
+@pytest.mark.parametrize(
+    ("sha", "pr"),
+    [("f0e1d2c3", PR), (SHA, PR + 1)],
+    ids=["another commit", "another PR"],
+)
+async def test_a_draft_swapped_to_another_valid_deploy_escalates(
+    target_ok: list[TargetDeploy], sha: str, pr: int
+) -> None:
+    """The gate approved DEPLOY; a draft naming any other deploy — one the cross-check
+    would accept as recorded — escalates and is never checked or reverified."""
+    request = _request()
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis())
+        script.on(REFLEXION_AGENT, _high())
+        script.on("resolution", *_rollback(request, sha=sha, pr=pr))
+        result = await run_pipeline(request, _deps())
+
+    assert result.status == "escalated"
+    assert result.escalation is not None
+    assert "not the deploy the decision gate approved" in result.escalation.missing[0]
+    assert target_ok == []  # the cross-check never ran
+    assert _runs(script, REVERIFICATION_AGENT) == 0
+
+
+async def test_the_spec_carries_the_verified_full_sha_not_the_models_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _stub_target_check(monkeypatch, row=True)
+    request = _request()
+    with fake_script() as script:
+        _happy(script, request)  # the model drafts the 7-character prefix SHA
+        result = await run_pipeline(request, _deps())
+
+    assert result.status == "rollback_proposed"
+    assert seen[0].commit_sha == SHA
+    assert result.rollback_spec is not None
+    target = result.rollback_spec.target_deploy
+    assert target.commit_sha == FULL_SHA
+    assert target.deployed_at == ROW_DEPLOYED_AT and target.pr_number == PR
+    assert result.target_sha == FULL_SHA
+
+
+async def test_a_full_sha_draft_matches_the_gates_prefix(target_ok: list[TargetDeploy]) -> None:
+    """Prefix rule both ways: the critique names a 7-char prefix, the draft the full SHA."""
+    request = _request()
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis())
+        script.on(REFLEXION_AGENT, _high())
+        script.on("resolution", *_rollback(request, sha=FULL_SHA.upper()))
+        script.on(REVERIFICATION_AGENT, reverification_turn("PASS"))
+        result = await run_pipeline(request, _deps())
+    assert result.status == "rollback_proposed"
 
 
 # ── Tool-call budget (§4.6) ───────────────────────────────────────────────────
@@ -1020,6 +1113,9 @@ async def test_a_real_matching_row_lets_the_rollback_through(
     target = json.loads(reverify.split("## Target deploy\n", 1)[1].split("\n\n", 1)[0])
     assert target["commit_sha"] == "a1b2c3d4e5f6" and target["deploy_status"] == "failed"
     assert target["files_changed"] == ["app/main.py"] and target["service"] == SERVICE
+    # The model drafted the prefix "a1b2c3d"; the spec carries the recorded commit.
+    assert result.rollback_spec is not None
+    assert result.rollback_spec.target_deploy.commit_sha == "a1b2c3d4e5f6"
 
 
 @pytest.mark.parametrize(
