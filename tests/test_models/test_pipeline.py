@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import uuid
@@ -144,6 +145,7 @@ def test_rollback_result_exposes_the_9_3_outputs() -> None:
         **_common(incident_id),
     )
     assert result.target_sha == "a1b2c3d"
+    assert result.target_deploy == "a1b2c3d"
     assert result.evidence_summary == "checks fail since pr-42"
     assert result.models_used == []
 
@@ -157,7 +159,39 @@ def test_escalated_result_exposes_the_9_3_outputs() -> None:
         **_common(incident_id),
     )
     assert result.target_sha is None
+    assert result.target_deploy is None
     assert result.evidence_summary == "a; b"
+
+
+@pytest.mark.parametrize("outcome", ["rollback", "escalated"])
+def test_the_9_3_outputs_are_serialized_and_round_trip(outcome: str) -> None:
+    """target_deploy, target_sha and evidence_summary are in model_dump (what
+    pipeline_result and GET /incidents/{id} carry), and a dump validates back."""
+    incident_id = str(uuid.uuid4())
+    if outcome == "rollback":
+        result = PipelineResult(
+            status="rollback_proposed",
+            resolution_type="rollback",
+            rollback_spec=_spec(incident_id),
+            **_common(incident_id),
+        )
+        expected = {
+            "target_deploy": "a1b2c3d",
+            "target_sha": "a1b2c3d",
+            "evidence_summary": "checks fail since pr-42",
+        }
+    else:
+        result = PipelineResult(
+            status="escalated",
+            resolution_type="escalated",
+            escalation=_escalation(),
+            **_common(incident_id),
+        )
+        expected = {"target_deploy": None, "target_sha": None, "evidence_summary": "a; b"}
+    dumped = result.model_dump(mode="json")
+    assert {key: dumped[key] for key in expected} == expected
+    assert json.loads(result.model_dump_json())["evidence_summary"] == expected["evidence_summary"]
+    assert PipelineResult.model_validate(dumped) == result
 
 
 @pytest.mark.parametrize(

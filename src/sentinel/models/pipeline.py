@@ -8,8 +8,10 @@ the two new fields from the alert's ``metadata`` (see there).
 
 ``PipelineResult`` is the terminal outcome: ``rollback_proposed`` with the rollback spec
 GitHub Actions turns into a revert PR, or ``escalated`` with the context a human needs.
-Nothing here executes anything; the §9.3 job outputs (``resolution_type``, ``root_cause``,
-``confidence``, ``target_deploy``, ``evidence_summary``) are derivable from it.
+Nothing here executes anything. The §9.3 job outputs (``resolution_type``, ``root_cause``,
+``confidence``, ``target_deploy``, ``evidence_summary``) are all in its ``model_dump``: the
+last two (and ``target_sha``) are computed fields, so they reach ``pipeline_result``, short-
+term memory and ``GET /incidents/{id}`` with the rest.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Final, Literal, Self, get_args
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from sentinel.models.alert import AlertPayload
 from sentinel.models.tools import EscalationContext, RollbackSpec
@@ -140,11 +142,20 @@ class PipelineResult(BaseModel):
                 raise ValueError("escalated carries no rollback spec")
         return self
 
+    # Computed fields: serialized by model_dump (and ignored when a dump is validated back).
+    @computed_field  # type: ignore[prop-decorator]
     @property
-    def target_sha(self) -> str | None:
+    def target_deploy(self) -> str | None:
         """§9.3 ``target_deploy``: the commit the revert PR reverts (GHA's TARGET_SHA)."""
         return None if self.rollback_spec is None else self.rollback_spec.target_deploy.commit_sha
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def target_sha(self) -> str | None:
+        """The same commit under the name the incident workflow uses (TARGET_SHA)."""
+        return self.target_deploy
+
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def evidence_summary(self) -> str:
         """§9.3 ``evidence_summary``: the spec's, or the escalation's evidence joined."""

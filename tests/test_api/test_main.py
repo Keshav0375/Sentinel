@@ -203,6 +203,27 @@ async def test_pipeline_fn_marks_rollback_proposed_and_stores_the_result() -> No
 
 
 @pytest.mark.asyncio
+async def test_get_incident_returns_the_9_3_outputs_of_the_stored_result() -> None:
+    """target_deploy, target_sha and evidence_summary are stored with the result and
+    returned by GET /incidents/{id} (the §9.3 job reads them)."""
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    from sentinel.api.incidents import make_incidents_router  # noqa: PLC0415
+
+    stm = _populated_stm(_INCIDENT)
+    with patch(_RUN_PATCH, new_callable=AsyncMock, return_value=_result()):
+        await _make_fn(stm)(_request())
+    app = FastAPI()
+    app.include_router(make_incidents_router(stm))
+    with TestClient(app) as client:
+        body = client.get(f"/incidents/{_INCIDENT}").json()
+
+    assert body["result"]["target_deploy"] == "a1b2c3d"
+    assert body["result"]["target_sha"] == "a1b2c3d"
+    assert body["result"]["evidence_summary"] == "checks fail since pr-42"
+
+
+@pytest.mark.asyncio
 async def test_pipeline_fn_marks_an_escalated_result_escalated() -> None:
     stm = _populated_stm(_INCIDENT)
     with patch(_RUN_PATCH, new_callable=AsyncMock, return_value=_result("escalated")):
