@@ -98,6 +98,8 @@ ROLES: Final[tuple[Role, ...]] = get_args(Role)
 # "Default (Anthropic)" model, the OpenAI column the "Fallback (OpenAI)" one; with
 # SENTINEL_PRIMARY_PROVIDER=openai the two swap.
 MODEL_MAP: Final[Mapping[Role, Mapping[Provider, str]]] = {
+    # Unused: the orchestrator is Python code (agents/orchestrator.py) and makes no model
+    # call. Kept because §4.7 lists the row; the judge check covers it too.
     "orchestrator": {"anthropic": "anthropic/claude-sonnet-4-6", "openai": "openai/gpt-4o"},
     "triage": {"anthropic": "anthropic/claude-haiku-4-5", "openai": "openai/gpt-4o-mini"},
     "analysis": {"anthropic": "anthropic/claude-sonnet-4-6", "openai": "openai/gpt-4o"},

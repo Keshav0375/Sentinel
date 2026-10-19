@@ -103,10 +103,8 @@ def test_incident_defaults() -> None:
     assert inc.affected_service is None
     assert inc.timeline == []
     assert inc.triage_result is None
-    assert inc.log_analysis is None
-    assert inc.deploy_correlation is None
-    assert inc.remediation_plan is None
-    assert inc.comms_summary is None
+    for removed in ("log_analysis", "deploy_correlation", "remediation_plan", "comms_summary"):
+        assert removed not in Incident.model_fields  # the deleted agents' outputs
     assert inc.resolved_at is None
     assert inc.created_at.tzinfo is not None
 
@@ -156,9 +154,7 @@ def test_incident_severity_assignment() -> None:
 def test_incident_result_fields_accept_dicts() -> None:
     inc = Incident(alert=_alert())
     inc.triage_result = {"severity": "P1", "service": "api-gateway"}
-    inc.log_analysis = {"hypothesis": "NullPointer in AuthMiddleware"}
     assert inc.triage_result["severity"] == "P1"
-    assert inc.log_analysis["hypothesis"] is not None
 
 
 def test_incident_json_round_trip() -> None:

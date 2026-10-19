@@ -8,7 +8,7 @@ from pydantic import BaseModel, field_validator
 
 
 class EvalDimension(StrEnum):
-    """The six dimensions scored by the LLM-as-judge.
+    """The five dimensions scored by the LLM-as-judge.
 
     Each dimension is scored 0-5 with reasoning. Together they capture both
     the correctness of the agent's conclusions and the quality of the process
@@ -20,7 +20,6 @@ class EvalDimension(StrEnum):
     TOOL_EFFICIENCY = "tool_efficiency"
     MTTR = "mttr"
     REMEDIATION_SAFETY = "remediation_safety"
-    COMMS_QUALITY = "comms_quality"
 
 
 class DimensionScore(BaseModel):

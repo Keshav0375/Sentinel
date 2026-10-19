@@ -76,11 +76,9 @@ class TriageResult(BaseModel):
 class Incident(BaseModel):
     """Full state of a live or resolved incident.
 
-    Result fields (triage_result, log_analysis, deploy_correlation,
-    remediation_plan) are typed as dict[str, Any] | None because their
-    structured types (TriageResult, LogAnalysis, etc.) are defined in later
-    phases. They will be populated by agents as JSON-serialisable dicts and
-    re-typed once those models exist.
+    ``triage_result`` is the triage agent's output as a JSON-serialisable dict. The
+    pipeline's conclusions (root cause, rollback spec or escalation) are not fields here:
+    they travel in ``PipelineResult`` and the ``IncidentOutcome`` stored with the incident.
     """
 
     # A UUID string: episodic memory stores it as incidents.id (UUID, §5.3).
@@ -91,9 +89,5 @@ class Incident(BaseModel):
     affected_service: str | None = None
     timeline: list[TimelineEntry] = []  # pydantic v2 deep-copies mutable defaults
     triage_result: dict[str, Any] | None = None
-    log_analysis: dict[str, Any] | None = None
-    deploy_correlation: dict[str, Any] | None = None
-    remediation_plan: dict[str, Any] | None = None
-    comms_summary: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     resolved_at: datetime | None = None

@@ -15,8 +15,8 @@ resolution_type, reflexion_loops and langfuse_trace_id (and its result, in ``tra
 from it.
 
 Provenance: ``root_cause`` and ``resolution`` are agent output, not verified fact. The
-stored ``provenance`` records ``root_cause_by`` / ``resolution_by`` (the agent, from the
-incident timeline, else ``"unknown"``), ``model_generated: true`` and ``stored_at``; it
+stored ``provenance`` records ``root_cause_by`` / ``resolution_by`` (the agent named by the
+pipeline's outcome, else ``"unknown"``), ``model_generated: true`` and ``stored_at``; it
 reads back inside ``EpisodicRecord.raw_timeline["provenance"]``. The embedded symptom text
 holds only what was observed (the alert: service, metric, value, threshold, severity, and a
 title/description when the alert metadata carries one) — never an agent's hypothesis or
@@ -89,7 +89,8 @@ class EpisodicMemory:
         not supply are left as they are.
 
         With *outcome* (the phase-4 pipeline's), its root cause, resolution and
-        provenance replace the ones derived from the incident, its columns
+        provenance are stored (without one: ``"unknown"``, ``"unresolved"`` and agents
+        ``"unknown"``), its columns
         (correlation_id, root_cause_confidence, resolution_type, reflexion_loops,
         langfuse_trace_id) are written too, and ``trajectory`` also holds
         ``pipeline_result``.
@@ -113,10 +114,9 @@ class EpisodicMemory:
             mttr_seconds = int((incident.resolved_at - incident.created_at).total_seconds())
 
         if outcome is None:
-            root_cause, root_cause_role = _root_cause_with_source(incident)
-            resolution, resolution_role = _resolution_with_source(incident)
-            root_cause_by = _agent_for_role(incident, root_cause_role)
-            resolution_by = _agent_for_role(incident, resolution_role)
+            # Only the pipeline's outcome carries a conclusion and the agent behind it.
+            root_cause, root_cause_by = _NO_ROOT_CAUSE, _UNKNOWN_AGENT
+            resolution, resolution_by = _NO_RESOLUTION, _UNKNOWN_AGENT
         else:
             root_cause, root_cause_by = outcome.root_cause, outcome.root_cause_by
             resolution, resolution_by = outcome.resolution, outcome.resolution_by
@@ -400,7 +400,7 @@ def _build_symptom_text(incident: Incident) -> str:
 
     Service, metric, current value vs threshold, severity, and the alert's title /
     description when its metadata carries them. Agent output (triage's affected service,
-    the log analyst's hypothesis, any root cause) is deliberately left out.
+    the analysis hypothesis, any root cause) is deliberately left out.
     """
     alert = incident.alert
     parts: list[str] = [
@@ -415,57 +415,10 @@ def _build_symptom_text(incident: Incident) -> str:
     return " ".join(parts)
 
 
-# Agent roles, matched against the agent names in the incident timeline.
-_LOG_ANALYST = "log_analyst"
-_DEPLOY_CORRELATOR = "deploy_correlator"
-_REMEDIATION = "remediation"
-_COMMS = "comms"
-_HANDOFF_PREFIX = "handoff → "
-
-
-def _root_cause_with_source(incident: Incident) -> tuple[str, str | None]:
-    """The root cause from the analysis results, and the role of the agent that produced it."""
-    if incident.log_analysis:
-        hypothesis = incident.log_analysis.get("hypothesis")
-        if hypothesis:
-            return str(hypothesis), _LOG_ANALYST
-    if incident.deploy_correlation:
-        evidence = incident.deploy_correlation.get("evidence")
-        if evidence:
-            return str(evidence), _DEPLOY_CORRELATOR
-    return "unknown", None
-
-
-def _resolution_with_source(incident: Incident) -> tuple[str, str | None]:
-    """The resolution from the analysis results, and the role of the agent that produced it."""
-    if incident.remediation_plan:
-        justification = incident.remediation_plan.get("justification")
-        if justification:
-            return str(justification), _REMEDIATION
-        action_type = incident.remediation_plan.get("action_type")
-        if action_type:
-            return str(action_type), _REMEDIATION
-    if incident.comms_summary:
-        return incident.comms_summary, _COMMS
-    return "unresolved", None
-
-
-def _agent_for_role(incident: Incident, role: str | None) -> str:
-    """The timeline's name for the agent in *role* (latest entry wins), else "unknown".
-
-    An agent shows up as an entry's ``agent_name`` or as the target of a handoff
-    (``"handoff → <agent>"``).
-    """
-    if role is None:
-        return "unknown"
-    for entry in reversed(incident.timeline):
-        if role in entry.agent_name:
-            return entry.agent_name
-        if entry.action.startswith(_HANDOFF_PREFIX):
-            target = entry.action.removeprefix(_HANDOFF_PREFIX).strip()
-            if role in target:
-                return target
-    return "unknown"
+# What a store without the pipeline's outcome records: no conclusion, no agent behind it.
+_NO_ROOT_CAUSE = "unknown"
+_NO_RESOLUTION = "unresolved"
+_UNKNOWN_AGENT = "unknown"
 
 
 def _row_to_record(row: asyncpg.Record) -> EpisodicRecord:

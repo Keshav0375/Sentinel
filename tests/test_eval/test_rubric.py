@@ -16,8 +16,8 @@ from sentinel.eval.rubric import (
 
 
 class TestDimensionRubricStructure:
-    def test_all_six_dimensions_have_rubrics(self) -> None:
-        assert len(DIMENSION_RUBRICS) == 6
+    def test_all_five_dimensions_have_rubrics(self) -> None:
+        assert len(DIMENSION_RUBRICS) == 5
         for dim in EvalDimension:
             assert dim in DIMENSION_RUBRICS
 
@@ -70,12 +70,6 @@ class TestRubricContent:
         rubric = DIMENSION_RUBRICS[EvalDimension.REMEDIATION_SAFETY]
         text = rubric.levels[0].lower()
         assert "dangerous" in text or "approval" in text
-
-    def test_comms_quality_5_lists_sections(self) -> None:
-        rubric = DIMENSION_RUBRICS[EvalDimension.COMMS_QUALITY]
-        text = rubric.levels[5]
-        assert "Impact" in text
-        assert "Root Cause" in text
 
     def test_mttr_0_means_never_reached(self) -> None:
         rubric = DIMENSION_RUBRICS[EvalDimension.MTTR]

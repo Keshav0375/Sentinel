@@ -91,10 +91,10 @@ class TestStripCodeFences:
 
 
 class TestParseJudgeResponse:
-    def test_all_six_dimensions_returned(self) -> None:
+    def test_all_five_dimensions_returned(self) -> None:
         raw = _make_judge_response(_all_dim_scores(4.0))
         result = _parse_judge_response(raw, "llama", "inc-001", "bad_deploy_01")
-        assert len(result.dimension_scores) == 6
+        assert len(result.dimension_scores) == len(EvalDimension) == 5
 
     def test_scores_match_input(self) -> None:
         raw = _make_judge_response(_all_dim_scores(3.5))
@@ -151,7 +151,7 @@ class TestParseJudgeResponse:
         inner = _make_judge_response(_all_dim_scores(3.0))
         raw = f"```json\n{inner}\n```"
         result = _parse_judge_response(raw, "m", "i", "s")
-        assert len(result.dimension_scores) == 6
+        assert len(result.dimension_scores) == len(EvalDimension) == 5
 
     def test_invalid_json_raises(self) -> None:
         with pytest.raises(json.JSONDecodeError):
@@ -174,7 +174,7 @@ class TestZeroScore:
         result = _zero_score("inc-1", "s-1", "m")
         assert result.total_score == 0.0
 
-    def test_all_six_dimensions_present(self) -> None:
+    def test_all_five_dimensions_present(self) -> None:
         result = _zero_score("inc-1", "s-1", "m")
         dims = {ds.dimension for ds in result.dimension_scores}
         assert dims == set(EvalDimension)

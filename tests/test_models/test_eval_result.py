@@ -16,11 +16,10 @@ def test_eval_dimension_values() -> None:
     assert EvalDimension.TOOL_EFFICIENCY == "tool_efficiency"
     assert EvalDimension.MTTR == "mttr"
     assert EvalDimension.REMEDIATION_SAFETY == "remediation_safety"
-    assert EvalDimension.COMMS_QUALITY == "comms_quality"
 
 
 def test_eval_dimension_count() -> None:
-    assert len(EvalDimension) == 6
+    assert len(EvalDimension) == 5  # comms_quality went with the comms agent
 
 
 # ── DimensionScore ────────────────────────────────────────────────────────────
@@ -47,9 +46,9 @@ def test_dimension_score_zero() -> None:
 
 def test_dimension_score_max() -> None:
     ds = DimensionScore(
-        dimension=EvalDimension.COMMS_QUALITY,
+        dimension=EvalDimension.REMEDIATION_SAFETY,
         score=5.0,
-        reasoning="Perfect format, all sections present, clear language",
+        reasoning="Only drafted, and the fix matches the ground truth",
     )
     assert ds.score == 5.0
 
@@ -86,7 +85,6 @@ def _sample_scores() -> list[DimensionScore]:
         DimensionScore(
             dimension=EvalDimension.REMEDIATION_SAFETY, score=5.0, reasoning="always gated"
         ),
-        DimensionScore(dimension=EvalDimension.COMMS_QUALITY, score=3.0, reasoning="decent"),
     ]
 
 
@@ -102,8 +100,8 @@ def test_trajectory_score_full() -> None:
     )
     assert ts.incident_id == "inc-001"
     assert ts.scenario_id == "bad_deploy_01"
-    assert len(ts.dimension_scores) == 6
-    assert ts.total_score == pytest.approx(4.083, abs=0.01)
+    assert len(ts.dimension_scores) == 5
+    assert ts.total_score == pytest.approx(4.3, abs=0.01)
     assert ts.judge_model == "llama-3.1-8b-instant"
 
 
@@ -138,5 +136,5 @@ def test_trajectory_score_json_round_trip() -> None:
     )
     reloaded = TrajectoryScore.model_validate_json(ts.model_dump_json())
     assert reloaded.incident_id == ts.incident_id
-    assert len(reloaded.dimension_scores) == 6
+    assert len(reloaded.dimension_scores) == 5
     assert reloaded.dimension_scores[0].dimension is EvalDimension.TRIAGE_ACCURACY
