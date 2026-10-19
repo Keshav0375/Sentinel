@@ -8,6 +8,9 @@ from typing import Literal
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# §4.6: at most 20 tool calls per incident — a hard cap, not a default to raise.
+MAX_TOOL_CALLS_CAP = 20
+
 # Every credential field. All optional: no secret is required to boot, and a feature whose
 # key is missing fails at use (backend.md §8.2; decision 2026-10-14). A blank value counts
 # as missing.
@@ -68,8 +71,9 @@ class Settings(BaseSettings):
 
     sentinel_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
-    # Hard cap on tool calls per incident to prevent runaway loops (§4.6).
-    sentinel_max_tool_calls: int = 20
+    # Hard cap on tool calls per incident to prevent runaway loops (§4.6): 20 is the
+    # ceiling, so the setting may lower the cap but never raise it.
+    sentinel_max_tool_calls: int = MAX_TOOL_CALLS_CAP
 
     # Every role runs on the deterministic, no-network FakeModel (providers/fake.py) in
     # tests/CI (§9.1); no LLM key is read. /ready skips the live-provider check.
@@ -95,9 +99,13 @@ class Settings(BaseSettings):
     # ── Validators ────────────────────────────────────────────────────────────
     @field_validator("sentinel_max_tool_calls")
     @classmethod
-    def max_tool_calls_positive(cls, v: int) -> int:
+    def max_tool_calls_in_range(cls, v: int) -> int:
         if v < 1:
             raise ValueError("sentinel_max_tool_calls must be >= 1")
+        if v > MAX_TOOL_CALLS_CAP:
+            raise ValueError(
+                f"sentinel_max_tool_calls must be <= {MAX_TOOL_CALLS_CAP} (the §4.6 hard cap)"
+            )
         return v
 
     @model_validator(mode="after")

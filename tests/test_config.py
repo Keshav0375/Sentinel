@@ -67,6 +67,18 @@ def test_max_tool_calls_zero_raises() -> None:
         Settings(sentinel_max_tool_calls=0)
 
 
+@pytest.mark.parametrize("value", [21, 100])
+def test_max_tool_calls_above_the_4_6_cap_raises(value: int) -> None:
+    """§4.6 is a hard cap of 20: the setting can lower it, never raise it."""
+    with pytest.raises(ValueError, match="<= 20"):
+        Settings(sentinel_max_tool_calls=value)
+
+
+@pytest.mark.parametrize("value", [1, 20])
+def test_max_tool_calls_bounds_are_accepted(value: int) -> None:
+    assert Settings(sentinel_max_tool_calls=value).sentinel_max_tool_calls == value
+
+
 def test_invalid_log_level_raises() -> None:
     with pytest.raises(Exception):
         Settings(sentinel_log_level="VERBOSE")  # type: ignore[arg-type]
