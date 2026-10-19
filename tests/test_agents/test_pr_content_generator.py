@@ -27,6 +27,7 @@ from sentinel.agents.pr_content_generator import (
     PR_CONTENT_AGENT_NAME,
     SPAN_NAME,
     build_pr_content_agent,
+    claims_action_done,
     description_is_compliant,
     fallback_description,
     fallback_title,
@@ -254,6 +255,59 @@ def test_description_rule_violations(mutate: Any) -> None:
     body = _compliant_body(spec)
     assert description_is_compliant(body, spec)
     assert not description_is_compliant(mutate(body), spec)
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "Commit a3f9c2e has been reverted.",
+        "The deploy has already been rolled back.",
+        "PR #5 was rolled back at 12:05.",
+        "The change was reverted and the service recovered.",
+        "We reverted commit a3f9c2e.",
+        "Sentinel has rolled back the deploy.",
+        "This PR has been merged.",
+        "The revert was deployed to production.",
+        "The rollback is now live.",
+        "The previous version has been redeployed.",
+    ],
+)
+def test_a_description_claiming_the_action_happened_is_non_compliant(claim: str) -> None:
+    """§3.4: the PR proposes; it never says the revert, merge or deploy already happened."""
+    spec = _spec()
+    body = _compliant_body(spec).replace("The previous version", f"{claim} The previous version")
+    assert claims_action_done(claim)
+    assert not description_is_compliant(body, spec)
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Merging this PR will revert commit a3f9c2e.",
+        "If merged, the deploy is rolled back by the pipeline.",
+        "Once this pull request is merged, the previous version will be deployed.",
+        "Nothing has been reverted or deployed yet.",
+        "The deploy has not been rolled back.",
+        "PR #5 was merged and deployed at 12:00 UTC.",  # history of the bad deploy
+        "After the revert is merged, the pipeline redeploys the previous version.",
+        "Sentinel never merges, reverts or deploys anything itself.",
+    ],
+)
+def test_future_conditional_and_historical_phrasing_stays_compliant(phrase: str) -> None:
+    spec = _spec()
+    body = _compliant_body(spec).replace("The previous version", f"{phrase} The previous version")
+    assert not claims_action_done(phrase)
+    assert description_is_compliant(body, spec)
+
+
+async def test_a_reply_claiming_the_rollback_happened_gets_the_fallback_description() -> None:
+    spec = _spec()
+    reply = str(pr_content_turn(spec).output).replace(
+        "The previous version", "Commit a3f9c2e has been reverted. The previous version"
+    )
+    content, _ = await _generate(spec, FakeTurn(output=reply))
+    assert content.description == fallback_description(spec)
+    assert content.title == reply.partition("\n")[0]
 
 
 @pytest.mark.parametrize(

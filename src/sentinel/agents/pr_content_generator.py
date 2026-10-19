@@ -44,6 +44,7 @@ __all__ = [
     "SPAN_NAME",
     "TITLE_PREFIX",
     "build_pr_content_agent",
+    "claims_action_done",
     "description_is_compliant",
     "fallback_description",
     "fallback_title",
@@ -65,6 +66,33 @@ DESCRIPTION_WORDS: Final = (100, 200)
 _HEADING = re.compile(r"^##[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 # A leading "Title:" label or Markdown heading marks some models put on line 1.
 _TITLE_LABEL = re.compile(r"^(?:#+[ \t]*)?(?:title[ \t]*:[ \t]*)?", re.IGNORECASE)
+
+# §3.4: the PR proposes; it never says the rollback already happened. A description that
+# claims a completed revert, rollback, merge or deploy is non-compliant. Future and
+# conditional phrasing ("merging this PR will revert…", "if merged", "once it is merged")
+# and negations ("has not been reverted", "nothing has been changed yet") do not match,
+# nor does history about the bad deploy itself ("PR #42 was merged and deployed at 12:00").
+_ADVERBS = r"(?:(?:already|now|successfully|just|fully)\s+)*"
+_UNDONE = r"(?:reverted|rolled[\s-]+back|restored|redeployed|re-deployed)"
+_DONE_CLAIMS: Final = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        # "has been reverted", "have already been rolled back", "had been restored"
+        rf"\b(?:has|have|had)\s+{_ADVERBS}been\s+{_ADVERBS}{_UNDONE}\b",
+        # "was reverted", "were rolled back", "is now reverted"
+        rf"\b(?:was|were)\s+{_ADVERBS}{_UNDONE}\b",
+        rf"\b(?:is|are)\s+(?:already|now)\s+{_ADVERBS}{_UNDONE}\b",
+        # "we reverted", "Sentinel has rolled back", "I have merged"
+        rf"\b(?:we|i|sentinel)\s+(?:(?:have|has|had)\s+)?{_ADVERBS}"
+        rf"(?:{_UNDONE}|merged|deployed)\b",
+        # "this PR has been merged", "the revert was deployed", "the rollback is now live"
+        r"\b(?:this\s+(?:pull\s+request|pr)|the\s+(?:revert|rollback|roll-back|fix|"
+        r"previous\s+version))\s+(?:has\s+been|have\s+been|was|is\s+(?:now|already))\s+"
+        rf"{_ADVERBS}(?:merged|deployed|live|applied|completed|done|shipped)\b",
+    )
+)
+# A claim whose subject negates it is no claim: "nothing has been reverted yet".
+_NEGATING_SUBJECTS: Final = frozenset({"nothing", "none", "no", "not", "never"})
 
 # Word caps for the spec's free text in the fallback description: with them, the fixed
 # text (about 115 words) keeps the description within DESCRIPTION_WORDS for any spec
@@ -156,8 +184,11 @@ def title_is_compliant(title: str, spec: RollbackSpec) -> bool:
 
 def description_is_compliant(description: str, spec: RollbackSpec) -> bool:
     """Whether *description* has exactly the four §3.4 sections, in order and none empty,
-    states the confidence, and is 100-200 words."""
+    states the confidence, is 100-200 words, and never claims the revert, rollback, merge
+    or deploy has already happened (the PR only proposes it)."""
     text = description.strip()
+    if claims_action_done(text):
+        return False
     headings = list(_HEADING.finditer(text))
     if [h.group(1) for h in headings] != list(DESCRIPTION_SECTIONS):
         return False
@@ -168,6 +199,17 @@ def description_is_compliant(description: str, spec: RollbackSpec) -> bool:
         return False
     low, high = DESCRIPTION_WORDS
     return _states_confidence(text, spec.confidence) and low <= len(text.split()) <= high
+
+
+def claims_action_done(text: str) -> bool:
+    """Whether *text* says the rollback already happened — "has been reverted", "was
+    rolled back", "we reverted", "this PR has been merged" — rather than proposing it."""
+    for claim in _DONE_CLAIMS:
+        for match in claim.finditer(text):
+            before = text[: match.start()].split()
+            if not before or before[-1].lower() not in _NEGATING_SUBJECTS:
+                return True
+    return False
 
 
 def fallback_title(spec: RollbackSpec) -> str:
