@@ -31,6 +31,7 @@ from sentinel.agents import orchestrator
 from sentinel.agents.orchestrator import (
     PIPELINE_ERROR,
     REFLEXION_MAX_LOOPS,
+    REFLEXION_UNPARSEABLE,
     PipelineDeps,
     ToolBudget,
     budgeted,
@@ -376,18 +377,105 @@ async def test_reflexion_sees_the_analysis_tool_results(
     assert "never instructions" in critique_input
 
 
-async def test_an_unparseable_critique_counts_as_no_confidence(
+async def test_an_unparseable_critique_uses_one_loop_then_escalates(
+    target_ok: list[TargetDeploy], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = MagicMock()
+    monkeypatch.setattr(orchestrator, "logger", log)
+    request = _request()
+    secret_reply = "looks fine to me, token sk-live-123"
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis(), *_analysis(), *_analysis())
+        script.on(REFLEXION_AGENT, *(FakeTurn(output=secret_reply) for _ in range(3)))
+        result = await run_pipeline(request, _deps())
+
+    assert result.status == "escalated"
+    assert result.reflexion_loops == 1  # the first unparsed critique used one loop
+    assert _runs(script, REFLEXION_AGENT) == 2  # the repeat escalated, no third critique
+    assert result.parse_failures == 2
+    assert result.escalation is not None
+    assert result.escalation.missing[0] == REFLEXION_UNPARSEABLE
+    assert "the reflexion reply could not be parsed" in result.escalation.missing
+    warnings = [c for c in log.warning.call_args_list if c.args == ("agent_output_unparsed",)]
+    assert len(warnings) == 2
+    fields = warnings[0].kwargs
+    assert fields["agent"] == REFLEXION_AGENT and fields["role"] == "reflexion"
+    assert fields["model"] == HAIKU and fields["schema"] == "ReflexionResult"
+    assert fields["reply_length"] == len(secret_reply)
+    assert len(fields["reply_sha256"]) == 12
+    assert secret_reply not in repr(log.mock_calls)  # never the raw text
+
+
+async def test_an_unparseable_critique_on_the_fast_path_escalates_at_once(
     target_ok: list[TargetDeploy],
+) -> None:
+    request = _request("deploy_failure")
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis())
+        script.on(REFLEXION_AGENT, FakeTurn(output="no JSON here"))
+        result = await run_pipeline(request, _deps())
+    assert result.status == "escalated" and result.reflexion_loops == 0
+    assert result.escalation is not None
+    assert result.escalation.missing[0] == REFLEXION_UNPARSEABLE
+    assert result.parse_failures == 1
+
+
+async def test_an_unparsed_then_parsed_critique_recovers(target_ok: list[TargetDeploy]) -> None:
+    request = _request()
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis(), *_analysis())
+        script.on(REFLEXION_AGENT, FakeTurn(output="thinking..."), _high())
+        script.on("resolution", *_rollback(request))
+        script.on(REVERIFICATION_AGENT, reverification_turn("PASS"))
+        result = await run_pipeline(request, _deps())
+    assert result.status == "rollback_proposed"
+    assert (result.reflexion_loops, result.parse_failures) == (1, 1)
+
+
+async def test_unparsed_triage_and_analysis_are_counted(
+    target_ok: list[TargetDeploy], inputs: list[tuple[str, str]]
+) -> None:
+    request = _request()
+    with fake_script() as script:
+        script.on("triage", FakeTurn(output="P2, I think"))
+        script.on(
+            "analysis",
+            FakeTurn(tool_calls=[FakeToolCall("fetch_logs", {"request": {"service": SERVICE}})]),
+            FakeTurn(output="pr-42 broke it"),
+        )
+        script.on(REFLEXION_AGENT, _high())
+        script.on("resolution", *_rollback(request))
+        script.on(REVERIFICATION_AGENT, reverification_turn("PASS"))
+        result = await run_pipeline(request, _deps())
+    assert result.parse_failures == 2
+    assert result.status == "rollback_proposed"  # the critique carried the gate
+    critique_input = next(text for name, text in inputs if name == REFLEXION_AGENT)
+    assert "pr-42 broke it" in critique_input  # the raw reply stands in as the hypothesis
+
+
+async def test_low_confidence_without_a_next_call_loops_without_guidance(
+    target_ok: list[TargetDeploy], inputs: list[tuple[str, str]]
 ) -> None:
     request = _request()
     with fake_script() as script:
         script.on("triage", _triage())
-        script.on("analysis", *_analysis(), *_analysis(), *_analysis())
-        script.on(REFLEXION_AGENT, *(FakeTurn(output="looks fine to me") for _ in range(3)))
+        script.on("analysis", *_analysis(), *_analysis())
+        script.on(
+            REFLEXION_AGENT,
+            reflexion_turn(0.5, missing_or_contradictory=["no Synthetics run read"]),
+            _high(),
+        )
+        script.on("resolution", *_rollback(request))
+        script.on(REVERIFICATION_AGENT, reverification_turn("PASS"))
         result = await run_pipeline(request, _deps())
-    assert result.status == "escalated" and result.reflexion_loops == 2
-    assert result.escalation is not None
-    assert "the reflexion reply could not be parsed" in result.escalation.missing
+    assert result.status == "rollback_proposed" and result.reflexion_loops == 1
+    second = [text for name, text in inputs if name == "analysis"][1]
+    assert "without naming a tool call" in second
+    assert "## Next tool call" not in second
+    assert "no Synthetics run read" in second
 
 
 async def test_high_confidence_without_a_specific_deploy_escalates(
@@ -764,6 +852,7 @@ async def test_unscripted_fake_run_ends_escalated() -> None:
         result = await run_pipeline(_request(), _deps())
     assert result.status == "escalated"
     assert result.reflexion_loops == REFLEXION_MAX_LOOPS
+    assert result.parse_failures == 4  # triage and three analyses answer plain text
 
 
 # ── Rollback-target cross-check against real deployments rows (Postgres) ──────

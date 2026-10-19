@@ -293,6 +293,9 @@ _UNSCRIPTED_TEXT: dict[str, str] = {
 def _unscripted_turn(agent_name: str, output_type: str | None) -> FakeTurn:
     if output_type in _UNSCRIPTED_STRUCTURED:
         return FakeTurn(output=_UNSCRIPTED_STRUCTURED[output_type]())
+    if output_type is None and agent_name == REFLEXION_AGENT:
+        # Without structured outputs the reflexion agent still answers its JSON as text.
+        return FakeTurn(output=_unscripted_reflexion())
     if output_type in (None, "str") and agent_name in _UNSCRIPTED_TEXT:
         return FakeTurn(output=_UNSCRIPTED_TEXT[agent_name])
     return FakeTurn()

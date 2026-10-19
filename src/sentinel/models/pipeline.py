@@ -117,6 +117,9 @@ class PipelineResult(BaseModel):
     rollback_spec: RollbackSpec | None = None
     escalation: EscalationContext | None = None
     reflexion_loops: int = Field(ge=0, description="Loop-backs from reflexion to analysis.")
+    parse_failures: int = Field(
+        default=0, ge=0, description="Agent replies that did not parse as their output model."
+    )
     tool_calls_used: int = Field(ge=0, description="Tool calls run, counted in code (§4.6).")
     tokens_used: int = Field(ge=0, description="Input + output tokens of every LLM call.")
     models_used: list[str] = Field(

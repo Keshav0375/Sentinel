@@ -12,6 +12,11 @@ Every cap is enforced here, in code (decision 2026-10-15):
   the critique's next tool call, at most :data:`REFLEXION_MAX_LOOPS` times.
   ``deploy_failure`` is the fast path: triage → analysis of the failed deploy → one
   critique, no loop back — still through the same gate and reverification.
+- **Unparsed replies.** A triage, analysis or reflexion reply that does not parse as its
+  model is logged (``agent_output_unparsed``: agent, role, model, reply length and SHA-256
+  prefix — never the text) and counted in ``PipelineResult.parse_failures``. An unparsed
+  critique uses up one loop (analysis runs again, told to read the logs); a second one, or
+  one with no loop left, escalates with :data:`REFLEXION_UNPARSEABLE`.
 - **Decision gate (§4.2).** Confidence ≥ 0.7 and one specific deploy → resolution; anything
   else escalates.
 - **Resolution.** The draft is read from the ``prepare_rollback_spec`` tool output, never
@@ -39,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -51,7 +57,6 @@ from agents import (
     FunctionTool,
     RunContextWrapper,
     RunHooks,
-    RunResult,
     Tool,
     TResponseInputItem,
 )
@@ -101,7 +106,7 @@ from sentinel.models.tools import (
     RollbackSpec,
     ToolFailure,
 )
-from sentinel.providers import Role, call_with_fallback, coerce_output
+from sentinel.providers import Role, RoutedRun, call_with_fallback, coerce_output
 from sentinel.tools.deploy_checker import TargetDeployCheck, check_rollback_target
 from sentinel.tools.output import tool_json
 from sentinel.tools.remediation_tools import escalation_context
@@ -111,6 +116,7 @@ __all__ = [
     "PIPELINE_ERROR",
     "PIPELINE_TRACE",
     "REFLEXION_MAX_LOOPS",
+    "REFLEXION_UNPARSEABLE",
     "REVERIFICATION_MAX_RETRIES",
     "PipelineDeps",
     "ToolBudget",
@@ -131,6 +137,9 @@ PIPELINE_ERROR: Final = "pipeline error"
 # The openai-agents trace every Runner.run of an incident nests in (SentinelTracer reads
 # its incident_id metadata; the dashboard emitter follows it).
 PIPELINE_TRACE: Final = "incident_pipeline"
+# The escalation reason when reflexion replies twice with nothing that parses (or once
+# with no loop left to retry it).
+REFLEXION_UNPARSEABLE: Final = "reflexion output unparseable"
 
 # Model turns a run may take beyond the tool-call budget (the final answer, a bad_input
 # retry); the budget, not max_turns, is the cap that matters.
@@ -138,6 +147,8 @@ _EXTRA_TURNS = 5
 # How much of one gathered tool result an escalation quotes when analysis left no evidence.
 _QUOTE_CHARS = 300
 _QUOTED_RESULTS = 5
+# Hex digits of a reply's SHA-256 an ``agent_output_unparsed`` warning carries.
+_DIGEST_CHARS = 12
 
 _AGENTS: Final = (
     TRIAGE_AGENT_NAME,
@@ -281,6 +292,9 @@ class _IncidentRun:
         self.timeline: list[TimelineEntry] = []
         self.models_used: list[str] = []
         self.reflexion_loops = 0
+        # Agent replies that did not parse as their output model; reflexion's among them.
+        self.parse_failures = 0
+        self.unparsed_critiques = 0
         self.stage = "plan"
         self.started_at = datetime.now(UTC)
         # True when the resolution agent drafted the escalation (format_escalation).
@@ -331,17 +345,24 @@ class _IncidentRun:
         guidance: ReflexionResult | None = None
         while True:
             self.analysis = await self._analyse(guidance)
-            self.critique = await self._reflect(self.analysis)
-            if not self.critique.needs_more_evidence or self.reflexion_loops >= max_loops:
+            critique = await self._reflect(self.analysis)
+            if critique is None:
+                # An unparsed critique uses up a loop; it never silently burns them all.
+                self.unparsed_critiques += 1
+                if self.unparsed_critiques > 1 or self.reflexion_loops >= max_loops:
+                    return self._escalate(REFLEXION_UNPARSEABLE)
+                critique = _unparsed_critique(self.service)
+            self.critique = critique
+            if not critique.needs_more_evidence or self.reflexion_loops >= max_loops:
                 break
             self.reflexion_loops += 1
             guidance = self.critique
             self._note("reflexion_loop", f"loop {self.reflexion_loops}: back to analysis")
 
-        problem = _gate_problem(self.critique)
+        problem = _gate_problem(critique)
         if problem is not None:
             return self._escalate(problem)
-        self._note("decision_gate", f"pass: confidence {self.critique.confidence:.2f}")
+        self._note("decision_gate", f"pass: confidence {critique.confidence:.2f}")
 
         correction: str | None = None
         for _ in range(REVERIFICATION_MAX_RETRIES + 1):
@@ -384,8 +405,8 @@ class _IncidentRun:
             f"Triage incident {self.request.incident_id} on {self.service}.",
             ("Alert", self.request.alert),
         )
-        result = await self._call(agent, "triage", text)
-        return _structured(result.final_output, TriageResult)
+        routed = await self._call(agent, "triage", text)
+        return self._parsed(agent.name, "triage", routed, TriageResult)
 
     async def _analyse(self, guidance: ReflexionResult | None) -> AnalysisResult:
         self.stage = ANALYSIS_AGENT_NAME
@@ -403,24 +424,32 @@ class _IncidentRun:
             f"Signal type: {self.request.signal_type}."
         )
         if guidance is not None:
-            lead += (
-                " The Reflexion Critic sent your previous answer back: make the next tool "
-                "call it names first, then answer again with everything you know."
-            )
             sections += [
                 ("Previous hypothesis", self.analysis if self.analysis is not None else "none"),
                 ("Reflexion critique", guidance),
-                ("Next tool call", guidance.next_tool_call),
             ]
-        result = await self._call(agent, "analysis", _prompt(lead, *sections))
+            if guidance.next_tool_call is not None:
+                lead += (
+                    " The Reflexion Critic sent your previous answer back: make the next tool "
+                    "call it names first, then answer again with everything you know."
+                )
+                sections.append(("Next tool call", guidance.next_tool_call))
+            else:
+                lead += (
+                    " The Reflexion Critic sent your previous answer back without naming a "
+                    "tool call: gather the missing evidence it lists, then answer again with "
+                    "everything you know."
+                )
+        routed = await self._call(agent, "analysis", _prompt(lead, *sections))
         self.evidence.extend(self._run_outputs)
-        parsed = _structured(result.final_output, AnalysisResult)
+        parsed = self._parsed(agent.name, "analysis", routed, AnalysisResult)
         if parsed is not None:
             return parsed
-        reply = _clip(str(result.final_output or "").strip(), _QUOTE_CHARS)
+        reply = _clip(str(routed.result.final_output or "").strip(), _QUOTE_CHARS)
         return AnalysisResult(hypothesis=reply or "the analysis reply could not be parsed")
 
-    async def _reflect(self, analysis: AnalysisResult) -> ReflexionResult:
+    async def _reflect(self, analysis: AnalysisResult) -> ReflexionResult | None:
+        """The critique of *analysis*, or None when the reply does not parse."""
         self.stage = REFLEXION_AGENT_NAME
         agent = build_reflexion_agent(
             settings=self.settings, instructions=self._instructions[REFLEXION_AGENT_NAME]
@@ -432,9 +461,8 @@ class _IncidentRun:
             ("Analysis", analysis),
             ("Tool results", _tool_results(self.evidence)),
         )
-        result = await self._call(agent, "reflexion", text)
-        critique = _structured(result.final_output, ReflexionResult)
-        return critique if critique is not None else _unparsed_critique(self.service)
+        routed = await self._call(agent, "reflexion", text)
+        return self._parsed(agent.name, "reflexion", routed, ReflexionResult)
 
     async def _resolve(self, correction: str | None) -> RollbackSpec | EscalationContext | None:
         self.stage = RESOLUTION_AGENT_NAME
@@ -494,12 +522,12 @@ class _IncidentRun:
             ("Target deploy", target),
             ("Evidence", evidence),
         )
-        result = await self._call(agent, "reverification", text)
-        verdict = parse_reverification(str(result.final_output or ""))
+        routed = await self._call(agent, "reverification", text)
+        verdict = parse_reverification(str(routed.result.final_output or ""))
         self._note("reverification", verdict.outcome.value)
         return verdict
 
-    async def _call(self, agent: Agent[Any], role: Role, text: str) -> RunResult:
+    async def _call(self, agent: Agent[Any], role: Role, text: str) -> RoutedRun:
         """Run *agent* with budgeted tools, through the §4.7 fallback."""
         observe = self._observer(agent.name)
         guarded = agent.clone(tools=[budgeted(t, self.budget, observe) for t in agent.tools])
@@ -519,7 +547,34 @@ class _IncidentRun:
             self.models_used.append(routed.model_used)
         suffix = " (provider fallback)" if routed.fell_back else ""
         self._entry(agent.name, "completed", f"{routed.model_used}{suffix}")
-        return routed.result
+        return routed
+
+    def _parsed[T: BaseModel](
+        self, agent_name: str, role: Role, routed: RoutedRun, schema: type[T]
+    ) -> T | None:
+        """The run's reply as *schema*; None (logged and counted) when it does not parse.
+
+        The warning identifies the reply by its length and a SHA-256 prefix, never its
+        text: a reply can echo untrusted tool output.
+        """
+        output = routed.result.final_output
+        parsed = _structured(output, schema)
+        if parsed is not None:
+            return parsed
+        self.parse_failures += 1
+        reply = "" if output is None else str(output)
+        logger.warning(
+            "agent_output_unparsed",
+            incident_id=self.request.incident_id,
+            agent=agent_name,
+            role=role,
+            model=routed.model_used,
+            schema=schema.__name__,
+            reply_length=len(reply),
+            reply_sha256=hashlib.sha256(reply.encode()).hexdigest()[:_DIGEST_CHARS],
+        )
+        self._entry(agent_name, "unparsed", f"reply did not parse as {schema.__name__}")
+        return None
 
     # ── Context ───────────────────────────────────────────────────────────────
 
@@ -594,6 +649,7 @@ class _IncidentRun:
         common: dict[str, Any] = {
             "incident_id": self.request.incident_id,
             "reflexion_loops": self.reflexion_loops,
+            "parse_failures": self.parse_failures,
             "tool_calls_used": self.budget.used,
             "tokens_used": tokens_used,
             "models_used": list(self.models_used),
@@ -703,6 +759,7 @@ async def run_pipeline(request: PipelineInput, deps: PipelineDeps) -> PipelineRe
         incident_id=request.incident_id,
         status=result.status,
         reflexion_loops=result.reflexion_loops,
+        parse_failures=result.parse_failures,
         tool_calls_used=result.tool_calls_used,
         tokens_used=result.tokens_used,
         models_used=result.models_used,
