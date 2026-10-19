@@ -166,7 +166,7 @@ async def test_provider_error_falls_back_and_model_used_says_so() -> None:
 
     assert content.model_used == GPT_MINI
     assert content.tokens_used == 1020
-    assert [model for _, model in script.calls] == [HAIKU, GPT_MINI]
+    assert [model for _, model in script.calls] == [HAIKU] * 3 + [GPT_MINI]  # 3 attempts
     _assert_title_rules(content.title, spec)
 
 

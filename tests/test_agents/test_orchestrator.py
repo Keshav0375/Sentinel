@@ -763,7 +763,8 @@ async def test_the_budget_stops_at_20_across_parallel_calls_and_a_fallback() -> 
                     *_calls("search_past_incidents", 2, search_args),
                 ]
             ),
-            FakeTurn(error=TimeoutError("primary timed out")),
+            # 3 attempts (2 retries) of the next model call, then the run falls back.
+            *(FakeTurn(error=TimeoutError("primary timed out")) for _ in range(3)),
             # Fallback re-run: 4 more calls, then the answer.
             FakeTurn(tool_calls=_calls("get_service_metadata", 4, service_args)),
             _triage(),
@@ -791,6 +792,34 @@ async def test_the_budget_stops_at_20_across_parallel_calls_and_a_fallback() -> 
     assert escalation.evidence and all(e.startswith("fetch_logs: ") for e in escalation.evidence)
     assert MINI in result.models_used  # triage fell back
     assert HAIKU not in result.models_used
+
+
+async def test_a_timed_out_primary_run_and_its_fallback_both_count_against_the_budget(
+    monkeypatch: pytest.MonkeyPatch, target_ok: list[TargetDeploy]
+) -> None:
+    """A primary run cancelled by the per-agent timeout keeps its tool calls counted."""
+    from sentinel.providers import router  # noqa: PLC0415
+
+    monkeypatch.setattr(router, "AGENT_RUN_TIMEOUT_S", 0.2)
+    request = _request()
+    metadata = _calls("get_service_metadata", 2, {"service_name": SERVICE})
+    with fake_script() as script:
+        script.on(
+            "triage",
+            FakeTurn(tool_calls=metadata),  # primary: 2 calls…
+            FakeTurn(output="never sent", delay=30),  # …then it hangs past the bound
+            FakeTurn(tool_calls=metadata),  # fallback re-run: 2 more calls
+            _triage(),
+        )
+        script.on("analysis", *_analysis())
+        script.on(REFLEXION_AGENT, _high())
+        script.on("resolution", *_rollback(request))
+        script.on(REVERIFICATION_AGENT, reverification_turn("PASS"))
+        result = await asyncio.wait_for(run_pipeline(request, _deps()), 10)
+
+    assert result.status == "rollback_proposed"
+    assert result.tool_calls_used == 4 + 2  # triage's two runs + fetch_logs + the spec
+    assert result.models_used[0] == MINI  # triage fell back
 
 
 async def test_the_budget_is_settings_driven() -> None:

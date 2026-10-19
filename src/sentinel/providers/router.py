@@ -8,6 +8,11 @@ runs first, and a provider error re-runs the agent once on the other one::
     routed = await call_with_fallback(agent, text, role="triage", settings=settings)
     routed.result.final_output, routed.model_used             # model_used: what actually ran
 
+Before a run fails over, each model call is retried (:data:`LLM_RETRY_BACKOFF_S`: three
+attempts, 1s then 2s apart — CONVENTIONS "3 attempts") under a per-call timeout
+(:data:`LLM_CALL_TIMEOUT_S`), and each ``Runner.run`` has an overall bound
+(:data:`AGENT_RUN_TIMEOUT_S`); a run that times out falls back like a provider error.
+
 The judge is not a role here: it always runs on the provider the agents do NOT use
 (decision 2026-10-15), so an agent never grades itself — see :func:`judge_model_string`.
 
@@ -18,13 +23,28 @@ replaces with a workload-identity token exchange (decision 2026-08-30).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Final, Literal, get_args
 
 import openai
-from agents import Agent, Model, RunConfig, Runner, RunResult, TResponseInputItem
+from agents import (
+    Agent,
+    AgentOutputSchemaBase,
+    Handoff,
+    Model,
+    ModelResponse,
+    ModelSettings,
+    ModelTracing,
+    RunConfig,
+    Runner,
+    RunResult,
+    Tool,
+    TResponseInputItem,
+)
 from agents.extensions.models.litellm_model import LitellmModel
+from agents.items import TResponseStreamEvent
 
 from sentinel.config import Settings
 from sentinel.exceptions import ProviderUnavailableError
@@ -33,11 +53,15 @@ from sentinel.providers.capabilities import ProviderCapabilities, common_capabil
 from sentinel.providers.fake import FakeModel
 
 __all__ = [
+    "AGENT_RUN_TIMEOUT_S",
     "JUDGE_MODELS",
+    "LLM_CALL_TIMEOUT_S",
+    "LLM_RETRY_BACKOFF_S",
     "MODEL_MAP",
     "PROVIDERS",
     "ROLES",
     "Provider",
+    "RetryingModel",
     "Role",
     "RoutedRun",
     "build_model",
@@ -105,6 +129,17 @@ _CREDENTIAL_FIELDS: Final[Mapping[Provider, str]] = {
 # hierarchy (litellm's RateLimitError, Timeout, APIError and the other status errors all
 # subclass it) and timeouts. asyncio.TimeoutError is an alias of the builtin since 3.11.
 _FALLBACK_ERRORS: Final = (openai.APIError, TimeoutError)
+
+# CONVENTIONS "Retry with exponential backoff for LLM API calls (3 attempts)": the wait
+# before each retry of one model call, so 3 attempts in all before the run fails over.
+LLM_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0)
+# One model call (one LLM request) — passed to LiteLLM and enforced around the call.
+LLM_CALL_TIMEOUT_S: float = 60.0
+# One agent's whole Runner.run (every model call, retry and tool call of it); past it the
+# run is cancelled and falls back, or fails when it was the fallback.
+AGENT_RUN_TIMEOUT_S: float = 180.0
+# Seam for the backoff wait (tests record it instead of sleeping).
+_sleep = asyncio.sleep
 
 
 def provider_of(model_string: str) -> Provider:
@@ -240,6 +275,101 @@ def role_capabilities(role: Role, settings: Settings) -> ProviderCapabilities:
     return common_capabilities(*role_models(role, settings.sentinel_primary_provider))
 
 
+class RetryingModel(Model):
+    """*inner* with each call bounded by :data:`LLM_CALL_TIMEOUT_S` and retried on a
+    provider error or timeout after each :data:`LLM_RETRY_BACKOFF_S` wait.
+
+    Retrying one model call, not the run, never re-runs a tool call (the §4.6 budget counts
+    each once). ``model`` is the inner model's string, so routing reads the same.
+    """
+
+    def __init__(self, inner: Model, role: str) -> None:
+        self.inner = inner
+        self.model = model_name(inner)
+        self._role = role
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff[Any, Any]],
+        tracing: ModelTracing,
+        *,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        prompt: Any | None = None,
+    ) -> ModelResponse:
+        backoff = LLM_RETRY_BACKOFF_S
+        for attempt in range(len(backoff) + 1):
+            try:
+                return await asyncio.wait_for(
+                    self.inner.get_response(
+                        system_instructions,
+                        input,
+                        model_settings,
+                        tools,
+                        output_schema,
+                        handoffs,
+                        tracing,
+                        previous_response_id=previous_response_id,
+                        conversation_id=conversation_id,
+                        prompt=prompt,
+                    ),
+                    timeout=LLM_CALL_TIMEOUT_S,
+                )
+            except _FALLBACK_ERRORS as exc:
+                if attempt == len(backoff):
+                    raise
+                logger.warning(
+                    "llm_call_retry",
+                    model=self.model,
+                    role=self._role,
+                    attempt=attempt + 1,
+                    retry_in_s=backoff[attempt],
+                    error_type=type(exc).__name__,
+                )
+                await _sleep(backoff[attempt])
+        raise AssertionError("unreachable")  # pragma: no cover — the loop returns or raises
+
+    def stream_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff[Any, Any]],
+        tracing: ModelTracing,
+        *,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        prompt: Any | None = None,
+    ) -> AsyncIterator[TResponseStreamEvent]:
+        return self.inner.stream_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+
+def _litellm_settings(agent: Agent[Any]) -> ModelSettings:
+    """*agent*'s model settings plus the LiteLLM call kwargs: the per-call timeout, and no
+    client-side retries (:class:`RetryingModel` owns them, so attempts never multiply)."""
+    return agent.model_settings.resolve(
+        ModelSettings(extra_args={"timeout": LLM_CALL_TIMEOUT_S, "num_retries": 0})
+    )
+
+
 @dataclass(frozen=True)
 class RoutedRun:
     """A finished :func:`call_with_fallback` run and the model that produced it."""
@@ -262,7 +392,9 @@ async def call_with_fallback(
     The §4.7 fallback: ``Runner.run(agent.clone(model=primary))``; on the openai.APIError
     hierarchy or a timeout, log ``primary_provider_failed`` and re-run with
     ``agent.clone(model=fallback)``. Any other error, or a failure with no fallback
-    available, propagates.
+    available, propagates. Each model call is retried first (:class:`RetryingModel`), and
+    each run is bounded by :data:`AGENT_RUN_TIMEOUT_S` — a timed-out primary run falls back.
+    Tool calls a cancelled primary run made stay made: the caller's budget counts them.
 
     Args:
         agent: The agent to run; its own ``model`` is replaced by the routed one.
@@ -287,8 +419,14 @@ async def call_with_fallback(
         trace_include_sensitive_data=False,
     )
     primary, fallback = model_for(role, settings)
+    model_settings = _litellm_settings(agent)
+
+    async def run(model: Model) -> RunResult:
+        routed = agent.clone(model=RetryingModel(model, role), model_settings=model_settings)
+        return await asyncio.wait_for(Runner.run(routed, input, **kwargs), AGENT_RUN_TIMEOUT_S)
+
     try:
-        result = await Runner.run(agent.clone(model=primary), input, **kwargs)
+        result = await run(primary)
         return RoutedRun(result=result, model_used=model_name(primary), fell_back=False)
     except _FALLBACK_ERRORS as exc:
         if fallback is None:
@@ -300,5 +438,5 @@ async def call_with_fallback(
             role=role,
             error_type=type(exc).__name__,
         )
-    result = await Runner.run(agent.clone(model=fallback), input, **kwargs)
+    result = await run(fallback)
     return RoutedRun(result=result, model_used=model_name(fallback), fell_back=True)

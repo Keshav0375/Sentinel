@@ -248,7 +248,8 @@ async def test_scripted_failure_drives_the_router_fallback() -> None:
     assert routed.model_used == "openai/gpt-4o-mini"
     assert routed.fell_back is True
     assert routed.result.final_output == "from the fallback"
-    assert [model for _, model in script.calls] == [HAIKU, "openai/gpt-4o-mini"]
+    # 3 attempts on the primary, then the fallback.
+    assert [model for _, model in script.calls] == [HAIKU] * 3 + ["openai/gpt-4o-mini"]
 
 
 async def test_fake_model_does_not_stream() -> None:

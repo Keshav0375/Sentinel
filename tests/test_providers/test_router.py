@@ -21,10 +21,12 @@ from agents.extensions.models.litellm_model import LitellmModel
 from sentinel.config import Settings
 from sentinel.exceptions import AgentError, ProviderUnavailableError
 from sentinel.providers import router
+from sentinel.providers.fake import FakeScript, FakeTurn, fake_script
 from sentinel.providers.router import (
     JUDGE_MODELS,
     MODEL_MAP,
     ROLES,
+    RetryingModel,
     build_model,
     call_with_fallback,
     judge_model_string,
@@ -306,6 +308,159 @@ async def test_the_callers_agent_is_not_mutated() -> None:
     with patch("agents.Runner.run", side_effect=_failing_primary(_rate_limit(), [])):
         await call_with_fallback(agent, "alert", role="triage", settings=_settings())
     assert agent.model is None
+
+
+# ── Retries and timeouts (fake LLM) ───────────────────────────────────────────
+
+
+def _fake(**kwargs: Any) -> Settings:
+    return _settings(sentinel_fake_llm=True, **kwargs)
+
+
+@pytest.fixture
+def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The real 1s/2s backoff, with every wait recorded instead of slept."""
+    seen: list[float] = []
+
+    async def record(seconds: float) -> None:
+        seen.append(seconds)
+
+    monkeypatch.setattr(router, "LLM_RETRY_BACKOFF_S", (1.0, 2.0))
+    monkeypatch.setattr(router, "_sleep", record)
+    return seen
+
+
+def _models(script: FakeScript) -> list[str]:
+    return [model for _, model in script.calls]
+
+
+def _logged(log: MagicMock, event: str) -> list[dict[str, Any]]:
+    return [c.kwargs for c in log.warning.call_args_list if c.args == (event,)]
+
+
+async def test_a_call_failing_twice_is_retried_with_backoff_then_succeeds(
+    waits: list[float], router_log: MagicMock
+) -> None:
+    with fake_script() as script:
+        script.fail_on(HAIKU, _rate_limit(), times=2)
+        script.on("triage_agent", FakeTurn(output="third time lucky"))
+        routed = await call_with_fallback(_agent(), "alert", role="triage", settings=_fake())
+
+    assert (routed.model_used, routed.fell_back) == (HAIKU, False)
+    assert routed.result.final_output == "third time lucky"
+    assert _models(script) == [HAIKU] * 3
+    assert waits == [1.0, 2.0]
+    retries = _logged(router_log, "llm_call_retry")
+    assert [r["attempt"] for r in retries] == [1, 2]
+    assert retries[0]["error_type"] == "RateLimitError" and retries[0]["role"] == "triage"
+    assert _logged(router_log, "primary_provider_failed") == []
+
+
+async def test_three_failed_attempts_fall_back(waits: list[float], router_log: MagicMock) -> None:
+    with fake_script() as script:
+        script.fail_on(HAIKU, _api_error(), times=3)
+        script.on("triage_agent", FakeTurn(output="from the fallback"))
+        routed = await call_with_fallback(_agent(), "alert", role="triage", settings=_fake())
+
+    assert (routed.model_used, routed.fell_back) == (GPT4O_MINI, True)
+    assert _models(script) == [HAIKU] * 3 + [GPT4O_MINI]
+    assert waits == [1.0, 2.0]  # the fallback's first attempt succeeded: no wait
+    assert len(_logged(router_log, "primary_provider_failed")) == 1
+
+
+async def test_a_hung_call_times_out_and_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(router, "LLM_CALL_TIMEOUT_S", 0.02)
+    with fake_script() as script:
+        script.hang_on(HAIKU, seconds=30, times=1)
+        script.on("triage_agent", FakeTurn(output="answered"))
+        routed = await asyncio.wait_for(
+            call_with_fallback(_agent(), "alert", role="triage", settings=_fake()), 5
+        )
+    assert (routed.model_used, routed.fell_back) == (HAIKU, False)
+    assert routed.result.final_output == "answered"  # the hung call consumed no turn
+
+
+async def test_a_primary_that_always_hangs_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(router, "LLM_CALL_TIMEOUT_S", 0.02)
+    with fake_script() as script:
+        script.hang_on(HAIKU, seconds=30)
+        script.on("triage_agent", FakeTurn(output="from the fallback"))
+        routed = await asyncio.wait_for(
+            call_with_fallback(_agent(), "alert", role="triage", settings=_fake()), 5
+        )
+    assert (routed.model_used, routed.fell_back) == (GPT4O_MINI, True)
+    assert routed.result.final_output == "from the fallback"
+
+
+async def test_a_run_past_its_overall_timeout_falls_back(
+    monkeypatch: pytest.MonkeyPatch, router_log: MagicMock
+) -> None:
+    """The per-agent bound cancels the whole run (no per-call retry) and fails over."""
+    monkeypatch.setattr(router, "AGENT_RUN_TIMEOUT_S", 0.05)
+    with fake_script() as script:
+        script.on(
+            "triage_agent", FakeTurn(output="too late", delay=30), FakeTurn(output="fallback")
+        )
+        routed = await asyncio.wait_for(
+            call_with_fallback(_agent(), "alert", role="triage", settings=_fake()), 5
+        )
+    assert (routed.model_used, routed.fell_back) == (GPT4O_MINI, True)
+    assert routed.result.final_output == "fallback"
+    assert _models(script) == [HAIKU, GPT4O_MINI]
+    failed = _logged(router_log, "primary_provider_failed")
+    assert [f["error_type"] for f in failed] == ["TimeoutError"]
+
+
+async def test_a_fallback_that_times_out_too_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(router, "AGENT_RUN_TIMEOUT_S", 0.05)
+    with fake_script() as script:
+        script.hang_on(HAIKU, seconds=30)
+        script.hang_on(GPT4O_MINI, seconds=30)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                call_with_fallback(_agent(), "alert", role="triage", settings=_fake()), 5
+            )
+
+
+async def test_non_provider_errors_are_not_retried(waits: list[float]) -> None:
+    with fake_script() as script:
+        script.on("triage_agent", FakeTurn(error=ValueError("bad output")))
+        with pytest.raises(ValueError, match="bad output"):
+            await call_with_fallback(_agent(), "alert", role="triage", settings=_fake())
+    assert _models(script) == [HAIKU] and waits == []
+
+
+async def test_runs_carry_the_litellm_timeout_and_no_client_retries() -> None:
+    """LiteLLM gets the per-call timeout; its own retries are off so attempts never multiply."""
+    from agents import ModelSettings  # noqa: PLC0415
+
+    seen: list[Agent[Any]] = []
+
+    async def run(agent: Agent[Any], input: Any, **kwargs: Any) -> MagicMock:
+        seen.append(agent)
+        return MagicMock()
+
+    caller = Agent(name="triage_agent", instructions="x", model_settings=ModelSettings(top_p=0.5))
+    with patch("agents.Runner.run", side_effect=run):
+        await call_with_fallback(caller, "a", role="triage", settings=_settings())
+    routed = seen[0]
+    assert routed.model_settings.extra_args == {"timeout": 60.0, "num_retries": 0}
+    assert routed.model_settings.top_p == 0.5  # the caller's settings are kept
+    assert isinstance(routed.model, RetryingModel)
+    assert isinstance(routed.model.inner, LitellmModel)
+    assert caller.model_settings.extra_args is None  # the caller's agent is not mutated
+
+
+def test_retry_policy_is_three_attempts_one_then_two_seconds() -> None:
+    """CONVENTIONS: 3 attempts per LLM call; the per-call and per-agent bounds.
+
+    The backoff is read from the source: the suite zeroes it (tests/conftest.py).
+    """
+    import inspect  # noqa: PLC0415
+
+    assert "LLM_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0)" in inspect.getsource(router)
+    assert router.LLM_CALL_TIMEOUT_S == 60.0
+    assert router.AGENT_RUN_TIMEOUT_S == 180.0
 
 
 # ── Capabilities ──────────────────────────────────────────────────────────────

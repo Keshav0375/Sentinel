@@ -17,7 +17,9 @@ that satisfies the agent's output schema::
             FakeTurn(tool_calls=[FakeToolCall("get_service_metadata", {"service_name": "api"})]),
             FakeTurn(output=TriageResult(...), usage=(1200, 80)),
         )
-        script.fail_on("anthropic/claude-haiku-4-5", litellm.RateLimitError(...))
+        script.fail_on("anthropic/claude-haiku-4-5", litellm.RateLimitError(...))   # always
+        script.fail_on("anthropic/claude-sonnet-4-6", litellm.Timeout(...), times=2)  # twice
+        script.hang_on("openai/gpt-4o", seconds=300)                                  # hang
         await Runner.run(agent_with_fake_model, "alert")
 
 Every response reports token usage — scripted, or estimated from the text (4 chars per
@@ -54,6 +56,7 @@ for a spec, or a deliberately non-compliant one that drives the deterministic fa
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequence
@@ -165,6 +168,7 @@ class FakeTurn:
         error: Raised instead of responding (e.g. a litellm RateLimitError).
         framing: How a JSON output is wrapped as text (agents without structured
             outputs only); None uses the script's :meth:`FakeScript.frame_outputs`.
+        delay: Seconds to wait before responding (a slow or hung provider).
     """
 
     output: str | Mapping[str, Any] | BaseModel | None = None
@@ -172,6 +176,7 @@ class FakeTurn:
     usage: tuple[int, int] | None = None
     error: BaseException | None = None
     framing: Framing | None = None
+    delay: float = 0.0
 
 
 class FakeScript:
@@ -179,7 +184,10 @@ class FakeScript:
 
     def __init__(self) -> None:
         self._turns: defaultdict[str, deque[FakeTurn]] = defaultdict(deque)
-        self._failures: dict[str, BaseException] = {}
+        # model → (error, calls left to fail; None = every call)
+        self._failures: dict[str, tuple[BaseException, int | None]] = {}
+        # model → (seconds each call waits before answering, calls left; None = every call)
+        self._hangs: dict[str, tuple[float, int | None]] = {}
         self.calls: list[tuple[str, str]] = []  # (agent name, model) per model call
         self.framing: Framing = "bare"
         self._call_ids = 0
@@ -194,16 +202,41 @@ class FakeScript:
         self.framing = framing
         return self
 
-    def fail_on(self, model: str, error: BaseException) -> FakeScript:
-        """Make every call to the fake model *model* raise *error* (fallback tests)."""
-        self._failures[model] = error
+    def fail_on(self, model: str, error: BaseException, *, times: int | None = None) -> FakeScript:
+        """Make calls to the fake model *model* raise *error*: every call, or the next *times*
+        (retry and fallback tests)."""
+        self._failures[model] = (error, times)
         return self
+
+    def hang_on(self, model: str, seconds: float, *, times: int | None = None) -> FakeScript:
+        """Make calls to *model* wait *seconds* before answering: every call, or the next
+        *times* (timeout tests). A call cancelled while it waits consumes no turn."""
+        self._hangs[model] = (seconds, times)
+        return self
+
+    def hang_for(self, model: str) -> float:
+        """Seconds the next call to *model* waits (0.0 for none); counts one hang down."""
+        if model not in self._hangs:
+            return 0.0
+        seconds, left = self._hangs[model]
+        if left is not None:
+            if left <= 1:
+                del self._hangs[model]
+            else:
+                self._hangs[model] = (seconds, left - 1)
+        return seconds
 
     def next_turn(self, agent_name: str, output_type: str | None, model: str) -> FakeTurn:
         """The turn for this call: the model's failure, else the agent's or type's next."""
         self.calls.append((agent_name, model))
         if model in self._failures:
-            return FakeTurn(error=self._failures[model])
+            error, left = self._failures[model]
+            if left is not None:
+                if left <= 1:
+                    del self._failures[model]
+                else:
+                    self._failures[model] = (error, left - 1)
+            return FakeTurn(error=error)
         for key in (agent_name, output_type):
             if key is not None and self._turns[key]:
                 return self._turns[key].popleft()
@@ -217,6 +250,7 @@ class FakeScript:
     def reset(self) -> None:
         self._turns.clear()
         self._failures.clear()
+        self._hangs.clear()
         self.calls.clear()
         self.framing = "bare"
         self._call_ids = 0
@@ -405,11 +439,16 @@ class FakeModel(Model):
     ) -> ModelResponse:
         script = self._script or active_script()
         structured = output_schema is not None and not output_schema.is_plain_text()
+        hang = script.hang_for(self.model)
+        if hang > 0:
+            await asyncio.sleep(hang)
         turn = script.next_turn(
             _current_agent_name(),
             output_schema.name() if output_schema is not None else None,
             self.model,
         )
+        if turn.delay > 0:
+            await asyncio.sleep(turn.delay)
         with generation_span(
             model=self.model,
             model_config={"model_impl": "fake"},

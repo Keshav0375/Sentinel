@@ -116,6 +116,17 @@ def _scrubbed_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_llm_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Model-call retries keep their count but not their 1s/2s waits (tests run fast).
+
+    A test of the waits themselves sets ``router.LLM_RETRY_BACKOFF_S`` back.
+    """
+    from sentinel.providers import router  # noqa: PLC0415 — after litellm's .env load
+
+    monkeypatch.setattr(router, "LLM_RETRY_BACKOFF_S", (0.0, 0.0))
+
+
 def _postgres_dsn() -> str | None:
     return _TEST_DATABASE_URL if is_postgres_dsn(_TEST_DATABASE_URL) else None
 
