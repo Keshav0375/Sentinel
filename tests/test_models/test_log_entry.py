@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from sentinel.models.log_entry import LogAnalysis, LogEntry, LogLevel, LogQuery
+from sentinel.models.log_entry import LogEntry, LogLevel, LogQuery
 
 # ── LogLevel ──────────────────────────────────────────────────────────────────
 
@@ -94,41 +94,3 @@ def test_log_query_with_filters() -> None:
     )
     assert q.level_filter is LogLevel.ERROR
     assert q.keyword_filter == "NullPointer"
-
-
-# ── LogAnalysis ───────────────────────────────────────────────────────────────
-
-
-def test_log_analysis_required_fields() -> None:
-    analysis = LogAnalysis(
-        anomaly_summary="Error rate spiked 7x at 03:00Z",
-        hypothesis="NullPointerException in AuthMiddleware due to missing config key",
-    )
-    assert analysis.error_patterns == []
-    assert analysis.key_log_lines == []
-    assert "NullPointer" in analysis.hypothesis
-
-
-def test_log_analysis_with_patterns_and_lines() -> None:
-    entry = LogEntry(level=LogLevel.ERROR, service="api-gateway", message="NPE")
-    analysis = LogAnalysis(
-        error_patterns=["NullPointerException", "500 Internal Server Error"],
-        anomaly_summary="Spike at 03:00Z",
-        key_log_lines=[entry],
-        hypothesis="Bad deploy introduced null ref",
-    )
-    assert len(analysis.error_patterns) == 2
-    assert len(analysis.key_log_lines) == 1
-    assert analysis.key_log_lines[0].level is LogLevel.ERROR
-
-
-def test_log_analysis_json_round_trip() -> None:
-    entry = LogEntry(level=LogLevel.ERROR, service="svc", message="err")
-    analysis = LogAnalysis(
-        anomaly_summary="spike",
-        key_log_lines=[entry],
-        hypothesis="bad config",
-    )
-    reloaded = LogAnalysis.model_validate_json(analysis.model_dump_json())
-    assert reloaded.hypothesis == analysis.hypothesis
-    assert len(reloaded.key_log_lines) == 1

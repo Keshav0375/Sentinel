@@ -15,6 +15,7 @@ Usage (CLI)::
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,30 +23,23 @@ from typing import Any
 
 # asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
-from agents import Runner, add_trace_processor
-from agents import trace as agent_trace
-from openai import AsyncOpenAI
 
-from sentinel.agents.comms import build_comms_agent
-from sentinel.agents.deploy_correlator import build_deploy_correlator_agent
-from sentinel.agents.log_analyst import build_log_analyst_agent
-from sentinel.agents.orchestrator import build_orchestrator_agent
-from sentinel.agents.remediation import build_remediation_agent
-from sentinel.agents.triage import build_triage_agent
-from sentinel.config import Settings, get_settings, secret_value
-from sentinel.eval.judge import evaluate_trajectory
+from sentinel.agents.orchestrator import PIPELINE_ERROR, PipelineDeps, run_pipeline
+from sentinel.config import Settings, get_settings
+from sentinel.eval.judge import evaluate_trajectory, make_judge_client
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario
 from sentinel.generator.scenarios import Scenario
 from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.db import create_tables
 from sentinel.infra.logging import configure_logging, get_logger
-from sentinel.infra.tracing import SentinelTracer
+from sentinel.infra.tracing import SentinelTracer, install_trace_processors
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.eval_result import TrajectoryScore
 from sentinel.models.incident import IncidentStatus
+from sentinel.models.pipeline import PipelineInput
 from sentinel.providers import apply_sdk_defaults
 
 logger = get_logger("sentinel.eval.runner")
@@ -68,25 +62,22 @@ async def run_scenario_eval(
     short_term_memory: ShortTermMemory,
     trajectories_dir: Path,
     settings: Settings,
-    judge_model: str,
-    max_turns: int = 20,
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     pool: asyncpg.Pool | None = None,
 ) -> EvalRunResult:
     """Run one scenario end-to-end and return a scored result.
 
-    Builds a fresh agent set, runs the pipeline on the scenario's alert, reads the
-    trajectory written by SentinelTracer, and calls the LLM judge.
+    Runs the orchestrator pipeline on the scenario's alert (it builds its agents per
+    run), reads the trajectory written by SentinelTracer, and calls the LLM judge.
 
     Args:
         scenario: Loaded scenario (with ground truth).
         short_term_memory: Shared STM — keyed by incident_id so concurrent
             scenarios don't collide.
         trajectories_dir: Directory where SentinelTracer writes trajectory JSON.
-        settings: Validated Settings — used for provider resolution.
-        judge_model: Bare model name for the eval judge (Groq-compatible).
-        max_turns: Tool-call cap per pipeline run.
+        settings: Validated Settings — selects the primary provider (the judge runs on
+            the other one) and supplies the provider credentials.
         semantic_memory: Service metadata store.
         episodic_memory: Past-incident similarity store.
         pool: asyncpg pool ``get_deploy_details`` reads; None without ``DATABASE_URL``.
@@ -96,7 +87,8 @@ async def run_scenario_eval(
     """
     scenario_id = scenario.scenario_id
     alert = generate_alert(scenario)
-    incident_id = f"eval-{scenario_id}-{alert.alert_id[:8]}"
+    # A UUID, as every incident id is (incidents.id; the LangFuse trace id is its hex).
+    incident_id = str(uuid.uuid4())
 
     logger.info(
         "eval_scenario_start",
@@ -104,74 +96,44 @@ async def run_scenario_eval(
         incident_id=incident_id,
     )
 
-    # ── Build fresh agents ─────────────────────────────────────────────────────
-    triage_agent = build_triage_agent(
-        semantic_memory,
-        episodic_memory,
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    log_analyst_agent = build_log_analyst_agent(
-        semantic_memory,
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-    deploy_correlator_agent = build_deploy_correlator_agent(
-        pool,
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    remediation_agent = build_remediation_agent(
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-    comms_agent = build_comms_agent(
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    orchestrator = build_orchestrator_agent(
-        triage_agent,
-        log_analyst_agent,
-        deploy_correlator_agent,
-        remediation_agent,
-        comms_agent,
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-
-    # Judge uses Groq directly (not LiteLLM) — strip provider prefix if present.
-    groq_client = AsyncOpenAI(
-        api_key=secret_value(settings.groq_api_key, "GROQ_API_KEY"),
-        base_url=settings.groq_base_url,
-    )
+    # The judge runs on a model no role uses, off the primary provider (§4.7, decision
+    # 2026-10-18).
+    judge_model, judge_client = make_judge_client(settings)
 
     # ── Set up incident in STM ─────────────────────────────────────────────────
     short_term_memory.create(incident_id, alert)
 
     # ── Run pipeline ───────────────────────────────────────────────────────────
-    input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
+    # run_pipeline never raises: a failure inside it is an escalated result.
+    deps = PipelineDeps(
+        settings=settings,
+        semantic_memory=semantic_memory,
+        episodic_memory=episodic_memory,
+        pool=pool,
+        # A synthetic run is not a past incident: search_past_incidents must not recall it.
+        persist=False,
+    )
+    result = await run_pipeline(PipelineInput.from_alert(incident_id, alert), deps)
     pipeline_error: str | None = None
-
-    try:
-        with agent_trace(
-            "incident_pipeline",
-            metadata={"incident_id": incident_id},
-        ):
-            await Runner.run(orchestrator, input_text, max_turns=max_turns)
-        short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
-        logger.info("eval_pipeline_complete", incident_id=incident_id)
-    except Exception as exc:  # noqa: BLE001
-        pipeline_error = str(exc)
+    reason = result.escalation.missing[0] if result.escalation and result.escalation.missing else ""
+    if reason.startswith(PIPELINE_ERROR):
+        pipeline_error = reason
         logger.error(
             "eval_pipeline_error",
             incident_id=incident_id,
             scenario_id=scenario_id,
             error=pipeline_error,
         )
-        try:
-            short_term_memory.update_context(incident_id, status=IncidentStatus.ESCALATED)
-        except KeyError:
-            pass
+    else:
+        logger.info("eval_pipeline_complete", incident_id=incident_id, status=result.status)
+    try:
+        short_term_memory.update_context(
+            incident_id,
+            status=IncidentStatus(result.status),
+            result=result.model_dump(mode="json"),
+        )
+    except KeyError:
+        pass
 
     # ── Load trajectory from disk ──────────────────────────────────────────────
     traj_path = trajectories_dir / f"{incident_id}.json"
@@ -197,7 +159,8 @@ async def run_scenario_eval(
                 incident_id=incident_id,
             )
 
-    # Enrich trajectory with STM context for the judge
+    # Enrich trajectory with the outcome and the STM context for the judge
+    trajectory["pipeline_result"] = result.model_dump(mode="json")
     try:
         ctx = short_term_memory.get_context(incident_id)
         trajectory["stm_context"] = {
@@ -215,13 +178,16 @@ async def run_scenario_eval(
         pass
 
     # ── Judge the trajectory ───────────────────────────────────────────────────
+    # The trajectory carries result.models_used: evaluate_trajectory refuses to grade a run
+    # that used the judge's model and returns a score marked judge_conflict (runtime guard,
+    # decision 2026-10-18); aggregates below and in eval.report drop it.
     ground_truth = scenario.ground_truth.model_dump()
     score = await evaluate_trajectory(
         trajectory,
         ground_truth,
         incident_id=incident_id,
         scenario_id=scenario_id,
-        client=groq_client,
+        client=judge_client,
         model=judge_model,
     )
 
@@ -230,6 +196,7 @@ async def run_scenario_eval(
         scenario_id=scenario_id,
         incident_id=incident_id,
         total_score=score.total_score,
+        judge_conflict=score.judge_conflict,
     )
     return EvalRunResult(
         scenario_id=scenario_id,
@@ -245,7 +212,6 @@ async def run_eval(
     *,
     db_path: Path | None = None,
     trajectories_dir: Path | None = None,
-    judge_model: str | None = None,
 ) -> list[EvalRunResult]:
     """Run the full eval suite and return per-scenario results.
 
@@ -262,7 +228,6 @@ async def run_eval(
         db_path: SQLite path override. Defaults to config value.
         trajectories_dir: Directory for trajectory JSON files.
             Defaults to ``reports/trajectories/eval``.
-        judge_model: Override judge model. Defaults to config value.
 
     Returns:
         List of ``EvalRunResult`` in scenario order.
@@ -272,13 +237,12 @@ async def run_eval(
 
     resolved_db = db_path or settings.sentinel_db_path
     resolved_traj = trajectories_dir or Path("reports/trajectories/eval")
-    resolved_judge = judge_model or settings.sentinel_judge_model
     resolved_ids = scenario_ids or list_scenarios()
 
     logger.info(
         "eval_run_start",
         scenario_count=len(resolved_ids),
-        judge_model=resolved_judge,
+        primary_provider=settings.sentinel_primary_provider,
         db_path=str(resolved_db),
     )
 
@@ -304,7 +268,7 @@ async def run_eval(
 
         # Register tracer once — it collects spans for all scenarios via incident_id.
         tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
-        add_trace_processor(tracer)
+        install_trace_processors(tracer)
 
         # ── Batch run ──────────────────────────────────────────────────────────
         results: list[EvalRunResult] = []
@@ -325,8 +289,6 @@ async def run_eval(
                     short_term_memory=short_term_memory,
                     trajectories_dir=resolved_traj,
                     settings=settings,
-                    judge_model=resolved_judge,
-                    max_turns=settings.sentinel_max_tool_calls + 5,
                     semantic_memory=semantic_memory,
                     episodic_memory=episodic_memory,
                     pool=pool,
@@ -347,7 +309,8 @@ async def run_eval(
         "eval_run_complete",
         scenarios_run=len(results),
         scenarios_requested=len(resolved_ids),
-        avg_score=(sum(r.score.total_score for r in results) / len(results) if results else 0.0),
+        judge_conflicts=sum(1 for r in results if r.score.judge_conflict),
+        avg_score=summary_stats(results)["avg_total"],
     )
     return results
 
@@ -361,24 +324,30 @@ def summary_stats(results: list[EvalRunResult]) -> dict[str, Any]:
     """Compute aggregate statistics from a list of EvalRunResults.
 
     Returns a dict with keys: ``avg_total``, ``pass_rate``, ``failure_rate``,
-    ``generated_at``. Pass threshold is 3.0 (60% of the 0-5 scale).
+    ``judge_conflicts``, ``generated_at``. Pass threshold is 3.0 (60% of the 0-5 scale).
+    A ``judge_conflict`` score is invalid (decision 2026-10-18): it is counted in
+    ``judge_conflicts`` and left out of every other figure.
     """
-    if not results:
+    valid = [r for r in results if not r.score.judge_conflict]
+    conflicts = len(results) - len(valid)
+    if not valid:
         return {
             "avg_total": 0.0,
             "pass_rate": 0.0,
             "failure_rate": 0.0,
+            "judge_conflicts": conflicts,
             "generated_at": datetime.now(UTC).isoformat(),
         }
 
-    total_sum = sum(r.score.total_score for r in results)
-    pass_count = sum(1 for r in results if r.score.total_score >= 3.0)
-    error_count = sum(1 for r in results if r.pipeline_error is not None)
+    total_sum = sum(r.score.total_score for r in valid)
+    pass_count = sum(1 for r in valid if r.score.total_score >= 3.0)
+    error_count = sum(1 for r in valid if r.pipeline_error is not None)
 
-    n = len(results)
+    n = len(valid)
     return {
         "avg_total": round(total_sum / n, 4),
         "pass_rate": round(pass_count / n, 4),
         "failure_rate": round(error_count / n, 4),
+        "judge_conflicts": conflicts,
         "generated_at": datetime.now(UTC).isoformat(),
     }

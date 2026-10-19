@@ -33,7 +33,7 @@ from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
 from sentinel.models.incident import Incident, IncidentStatus, Severity, TimelineEntry
-from sentinel.models.memory import EpisodicRecord, MemoryQueryResult
+from sentinel.models.memory import EpisodicRecord, IncidentOutcome, MemoryQueryResult
 from sentinel.models.tools import IncidentSearchInput, SimilarIncident, ToolFailure
 from sentinel.tools.incident_search import _search_past_incidents
 
@@ -240,14 +240,17 @@ async def test_full_round_trip(pool: asyncpg.Pool) -> None:
     inc = _make_incident("payment-service", "db_connection_pool")
     inc.created_at = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
     inc.resolved_at = inc.created_at + timedelta(seconds=300)
-    inc.log_analysis = {"hypothesis": "connection leak in checkout handler"}
-    inc.remediation_plan = {"action_type": "rollback", "justification": "revert to stable"}
     inc.timeline = [
         TimelineEntry(agent_name="triage", action="classify", result_summary="P1"),
-        TimelineEntry(agent_name="log_analyst", action="fetch_logs", result_summary="leak"),
+        TimelineEntry(agent_name="analysis", action="fetch_logs", result_summary="leak"),
     ]
+    outcome = _outcome(
+        root_cause="connection leak in checkout handler",
+        root_cause_by="analysis",
+        resolution="revert to stable",
+    )
 
-    await mem.store_incident(inc)
+    await mem.store_incident(inc, outcome=outcome)
     record = await mem.get_incident(inc.id)
 
     assert record is not None
@@ -268,11 +271,11 @@ async def test_full_round_trip(pool: asyncpg.Pool) -> None:
     assert record.raw_timeline["status"] == "resolved"
     assert [e["agent_name"] for e in record.raw_timeline["timeline"]] == [
         "triage",
-        "log_analyst",
+        "analysis",
     ]
     provenance = record.raw_timeline["provenance"]
-    assert provenance["root_cause_by"] == "log_analyst"
-    assert provenance["resolution_by"] == "unknown"  # no remediation agent in the timeline
+    assert provenance["root_cause_by"] == "analysis"
+    assert provenance["resolution_by"] == "resolution"
     assert provenance["model_generated"] is True
 
 
@@ -334,8 +337,7 @@ async def test_store_upserts_on_same_id(mem: EpisodicMemory) -> None:
     inc = _make_incident("payment-service", "db_connection_pool", status=IncidentStatus.TRIAGE)
     await mem.store_incident(inc)
     inc.status = IncidentStatus.RESOLVED
-    inc.remediation_plan = {"action_type": "rollback"}
-    await mem.store_incident(inc)
+    await mem.store_incident(inc, outcome=_outcome(resolution="rollback"))
 
     assert [r.id for r in await mem.list_incidents()] == [inc.id]
     assert [r.id for r in await mem.list_incidents(status="resolved")] == [inc.id]
@@ -368,28 +370,22 @@ async def test_restore_keeps_the_original_created_at(
 # ── Provenance: stored conclusions are marked as model output ─────────────────
 
 
-async def test_provenance_names_the_agents_from_the_timeline(mem: EpisodicMemory) -> None:
+async def test_without_an_outcome_the_timeline_attributes_nothing(mem: EpisodicMemory) -> None:
+    """Only the pipeline's outcome names a conclusion and its agent; a timeline does not."""
     inc = _make_incident("payment-service", "db_connection_pool")
-    inc.deploy_correlation = {"evidence": "deploy v2.3 introduced the leak"}
-    inc.remediation_plan = {"action_type": "rollback"}
     inc.timeline = [
-        TimelineEntry(
-            agent_name="incident_orchestrator",
-            action="handoff → deploy_correlator_agent",
-            result_summary="Transferred control to deploy_correlator_agent",
-        ),
-        TimelineEntry(agent_name="remediation_agent", action="propose", result_summary="ok"),
+        TimelineEntry(agent_name="analysis", action="fetch_logs", result_summary="leak"),
+        TimelineEntry(agent_name="resolution", action="draft", result_summary="ok"),
     ]
 
     await mem.store_incident(inc)
     record = await mem.get_incident(inc.id)
 
-    assert record is not None
-    assert record.root_cause == "deploy v2.3 introduced the leak"
-    assert record.raw_timeline is not None
+    assert record is not None and record.raw_timeline is not None
+    assert record.root_cause == "unknown" and record.resolution == "unresolved"
     provenance = record.raw_timeline["provenance"]
-    assert provenance["root_cause_by"] == "deploy_correlator_agent"
-    assert provenance["resolution_by"] == "remediation_agent"
+    assert provenance["root_cause_by"] == "unknown"
+    assert provenance["resolution_by"] == "unknown"
     assert provenance["model_generated"] is True
     stored_at = datetime.fromisoformat(provenance["stored_at"])
     assert abs(datetime.now(UTC) - stored_at) < timedelta(minutes=1)
@@ -419,11 +415,12 @@ async def test_embedded_symptoms_hold_only_observed_alert_data(
         "scenario_id": "bad_deploy_01",
     }
     inc.affected_service = "orders-db"  # triage's conclusion
-    inc.log_analysis = {"hypothesis": "connection leak in checkout handler"}
-    inc.deploy_correlation = {"evidence": "deploy v2.3"}
-    inc.remediation_plan = {"justification": "revert to stable"}
+    outcome = _outcome(
+        root_cause="connection leak in checkout handler after deploy v2.3",
+        resolution="revert to stable",
+    )
 
-    await mem.store_incident(inc)
+    await mem.store_incident(inc, outcome=outcome)
     record = await mem.get_incident(inc.id)
 
     assert record is not None
@@ -600,7 +597,7 @@ async def test_list_incidents_filters_by_status_and_service(mem: EpisodicMemory)
     assert ids(await mem.list_incidents(status="resolved", service="api-gateway")) == {
         api_resolved.id
     }
-    assert await mem.list_incidents(status="pending_approval") == []
+    assert await mem.list_incidents(status="rollback_proposed") == []
     assert await mem.list_incidents(service="no-such-service") == []
 
 
@@ -731,3 +728,59 @@ async def test_incident_search_tool_reports_memory_unavailable(client: Embedding
     )
     assert isinstance(result, ToolFailure)
     assert result.kind == "unavailable"
+
+
+# ── store_incident(outcome=…) — the phase-4 pipeline's columns ────────────────
+
+
+def _outcome(**overrides: Any) -> IncidentOutcome:
+    fields: dict[str, Any] = {
+        "correlation_id": str(uuid.uuid4()),
+        "root_cause": "pr-42 changed GET / to return HTML",
+        "root_cause_by": "resolution",
+        "root_cause_confidence": 0.85,
+        "resolution": "revert pr-42",
+        "resolution_by": "resolution",
+        "resolution_type": "rollback",
+        "reflexion_loops": 1,
+        "langfuse_trace_id": uuid.uuid4().hex,
+        "pipeline_result": {"status": "rollback_proposed"},
+    }
+    return IncidentOutcome(**(fields | overrides))
+
+
+async def test_an_outcome_writes_its_columns_and_provenance(
+    mem: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    inc = _make_incident("api-gateway", "error_rate", status=IncidentStatus.ROLLBACK_PROPOSED)
+    outcome = _outcome()
+    await mem.store_incident(inc, outcome=outcome)
+
+    row = await _raw_row(pool, inc.id)
+    assert row["status"] == "rollback_proposed"
+    assert row["correlation_id"] == uuid.UUID(outcome.correlation_id)
+    assert row["root_cause"] == outcome.root_cause and row["resolution"] == outcome.resolution
+    assert row["root_cause_confidence"] == pytest.approx(0.85)
+    assert row["resolution_type"] == "rollback"
+    assert row["reflexion_loops"] == 1
+    assert row["langfuse_trace_id"] == outcome.langfuse_trace_id
+    trajectory = json.loads(row["trajectory"])
+    assert trajectory["pipeline_result"] == {"status": "rollback_proposed"}
+    assert trajectory["provenance"]["root_cause_by"] == "resolution"
+    record = await mem.get_incident(inc.id)
+    assert record is not None and record.resolution_type == "rollback"
+
+
+async def test_a_store_without_an_outcome_leaves_the_outcome_columns(
+    mem: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    inc = _make_incident("api-gateway", "error_rate", status=IncidentStatus.ESCALATED)
+    await mem.store_incident(
+        inc, outcome=_outcome(resolution_type="escalated", correlation_id=None)
+    )
+    await mem.store_incident(inc)
+
+    row = await _raw_row(pool, inc.id)
+    assert row["resolution_type"] == "escalated" and row["reflexion_loops"] == 1
+    assert row["correlation_id"] is None
+    assert "pipeline_result" not in json.loads(row["trajectory"])

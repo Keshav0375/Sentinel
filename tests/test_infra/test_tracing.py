@@ -20,8 +20,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
+from langfuse.api.resources.prompts import Prompt_Text
+from langfuse.model import TextPromptClient
 
 from sentinel import main
+from sentinel.agents import loader
+from sentinel.agents.loader import UNTRUSTED_DATA_PREAMBLE
 from sentinel.infra import tracing
 from sentinel.infra.tracing import (
     PIPELINE_TRACE_NAME,
@@ -455,6 +459,21 @@ def test_tracer_multiple_incidents_isolated(tmp_path: Path) -> None:
 _PROMPTS_DIR = Path(main.__file__).resolve().parent / "agents" / "prompts"
 
 
+def _file_prompt(agent_name: str) -> str:
+    """The prompt file's text with the untrusted-data preamble, as both loaders serve it."""
+    raw = (_PROMPTS_DIR / f"{agent_name}.txt").read_text(encoding="utf-8").strip()
+    return f"{raw}\n\n{UNTRUSTED_DATA_PREAMBLE}"
+
+
+def _text_prompt(template: str, *, name: str = "triage", version: int = 3) -> TextPromptClient:
+    """A real TextPromptClient, as ``get_prompt`` returns it from LangFuse."""
+    return TextPromptClient(
+        Prompt_Text(
+            name=name, version=version, prompt=template, config={}, labels=["production"], tags=[]
+        )
+    )
+
+
 @pytest.fixture
 def mock_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """A stand-in for the LangFuse client returned by ``get_client()``."""
@@ -464,11 +483,76 @@ def mock_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 
 async def test_load_prompt_returns_langfuse_prompt(mock_client: MagicMock) -> None:
-    prompt = MagicMock(name="TextPromptClient")
+    prompt = _text_prompt("You are the Triage Agent for {{service}}.")
     mock_client.get_prompt.return_value = prompt
 
-    assert await load_prompt("triage") is prompt
+    result = await load_prompt("triage")
+
+    assert isinstance(result, TextPromptClient)
+    # Same LangFuse prompt and version (the §6.3 link), preamble appended to the template.
+    assert (result.name, result.version) == ("triage", 3)
+    assert result.compile(service="api") == (
+        f"You are the Triage Agent for api.\n\n{UNTRUSTED_DATA_PREAMBLE}"
+    )
     mock_client.get_prompt.assert_called_once_with("triage", cache_ttl_seconds=300)
+
+
+async def test_langfuse_prompt_gets_the_preamble_once_across_cached_loads(
+    mock_client: MagicMock,
+) -> None:
+    """The SDK hands back the same cached client each time: it must stay unchanged."""
+    prompt = _text_prompt("You are the Triage Agent.")
+    mock_client.get_prompt.return_value = prompt
+
+    first = await load_prompt("triage")
+    second = await load_prompt("triage")
+
+    assert prompt.prompt == "You are the Triage Agent."
+    for result in (first, second):
+        assert isinstance(result, TextPromptClient)
+        compiled = result.compile()
+        assert compiled.endswith(UNTRUSTED_DATA_PREAMBLE)
+        assert compiled.count(UNTRUSTED_DATA_PREAMBLE) == 1
+
+
+async def test_langfuse_prompt_already_ending_with_the_preamble_is_not_doubled(
+    mock_client: MagicMock,
+) -> None:
+    """A LangFuse prompt uploaded from the loader's output already carries the rule."""
+    prompt = _text_prompt(_file_prompt("triage") + "\n")
+    mock_client.get_prompt.return_value = prompt
+
+    result = await load_prompt("triage")
+
+    assert result is prompt
+    assert result.compile().count(UNTRUSTED_DATA_PREAMBLE) == 1
+
+
+async def test_non_text_langfuse_prompt_falls_back_to_the_file(mock_client: MagicMock) -> None:
+    mock_client.get_prompt.return_value = MagicMock(name="ChatPromptClient")
+
+    assert await load_prompt("triage") == _file_prompt("triage")
+
+
+@pytest.mark.parametrize("agent_name", ["reflexion", "reverification"])
+async def test_loop_prompts_load_with_one_preamble_on_both_paths(
+    mock_client: MagicMock, agent_name: str
+) -> None:
+    """Decision 2026-10-14: the file loader and the LangFuse path serve the same text."""
+    from_file_loader = loader.load_prompt(f"{agent_name}.txt")
+    mock_client.get_prompt.side_effect = RuntimeError("langfuse unreachable")
+    fallback = await load_prompt(agent_name)
+    mock_client.get_prompt.side_effect = None
+    raw = (_PROMPTS_DIR / f"{agent_name}.txt").read_text(encoding="utf-8")
+    mock_client.get_prompt.return_value = _text_prompt(raw, name=agent_name)
+    from_langfuse = await load_prompt(agent_name)
+
+    assert isinstance(from_langfuse, TextPromptClient)
+    for text in (from_file_loader, fallback, from_langfuse.compile()):
+        assert text == _file_prompt(agent_name)
+        assert text.endswith(UNTRUSTED_DATA_PREAMBLE)
+        assert text.count(UNTRUSTED_DATA_PREAMBLE) == 1
+        assert text.startswith("You are the ")
 
 
 async def test_load_prompt_falls_back_to_file_when_get_prompt_raises(
@@ -479,8 +563,8 @@ async def test_load_prompt_falls_back_to_file_when_get_prompt_raises(
 
     result = await load_prompt("triage")
 
-    assert result == (_PROMPTS_DIR / "triage.txt").read_text(encoding="utf-8")
-    assert result.startswith("You are the Triage Agent")
+    assert result == _file_prompt("triage")
+    assert isinstance(result, str) and result.startswith("You are the Triage Agent")
 
 
 async def test_load_prompt_raises_when_langfuse_and_file_both_fail(
@@ -496,9 +580,9 @@ async def test_load_prompt_fetches_off_the_event_loop_thread(mock_client: MagicM
     loop_thread = threading.get_ident()
     fetch_threads: list[int] = []
 
-    def _get_prompt(*args: Any, **kwargs: Any) -> MagicMock:
+    def _get_prompt(*args: Any, **kwargs: Any) -> TextPromptClient:
         fetch_threads.append(threading.get_ident())
-        return MagicMock(name="TextPromptClient")
+        return _text_prompt("You are the Triage Agent.")
 
     mock_client.get_prompt.side_effect = _get_prompt
     await load_prompt("triage")
@@ -531,9 +615,9 @@ async def _ticks_during(coro: Any) -> tuple[Any, int]:
 async def test_slow_langfuse_does_not_block_other_coroutines(
     mock_client: MagicMock, unreachable: bool
 ) -> None:
-    prompt = MagicMock(name="TextPromptClient")
+    prompt = _text_prompt("You are the Triage Agent.")
 
-    def _blocking_get_prompt(*args: Any, **kwargs: Any) -> MagicMock:
+    def _blocking_get_prompt(*args: Any, **kwargs: Any) -> TextPromptClient:
         time.sleep(0.3)  # the SDK's synchronous HTTP call, retries included
         if unreachable:
             raise ConnectionError("connection refused")
@@ -543,9 +627,9 @@ async def test_slow_langfuse_does_not_block_other_coroutines(
     result, ticks = await _ticks_during(load_prompt("triage"))
 
     if unreachable:
-        assert result == (_PROMPTS_DIR / "triage.txt").read_text(encoding="utf-8")
+        assert result == _file_prompt("triage")
     else:
-        assert result is prompt
+        assert isinstance(result, TextPromptClient) and result.version == prompt.version
     # A blocked loop would let the ticker run once; ~30 ticks fit in 0.3 s.
     assert ticks >= 10
 
@@ -713,7 +797,7 @@ async def test_without_keys_everything_is_a_quiet_noop(caplog: pytest.LogCapture
 
     assert push_score(trace_id, "triage_accuracy", 1.0) is None
     prompt = await load_prompt("triage")  # disabled client raises in get_prompt → file
-    assert prompt == (_PROMPTS_DIR / "triage.txt").read_text(encoding="utf-8")
+    assert prompt == _file_prompt("triage")
     flush_traces()
     shutdown_traces()
 

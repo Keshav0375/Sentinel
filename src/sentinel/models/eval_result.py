@@ -8,7 +8,7 @@ from pydantic import BaseModel, field_validator
 
 
 class EvalDimension(StrEnum):
-    """The six dimensions scored by the LLM-as-judge.
+    """The five dimensions scored by the LLM-as-judge.
 
     Each dimension is scored 0-5 with reasoning. Together they capture both
     the correctness of the agent's conclusions and the quality of the process
@@ -20,7 +20,6 @@ class EvalDimension(StrEnum):
     TOOL_EFFICIENCY = "tool_efficiency"
     MTTR = "mttr"
     REMEDIATION_SAFETY = "remediation_safety"
-    COMMS_QUALITY = "comms_quality"
 
 
 class DimensionScore(BaseModel):
@@ -51,6 +50,10 @@ class TrajectoryScore(BaseModel):
     known ground truth.
 
     total_score is the mean of all dimension scores (0-5 scale).
+
+    judge_conflict marks a run the judge would have graded itself on — its model is in the
+    run's ``models_used`` (decision 2026-10-18). Such a score is invalid: it is zeroed,
+    never judged, and excluded from every aggregate.
     """
 
     incident_id: str
@@ -58,6 +61,7 @@ class TrajectoryScore(BaseModel):
     dimension_scores: list[DimensionScore] = []
     total_score: float = 0.0
     judge_model: str
+    judge_conflict: bool = False
 
     @field_validator("total_score")
     @classmethod

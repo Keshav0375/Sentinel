@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import SecretStr
+from agents.tracing import get_trace_provider
 
+from sentinel.agents.orchestrator import PIPELINE_ERROR
 from sentinel.eval.runner import (
     EvalRunResult,
     run_eval,
@@ -18,12 +20,20 @@ from sentinel.eval.runner import (
     scores_from_results,
     summary_stats,
 )
+from sentinel.infra.tracing import SentinelTracer, install_trace_processors
+from sentinel.memory.episodic import EpisodicMemory
+from sentinel.memory.semantic import SemanticMemory
+from sentinel.memory.short_term import ShortTermMemory
+from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
 from sentinel.models.eval_result import DimensionScore, EvalDimension, TrajectoryScore
+from sentinel.models.incident import IncidentStatus
+from sentinel.models.pipeline import PipelineResult
+from sentinel.models.tools import EscalationContext
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _make_trajectory_score(total: float = 4.0) -> TrajectoryScore:
+def _make_trajectory_score(total: float = 4.0, *, judge_conflict: bool = False) -> TrajectoryScore:
     return TrajectoryScore(
         incident_id="inc-001",
         scenario_id="bad_deploy_01",
@@ -32,6 +42,7 @@ def _make_trajectory_score(total: float = 4.0) -> TrajectoryScore:
         ],
         total_score=total,
         judge_model="test-model",
+        judge_conflict=judge_conflict,
     )
 
 
@@ -40,11 +51,12 @@ def _make_eval_result(
     total: float = 4.0,
     pipeline_error: str | None = None,
     trajectory_missing: bool = False,
+    judge_conflict: bool = False,
 ) -> EvalRunResult:
     return EvalRunResult(
         scenario_id=scenario_id,
         incident_id=f"eval-{scenario_id}-abc12345",
-        score=_make_trajectory_score(total),
+        score=_make_trajectory_score(total, judge_conflict=judge_conflict),
         pipeline_error=pipeline_error,
         trajectory_missing=trajectory_missing,
     )
@@ -83,12 +95,11 @@ def _make_stm_mock() -> MagicMock:
     return stm
 
 
-def _make_groq_client() -> MagicMock:
+def _judge() -> tuple[str, MagicMock]:
+    """What make_judge_client returns: the judge model and a mock JudgeClient."""
     client = MagicMock()
-    client.chat = MagicMock()
-    client.chat.completions = MagicMock()
-    client.chat.completions.create = AsyncMock()
-    return client
+    client.complete = AsyncMock()
+    return "openai/gpt-4.1", client
 
 
 # ── scores_from_results ───────────────────────────────────────────────────────
@@ -157,6 +168,23 @@ class TestSummaryStats:
         results = [_make_eval_result("a", 0.0), _make_eval_result("b", 1.0)]
         assert summary_stats(results)["pass_rate"] == pytest.approx(0.0)
 
+    def test_judge_conflicts_are_counted_and_excluded(self) -> None:
+        """Decision 2026-10-18: a judge_conflict score is invalid — not in any figure."""
+        results = [
+            _make_eval_result("a", 4.0),
+            _make_eval_result("b", 0.0, pipeline_error="x", judge_conflict=True),
+        ]
+        stats = summary_stats(results)
+        assert stats["avg_total"] == pytest.approx(4.0)
+        assert stats["pass_rate"] == pytest.approx(1.0)
+        assert stats["failure_rate"] == pytest.approx(0.0)
+        assert stats["judge_conflicts"] == 1
+
+    def test_only_conflicts_gives_zeros(self) -> None:
+        stats = summary_stats([_make_eval_result("a", 5.0, judge_conflict=True)])
+        assert stats["avg_total"] == pytest.approx(0.0)
+        assert stats["judge_conflicts"] == 1
+
 
 # ── run_scenario_eval ─────────────────────────────────────────────────────────
 
@@ -166,195 +194,190 @@ def _fake_settings(tmp_path: Path) -> Any:
     from sentinel.config import Settings  # noqa: PLC0415
 
     return Settings(
-        groq_api_key="gsk_test",
-        sentinel_triage_model="groq/llama-3.1-8b-instant",
-        sentinel_analysis_model="groq/llama-3.3-70b-versatile",
-        sentinel_judge_model="groq/llama-3.1-8b-instant",
+        anthropic_api_key="sk-ant-test",
+        openai_api_key="sk-test",
         sentinel_db_path=tmp_path / "test.db",
     )
 
 
+_INCIDENT = uuid.UUID("0b7e6f3a-4c2d-4e8f-9a1b-5d6c7e8f9a0b")
+
+
+def _alert() -> AlertPayload:
+    return AlertPayload(
+        alert_id="alert-abcdef12",
+        source=AlertSource.DATADOG,
+        service="api-gateway",
+        metric="error_rate",
+        threshold=0.05,
+        current_value=0.34,
+        severity=AlertSeverity.CRITICAL,
+    )
+
+
+def _escalated(reason: str = "decision gate: confidence 0.40 is below 0.7") -> PipelineResult:
+    return PipelineResult(
+        incident_id=str(_INCIDENT),
+        status="escalated",
+        resolution_type="escalated",
+        root_cause="unclear",
+        confidence=0.4,
+        escalation=EscalationContext(
+            hypothesis="unclear", evidence=[], confidence=0.4, missing=[reason]
+        ),
+        reflexion_loops=2,
+        tool_calls_used=3,
+        tokens_used=900,
+    )
+
+
+async def _run(
+    tmp_path: Path,
+    *,
+    result: PipelineResult | None = None,
+    score: TrajectoryScore | None = None,
+    capture: dict[str, Any] | None = None,
+    stm: Any = None,
+) -> EvalRunResult:
+    async def judge(traj: dict[str, Any], *args: Any, **kwargs: Any) -> TrajectoryScore:
+        if capture is not None:
+            capture.update(traj)
+        return score or _make_trajectory_score(3.5)
+
+    with (
+        patch("sentinel.eval.runner.generate_alert", return_value=_alert()),
+        patch("sentinel.eval.runner.uuid.uuid4", return_value=_INCIDENT),
+        patch("sentinel.eval.runner.make_judge_client", return_value=_judge()),
+        patch(
+            "sentinel.eval.runner.run_pipeline",
+            new_callable=AsyncMock,
+            return_value=result or _escalated(),
+        ),
+        patch("sentinel.eval.runner.evaluate_trajectory", side_effect=judge),
+    ):
+        return await run_scenario_eval(
+            _make_scenario_mock(),
+            short_term_memory=stm if stm is not None else _make_stm_mock(),
+            trajectories_dir=tmp_path,
+            settings=_fake_settings(tmp_path),
+            semantic_memory=MagicMock(),
+            episodic_memory=MagicMock(),
+        )
+
+
 class TestRunScenarioEval:
-    async def test_returns_eval_run_result(self, tmp_path: Path) -> None:
-        scenario = _make_scenario_mock()
-        stm = _make_stm_mock()
-        traj_score = _make_trajectory_score(3.5)
-
+    @pytest.mark.parametrize("ran_judge_model", [True, False])
+    async def test_the_judge_conflict_guard_runs_on_models_used(
+        self, tmp_path: Path, ran_judge_model: bool
+    ) -> None:
+        """The real evaluate_trajectory: a run whose models_used holds the judge's model is
+        never sent to the judge and comes back marked judge_conflict."""
+        judge_model, client = _judge()
+        client.complete = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "dimension_scores": [
+                        {"dimension": str(d), "score": 4, "reasoning": "ok"} for d in EvalDimension
+                    ]
+                }
+            )
+        )
+        result = _escalated()
+        result.models_used = ["anthropic/claude-haiku-4-5"] + (
+            [judge_model] if ran_judge_model else []
+        )
         with (
-            patch("sentinel.eval.runner.generate_alert", return_value=_make_alert_mock()),
-            patch("sentinel.eval.runner.build_triage_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_log_analyst_agent", return_value=MagicMock()),
-            patch(
-                "sentinel.eval.runner.build_deploy_correlator_agent",
-                return_value=MagicMock(),
-            ),
-            patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
-            patch("sentinel.eval.runner.Runner.run", new_callable=AsyncMock),
-            patch("sentinel.eval.runner.agent_trace") as mock_trace,
-            patch(
-                "sentinel.eval.runner.evaluate_trajectory",
-                new_callable=AsyncMock,
-                return_value=traj_score,
-            ),
+            patch("sentinel.eval.runner.generate_alert", return_value=_alert()),
+            patch("sentinel.eval.runner.uuid.uuid4", return_value=_INCIDENT),
+            patch("sentinel.eval.runner.make_judge_client", return_value=(judge_model, client)),
+            patch("sentinel.eval.runner.run_pipeline", new_callable=AsyncMock, return_value=result),
         ):
-            mock_trace.return_value.__enter__ = MagicMock(return_value=None)
-            mock_trace.return_value.__exit__ = MagicMock(return_value=False)
-
-            result = await run_scenario_eval(
-                scenario,
-                short_term_memory=stm,
+            run = await run_scenario_eval(
+                _make_scenario_mock(),
+                short_term_memory=_make_stm_mock(),
                 trajectories_dir=tmp_path,
                 settings=_fake_settings(tmp_path),
-                judge_model="test-judge",
                 semantic_memory=MagicMock(),
                 episodic_memory=MagicMock(),
             )
+        assert run.score.judge_conflict is ran_judge_model
+        if ran_judge_model:
+            client.complete.assert_not_awaited()
+            assert run.score.total_score == 0.0
+        else:
+            client.complete.assert_awaited_once()
+            assert run.score.total_score == pytest.approx(4.0)
 
+    async def test_returns_eval_run_result(self, tmp_path: Path) -> None:
+        result = await _run(tmp_path)
         assert isinstance(result, EvalRunResult)
         assert result.scenario_id == "bad_deploy_01"
+        assert result.incident_id == str(_INCIDENT)  # a UUID, like every incident id
+        assert result.pipeline_error is None
 
     async def test_pipeline_error_captured(self, tmp_path: Path) -> None:
-        scenario = _make_scenario_mock()
-        stm = _make_stm_mock()
-        traj_score = _make_trajectory_score(0.0)
-
-        with (
-            patch("sentinel.eval.runner.generate_alert", return_value=_make_alert_mock()),
-            patch("sentinel.eval.runner.build_triage_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_log_analyst_agent", return_value=MagicMock()),
-            patch(
-                "sentinel.eval.runner.build_deploy_correlator_agent",
-                return_value=MagicMock(),
-            ),
-            patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
-            patch(
-                "sentinel.eval.runner.Runner.run",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("LLM timeout"),
-            ),
-            patch("sentinel.eval.runner.agent_trace") as mock_trace,
-            patch(
-                "sentinel.eval.runner.evaluate_trajectory",
-                new_callable=AsyncMock,
-                return_value=traj_score,
-            ),
-        ):
-            mock_trace.return_value.__enter__ = MagicMock(return_value=None)
-            mock_trace.return_value.__exit__ = MagicMock(return_value=False)
-
-            result = await run_scenario_eval(
-                scenario,
-                short_term_memory=stm,
-                trajectories_dir=tmp_path,
-                settings=_fake_settings(tmp_path),
-                judge_model="test-judge",
-                semantic_memory=MagicMock(),
-                episodic_memory=MagicMock(),
-            )
-
-        assert result.pipeline_error == "LLM timeout"
+        reason = f"{PIPELINE_ERROR} during analysis: TimeoutError"
+        result = await _run(tmp_path, result=_escalated(reason))
+        assert result.pipeline_error == reason
 
     async def test_trajectory_loaded_from_disk(self, tmp_path: Path) -> None:
-        scenario = _make_scenario_mock()
-        stm = _make_stm_mock()
-        traj_score = _make_trajectory_score(4.0)
-
-        # Pre-write a fake trajectory file with the expected incident_id pattern
-        alert_mock = _make_alert_mock()
-        expected_incident_id = f"eval-bad_deploy_01-{alert_mock.alert_id[:8]}"
-        traj_data: dict[str, Any] = {
-            "incident_id": expected_incident_id,
-            "spans": [],
-        }
-        traj_file = tmp_path / f"{expected_incident_id}.json"
-        traj_file.write_text(json.dumps(traj_data), encoding="utf-8")
-
-        captured_trajectory: dict[str, Any] = {}
-
-        async def capture_traj(traj: dict[str, Any], *args: Any, **kwargs: Any) -> TrajectoryScore:
-            captured_trajectory.update(traj)
-            return traj_score
-
-        with (
-            patch("sentinel.eval.runner.generate_alert", return_value=alert_mock),
-            patch("sentinel.eval.runner.build_triage_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_log_analyst_agent", return_value=MagicMock()),
-            patch(
-                "sentinel.eval.runner.build_deploy_correlator_agent",
-                return_value=MagicMock(),
-            ),
-            patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
-            patch("sentinel.eval.runner.Runner.run", new_callable=AsyncMock),
-            patch("sentinel.eval.runner.agent_trace") as mock_trace,
-            patch(
-                "sentinel.eval.runner.evaluate_trajectory",
-                new_callable=AsyncMock,
-                side_effect=capture_traj,
-            ),
-        ):
-            mock_trace.return_value.__enter__ = MagicMock(return_value=None)
-            mock_trace.return_value.__exit__ = MagicMock(return_value=False)
-
-            await run_scenario_eval(
-                scenario,
-                short_term_memory=stm,
-                trajectories_dir=tmp_path,
-                settings=_fake_settings(tmp_path),
-                judge_model="test-judge",
-                semantic_memory=MagicMock(),
-                episodic_memory=MagicMock(),
-            )
-
-        assert captured_trajectory.get("incident_id") == expected_incident_id
+        traj_data: dict[str, Any] = {"incident_id": str(_INCIDENT), "spans": []}
+        (tmp_path / f"{_INCIDENT}.json").write_text(json.dumps(traj_data), encoding="utf-8")
+        captured: dict[str, Any] = {}
+        await _run(tmp_path, capture=captured)
+        assert captured.get("incident_id") == str(_INCIDENT)
+        # The judge also gets the outcome: status, loops, budget, tokens.
+        assert captured["pipeline_result"]["status"] == "escalated"
+        assert captured["pipeline_result"]["reflexion_loops"] == 2
 
     async def test_trajectory_missing_flagged(self, tmp_path: Path) -> None:
-        scenario = _make_scenario_mock()
-        stm = _make_stm_mock()
-        traj_score = _make_trajectory_score(2.0)
-
-        with (
-            patch("sentinel.eval.runner.generate_alert", return_value=_make_alert_mock()),
-            patch("sentinel.eval.runner.build_triage_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_log_analyst_agent", return_value=MagicMock()),
-            patch(
-                "sentinel.eval.runner.build_deploy_correlator_agent",
-                return_value=MagicMock(),
-            ),
-            patch("sentinel.eval.runner.build_remediation_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_comms_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.build_orchestrator_agent", return_value=MagicMock()),
-            patch("sentinel.eval.runner.AsyncOpenAI", return_value=_make_groq_client()),
-            patch("sentinel.eval.runner.Runner.run", new_callable=AsyncMock),
-            patch("sentinel.eval.runner.agent_trace") as mock_trace,
-            patch(
-                "sentinel.eval.runner.evaluate_trajectory",
-                new_callable=AsyncMock,
-                return_value=traj_score,
-            ),
-        ):
-            mock_trace.return_value.__enter__ = MagicMock(return_value=None)
-            mock_trace.return_value.__exit__ = MagicMock(return_value=False)
-
-            result = await run_scenario_eval(
-                scenario,
-                short_term_memory=stm,
-                trajectories_dir=tmp_path,  # no file written
-                settings=_fake_settings(tmp_path),
-                judge_model="test-judge",
-                semantic_memory=MagicMock(),
-                episodic_memory=MagicMock(),
-            )
-
+        result = await _run(tmp_path)  # no file written
         assert result.trajectory_missing is True
+
+    async def test_the_result_status_reaches_short_term_memory(self, tmp_path: Path) -> None:
+        stm = ShortTermMemory()
+        await _run(tmp_path, stm=stm)
+        context = stm.get_context(str(_INCIDENT))
+        assert context["status"] == IncidentStatus.ESCALATED
+        assert context["result"]["resolution_type"] == "escalated"
+
+    async def test_the_pipeline_runs_for_real_in_fake_mode(self, tmp_path: Path) -> None:
+        """SENTINEL_FAKE_LLM=1: the real orchestrator and agents run; only the judge is
+        stubbed (it is phase 6's, and needs the other provider's key)."""
+        from sentinel.config import Settings  # noqa: PLC0415
+
+        stm = ShortTermMemory()
+        tracer = SentinelTracer(stm, trajectories_dir=tmp_path)
+        multi: Any = get_trace_provider()._multi_processor  # type: ignore[attr-defined]
+        before = list(multi._processors)
+        captured: dict[str, Any] = {}
+
+        async def judge(traj: dict[str, Any], *args: Any, **kwargs: Any) -> TrajectoryScore:
+            captured.update(traj)
+            return _make_trajectory_score(1.0)
+
+        try:
+            install_trace_processors(tracer)
+            with (
+                patch("sentinel.eval.runner.generate_alert", return_value=_alert()),
+                patch("sentinel.eval.runner.make_judge_client", return_value=_judge()),
+                patch("sentinel.eval.runner.evaluate_trajectory", side_effect=judge),
+            ):
+                result = await run_scenario_eval(
+                    _make_scenario_mock(),
+                    short_term_memory=stm,
+                    trajectories_dir=tmp_path,
+                    settings=Settings(_env_file=None, sentinel_fake_llm=True),  # type: ignore[call-arg]
+                    semantic_memory=SemanticMemory(None),
+                    episodic_memory=EpisodicMemory(None, MagicMock()),
+                )
+        finally:
+            multi.set_processors(before)
+
+        assert result.pipeline_error is None
+        assert result.trajectory_missing is False  # SentinelTracer wrote the trace file
+        assert captured["pipeline_result"]["status"] == "escalated"
+        assert stm.get_context(result.incident_id)["status"] == IncidentStatus.ESCALATED
 
 
 # ── run_eval ──────────────────────────────────────────────────────────────────
@@ -365,12 +388,8 @@ def _settings_mock(tmp_path: Path) -> MagicMock:
     s = MagicMock()
     s.sentinel_db_path = tmp_path / "test.db"
     s.sentinel_embedding_model = "all-MiniLM-L6-v2"
-    s.groq_api_key = SecretStr("test-key")
-    s.groq_base_url = "https://api.groq.com/openai/v1"
-    s.sentinel_judge_model = "llama-3.1-8b-instant"
+    s.sentinel_primary_provider = "anthropic"
     s.sentinel_max_tool_calls = 20
-    s.sentinel_analysis_model = "llama-3.3-70b-versatile"
-    s.sentinel_triage_model = "llama-3.1-8b-instant"
     s.sentinel_log_level = "INFO"
     s.database_url = ""  # no Postgres: run_eval builds episodic memory with pool=None
     return s
@@ -393,7 +412,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.ShortTermMemory"),
             patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.add_trace_processor"),
+            patch("sentinel.eval.runner.install_trace_processors"),
             patch("sentinel.eval.runner.list_scenarios", return_value=["bad_deploy_01"]),
             patch("sentinel.eval.runner.load_scenario", return_value=_make_scenario_mock()),
             patch(
@@ -431,7 +450,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.ShortTermMemory"),
             patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.add_trace_processor"),
+            patch("sentinel.eval.runner.install_trace_processors"),
             patch("sentinel.eval.runner.load_scenario", side_effect=FileNotFoundError("x")),
             patch.dict(sys.modules, {"data": MagicMock(), "data.seed": _FAKE_SEED_MOD}),
         ):
@@ -453,7 +472,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.ShortTermMemory"),
             patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.add_trace_processor"),
+            patch("sentinel.eval.runner.install_trace_processors"),
             patch(
                 "sentinel.eval.runner.load_scenario",
                 side_effect=FileNotFoundError("not found"),
@@ -481,7 +500,7 @@ class TestRunEval:
             patch("sentinel.eval.runner.ShortTermMemory"),
             patch("sentinel.eval.runner.apply_sdk_defaults"),
             patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.add_trace_processor"),
+            patch("sentinel.eval.runner.install_trace_processors"),
             patch("sentinel.eval.runner.list_scenarios", return_value=all_ids),
             patch(
                 "sentinel.eval.runner.load_scenario",

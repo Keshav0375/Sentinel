@@ -7,13 +7,16 @@ is ``ORDER BY embedding <=> $1`` (cosine distance) in PostgreSQL, served by the
 Mapping (decision 2026-10-12, "Phase-1 models ↔ §5.3 schema"): the symptom text and the
 timeline have no columns of their own and live in ``trajectory`` JSONB as
 ``{"symptoms": <text>, "timeline": <raw_timeline>, "provenance": {...}}``. Columns an
-:class:`Incident` cannot supply (correlation_id, dd_event_id, langfuse_trace_id, pr_*,
-eval_score, …) stay NULL/default until the phase-4 pipeline writes them; ``resolved_at`` is
-written when the incident has one, since ``mttr_seconds`` is derived from it.
+:class:`Incident` cannot supply stay NULL/default: the phase-4 pipeline passes an
+:class:`~sentinel.models.memory.IncidentOutcome` for correlation_id, root_cause_confidence,
+resolution_type, reflexion_loops and langfuse_trace_id (and its result, in ``trajectory`` as
+``pipeline_result``); dd_event_id, pr_* and eval_score are written by later phases.
+``resolved_at`` is written when the incident has one, since ``mttr_seconds`` is derived
+from it.
 
 Provenance: ``root_cause`` and ``resolution`` are agent output, not verified fact. The
-stored ``provenance`` records ``root_cause_by`` / ``resolution_by`` (the agent, from the
-incident timeline, else ``"unknown"``), ``model_generated: true`` and ``stored_at``; it
+stored ``provenance`` records ``root_cause_by`` / ``resolution_by`` (the agent named by the
+pipeline's outcome, else ``"unknown"``), ``model_generated: true`` and ``stored_at``; it
 reads back inside ``EpisodicRecord.raw_timeline["provenance"]``. The embedded symptom text
 holds only what was observed (the alert: service, metric, value, threshold, severity, and a
 title/description when the alert metadata carries one) — never an agent's hypothesis or
@@ -41,7 +44,7 @@ from sentinel.infra import database
 from sentinel.memory.base import MemoryStore
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.models.incident import Incident
-from sentinel.models.memory import EpisodicRecord, MemoryQueryResult
+from sentinel.models.memory import EpisodicRecord, IncidentOutcome, MemoryQueryResult
 
 # IVFFlat only searches `probes` of the index's lists; at the default of 1 a small or
 # freshly built table can miss its nearest rows. Probing every list (= lists of
@@ -75,13 +78,22 @@ class EpisodicMemory:
 
     # ── Domain-specific API ───────────────────────────────────────────────────
 
-    async def store_incident(self, incident: Incident) -> None:
+    async def store_incident(
+        self, incident: Incident, *, outcome: IncidentOutcome | None = None
+    ) -> None:
         """Embed the incident's observed symptoms and upsert its row into ``incidents``.
 
         Storing an incident with the same ID again overwrites the mapped columns, except
         ``created_at``: the first store's value is kept (when the incident was first
         recorded), and ``mttr_seconds`` is measured from it. The columns this model does
         not supply are left as they are.
+
+        With *outcome* (the phase-4 pipeline's), its root cause, resolution and
+        provenance are stored (without one: ``"unknown"``, ``"unresolved"`` and agents
+        ``"unknown"``), its columns
+        (correlation_id, root_cause_confidence, resolution_type, reflexion_loops,
+        langfuse_trace_id) are written too, and ``trajectory`` also holds
+        ``pipeline_result``.
 
         Raises:
             SentinelMemoryError: no database, the ID is not a UUID, or the write failed.
@@ -101,31 +113,43 @@ class EpisodicMemory:
         if incident.resolved_at and incident.created_at:
             mttr_seconds = int((incident.resolved_at - incident.created_at).total_seconds())
 
-        root_cause, root_cause_role = _root_cause_with_source(incident)
-        resolution, resolution_role = _resolution_with_source(incident)
+        if outcome is None:
+            # Only the pipeline's outcome carries a conclusion and the agent behind it.
+            root_cause, root_cause_by = _NO_ROOT_CAUSE, _UNKNOWN_AGENT
+            resolution, resolution_by = _NO_RESOLUTION, _UNKNOWN_AGENT
+        else:
+            root_cause, root_cause_by = outcome.root_cause, outcome.root_cause_by
+            resolution, resolution_by = outcome.resolution, outcome.resolution_by
         raw_timeline: dict[str, Any] = {
             "id": incident.id,
             "status": incident.status.value,
             "timeline": [e.model_dump(mode="json") for e in incident.timeline],
         }
-        trajectory = {
+        trajectory: dict[str, Any] = {
             "symptoms": symptoms,
             "timeline": raw_timeline,
             "provenance": {
-                "root_cause_by": _agent_for_role(incident, root_cause_role),
-                "resolution_by": _agent_for_role(incident, resolution_role),
+                "root_cause_by": root_cause_by,
+                "resolution_by": resolution_by,
                 "model_generated": True,
                 "stored_at": datetime.now(UTC).isoformat(),
             },
         }
+        if outcome is not None:
+            trajectory["pipeline_result"] = outcome.pipeline_result
+        outcome_columns, outcome_values = _outcome_columns(outcome)
+        # $13… are the outcome's columns, in _OUTCOME_COLUMNS order (none without one).
+        extra_names = "".join(f", {name}" for name in outcome_columns)
+        extra_params = "".join(f", ${13 + i}" for i in range(len(outcome_columns)))
+        extra_updates = "".join(f",\n{name} = EXCLUDED.{name}" for name in outcome_columns)
 
         async with database.acquire(pool) as conn:
             await conn.execute(
-                """
+                f"""
                 INSERT INTO incidents
                     (id, alert_id, severity, service, status, root_cause, resolution,
-                     trajectory, created_at, resolved_at, mttr_seconds, embedding)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12)
+                     trajectory, created_at, resolved_at, mttr_seconds, embedding{extra_names})
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12{extra_params})
                 ON CONFLICT (id) DO UPDATE SET
                     alert_id = EXCLUDED.alert_id,
                     severity = EXCLUDED.severity,
@@ -142,7 +166,7 @@ class EpisodicMemory:
                         ELSE FLOOR(EXTRACT(EPOCH FROM
                             EXCLUDED.resolved_at - incidents.created_at))::int
                     END,
-                    embedding = EXCLUDED.embedding
+                    embedding = EXCLUDED.embedding{extra_updates}
                 """,
                 incident_uuid,
                 incident.alert.alert_id,
@@ -156,6 +180,7 @@ class EpisodicMemory:
                 incident.resolved_at,
                 mttr_seconds,
                 Vector(embedding),
+                *outcome_values,
             )
 
     async def search_similar(self, symptoms: str, *, top_k: int = 5) -> list[EpisodicRecord]:
@@ -337,6 +362,30 @@ def _as_uuid(value: str) -> uuid.UUID | None:
         return None
 
 
+# The incidents columns only the phase-4 pipeline supplies (IncidentOutcome), in SQL order.
+_OUTCOME_COLUMNS = (
+    "correlation_id",
+    "root_cause_confidence",
+    "resolution_type",
+    "reflexion_loops",
+    "langfuse_trace_id",
+)
+
+
+def _outcome_columns(outcome: IncidentOutcome | None) -> tuple[tuple[str, ...], list[Any]]:
+    """The outcome's column names and values; none without an outcome (left as they are)."""
+    if outcome is None:
+        return (), []
+    correlation = None if outcome.correlation_id is None else _as_uuid(outcome.correlation_id)
+    return _OUTCOME_COLUMNS, [
+        correlation,
+        outcome.root_cause_confidence,
+        outcome.resolution_type,
+        outcome.reflexion_loops,
+        outcome.langfuse_trace_id,
+    ]
+
+
 def _as_vector(value: Any) -> list[float] | None:
     """*value* as a list of floats when it is a vector (list, tuple, numpy array), else None."""
     if isinstance(value, str | bytes):
@@ -351,7 +400,7 @@ def _build_symptom_text(incident: Incident) -> str:
 
     Service, metric, current value vs threshold, severity, and the alert's title /
     description when its metadata carries them. Agent output (triage's affected service,
-    the log analyst's hypothesis, any root cause) is deliberately left out.
+    the analysis hypothesis, any root cause) is deliberately left out.
     """
     alert = incident.alert
     parts: list[str] = [
@@ -366,57 +415,10 @@ def _build_symptom_text(incident: Incident) -> str:
     return " ".join(parts)
 
 
-# Agent roles, matched against the agent names in the incident timeline.
-_LOG_ANALYST = "log_analyst"
-_DEPLOY_CORRELATOR = "deploy_correlator"
-_REMEDIATION = "remediation"
-_COMMS = "comms"
-_HANDOFF_PREFIX = "handoff → "
-
-
-def _root_cause_with_source(incident: Incident) -> tuple[str, str | None]:
-    """The root cause from the analysis results, and the role of the agent that produced it."""
-    if incident.log_analysis:
-        hypothesis = incident.log_analysis.get("hypothesis")
-        if hypothesis:
-            return str(hypothesis), _LOG_ANALYST
-    if incident.deploy_correlation:
-        evidence = incident.deploy_correlation.get("evidence")
-        if evidence:
-            return str(evidence), _DEPLOY_CORRELATOR
-    return "unknown", None
-
-
-def _resolution_with_source(incident: Incident) -> tuple[str, str | None]:
-    """The resolution from the analysis results, and the role of the agent that produced it."""
-    if incident.remediation_plan:
-        justification = incident.remediation_plan.get("justification")
-        if justification:
-            return str(justification), _REMEDIATION
-        action_type = incident.remediation_plan.get("action_type")
-        if action_type:
-            return str(action_type), _REMEDIATION
-    if incident.comms_summary:
-        return incident.comms_summary, _COMMS
-    return "unresolved", None
-
-
-def _agent_for_role(incident: Incident, role: str | None) -> str:
-    """The timeline's name for the agent in *role* (latest entry wins), else "unknown".
-
-    An agent shows up as an entry's ``agent_name`` or as the target of a handoff
-    (``"handoff → <agent>"``).
-    """
-    if role is None:
-        return "unknown"
-    for entry in reversed(incident.timeline):
-        if role in entry.agent_name:
-            return entry.agent_name
-        if entry.action.startswith(_HANDOFF_PREFIX):
-            target = entry.action.removeprefix(_HANDOFF_PREFIX).strip()
-            if role in target:
-                return target
-    return "unknown"
+# What a store without the pipeline's outcome records: no conclusion, no agent behind it.
+_NO_ROOT_CAUSE = "unknown"
+_NO_RESOLUTION = "unresolved"
+_UNKNOWN_AGENT = "unknown"
 
 
 def _row_to_record(row: asyncpg.Record) -> EpisodicRecord:

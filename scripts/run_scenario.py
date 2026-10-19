@@ -7,8 +7,8 @@ Usage::
     python scripts/run_scenario.py --help
 
 Run from the project root so that ``src/`` and ``data/`` are importable.
-The script builds the full agent pipeline, runs the orchestrator on the scenario's
-alert and prints the full timeline. The scenario supplies only the alert: the tools
+The script runs the orchestrator pipeline on the scenario's alert and prints the outcome
+and the full timeline. The scenario supplies only the alert: the tools
 read the real sources (Datadog for fetch_logs, the ``deployments`` table for
 get_deploy_details), so without their credentials or ``DATABASE_URL`` they report
 "unavailable". The pipeline only drafts: nothing is approved or executed.
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,27 +28,24 @@ _SRC = _PROJECT_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from agents import Runner, add_trace_processor, handoff  # noqa: E402
-from agents import trace as agent_trace  # noqa: E402
-
-from sentinel.agents.comms import build_comms_agent  # noqa: E402
-from sentinel.agents.deploy_correlator import build_deploy_correlator_agent  # noqa: E402
-from sentinel.agents.log_analyst import build_log_analyst_agent  # noqa: E402
-from sentinel.agents.orchestrator import build_orchestrator_agent  # noqa: E402
-from sentinel.agents.remediation import build_remediation_agent  # noqa: E402
-from sentinel.agents.triage import build_triage_agent  # noqa: E402
+from sentinel.agents.orchestrator import PipelineDeps, run_pipeline  # noqa: E402
 from sentinel.config import get_settings  # noqa: E402
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario  # noqa: E402
 from sentinel.infra.database import close_pool, init_pool_from_settings  # noqa: E402
 from sentinel.infra.db import create_tables  # noqa: E402
 from sentinel.infra.logging import configure_logging  # noqa: E402
-from sentinel.infra.tracing import SentinelTracer, flush_traces  # noqa: E402
+from sentinel.infra.tracing import (  # noqa: E402
+    SentinelTracer,
+    flush_traces,
+    install_trace_processors,
+)
 from sentinel.memory.embeddings import EmbeddingClient  # noqa: E402
 from sentinel.memory.episodic import EpisodicMemory  # noqa: E402
 from sentinel.memory.semantic import SemanticMemory  # noqa: E402
 from sentinel.memory.short_term import ShortTermMemory  # noqa: E402
 from sentinel.models.incident import IncidentStatus  # noqa: E402
-from sentinel.providers import apply_sdk_defaults, get_capabilities  # noqa: E402
+from sentinel.models.pipeline import PipelineInput  # noqa: E402
+from sentinel.providers import apply_sdk_defaults  # noqa: E402
 
 _SEP = "=" * 62
 
@@ -154,92 +152,47 @@ async def run_scenario(
 
         # ── SDK defaults + provider layer ─────────────────────────────────────────
         apply_sdk_defaults(settings)
-        print(f"  [OK] provider: {settings.sentinel_analysis_model.split('/')[0]}")
-
-        # ── Build agents ──────────────────────────────────────────────────────────
-        # The tools read Datadog and Postgres, never the scenario: only its alert is used.
-        triage_agent = build_triage_agent(
-            semantic_memory,
-            episodic_memory,
-            model_string=settings.sentinel_triage_model,
-            settings=settings,
-        )
-        log_analyst_agent = build_log_analyst_agent(
-            semantic_memory,
-            model_string=settings.sentinel_analysis_model,
-            settings=settings,
-        )
-        deploy_correlator_agent = build_deploy_correlator_agent(
-            pool,
-            model_string=settings.sentinel_triage_model,
-            settings=settings,
-        )
-        remediation_agent = build_remediation_agent(
-            model_string=settings.sentinel_analysis_model,
-            settings=settings,
-        )
-        comms_agent = build_comms_agent(
-            model_string=settings.sentinel_triage_model,
-            settings=settings,
-        )
-        orchestrator = build_orchestrator_agent(
-            triage_agent,
-            log_analyst_agent,
-            deploy_correlator_agent,
-            remediation_agent,
-            comms_agent,
-            model_string=settings.sentinel_analysis_model,
-            settings=settings,
-        )
-
-        # Wire handoff-back so specialists return control to the orchestrator.
-        caps = get_capabilities(settings.sentinel_analysis_model)
-        back = handoff(orchestrator)
-        back.strict_json_schema = caps.strict_schemas
-        for specialist in [
-            triage_agent,
-            log_analyst_agent,
-            deploy_correlator_agent,
-            remediation_agent,
-            comms_agent,
-        ]:
-            specialist.handoffs = [back]
-
-        print("  [OK] agents built")
+        print(f"  [OK] primary provider: {settings.sentinel_primary_provider}")
 
         # ── Incident setup ─────────────────────────────────────────────────────────
-        incident_id = f"smoke-{alert.alert_id[:8]}"
+        # The tools read Datadog and Postgres, never the scenario: only its alert is used.
+        incident_id = str(uuid.uuid4())
         tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
-        add_trace_processor(tracer)
+        install_trace_processors(tracer)
         short_term_memory.create(incident_id, alert)
-        print(f"  [OK] incident: {incident_id}")
+        request = PipelineInput.from_alert(incident_id, alert)
+        print(f"  [OK] incident: {incident_id} ({request.signal_type})")
 
         # ── Run pipeline ───────────────────────────────────────────────────────────
         _print_header(f"Running pipeline  [{incident_id}]")
-
-        input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
         start = datetime.now(UTC)
-
+        deps = PipelineDeps(
+            settings=settings,
+            semantic_memory=semantic_memory,
+            episodic_memory=episodic_memory,
+            pool=pool,
+            # A synthetic run is not a past incident: search_past_incidents must not recall it.
+            persist=False,
+        )
+        # run_pipeline never raises: a failure inside it is an escalated result.
+        result = await run_pipeline(request, deps)
+        elapsed = (datetime.now(UTC) - start).total_seconds()
+        print(
+            f"\n  [OK] pipeline finished in {elapsed:.1f}s: {result.status} "
+            f"(confidence {result.confidence:.2f}, {result.reflexion_loops} reflexion "
+            f"loops, {result.tool_calls_used} tool calls, {result.tokens_used} tokens)"
+        )
+        _safe_print(f"  root cause: {result.root_cause}")
+        if result.target_sha is not None:
+            print(f"  revert target: {result.target_sha}")
         try:
-            with agent_trace("incident_pipeline", metadata={"incident_id": incident_id}):
-                await Runner.run(
-                    orchestrator,
-                    input_text,
-                    max_turns=settings.sentinel_max_tool_calls + 5,
-                )
-            elapsed = (datetime.now(UTC) - start).total_seconds()
-            print(f"\n  [OK] pipeline completed in {elapsed:.1f}s")
-            try:
-                short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
-            except KeyError:
-                pass
-        except Exception as exc:
-            elapsed = (datetime.now(UTC) - start).total_seconds()
-            print(f"\n  [ERROR] pipeline failed after {elapsed:.1f}s: {exc}")
-            try:
-                short_term_memory.update_context(incident_id, status=IncidentStatus.ESCALATED)
-            except KeyError:
-                pass
+            short_term_memory.update_context(
+                incident_id,
+                status=IncidentStatus(result.status),
+                result=result.model_dump(mode="json"),
+            )
+        except KeyError:
+            pass
     finally:
         await close_pool()
 

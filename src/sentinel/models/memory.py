@@ -1,4 +1,4 @@
-"""Memory models — EpisodicRecord, Runbook, SemanticRecord, MemoryQueryResult."""
+"""Memory models — EpisodicRecord, IncidentOutcome, Runbook, SemanticRecord, MemoryQueryResult."""
 
 from __future__ import annotations
 
@@ -68,3 +68,25 @@ class MemoryQueryResult(BaseModel):
 
     records: list[EpisodicRecord] = []
     similarity_scores: list[float] = []
+
+
+class IncidentOutcome(BaseModel):
+    """What the phase-4 pipeline adds to an ``incidents`` row (§5.3) beyond an Incident.
+
+    Passed to ``EpisodicMemory.store_incident(incident, outcome=...)``: it supplies the
+    columns a Phase-1 :class:`~sentinel.models.incident.Incident` cannot (correlation_id,
+    root_cause_confidence, resolution_type, reflexion_loops, langfuse_trace_id), the
+    root cause and resolution with the agent that produced each (``provenance``), and the
+    pipeline result, kept in ``trajectory``. Agent output, not verified fact.
+    """
+
+    correlation_id: str | None = Field(default=None, description="The bridge's UUID (§2.1).")
+    root_cause: str
+    root_cause_by: str = Field(description="The agent (or the orchestrator) that said it.")
+    root_cause_confidence: float = Field(ge=0.0, le=1.0)
+    resolution: str
+    resolution_by: str
+    resolution_type: str = Field(description="rollback | escalated (§5.3).")
+    reflexion_loops: int = Field(ge=0)
+    langfuse_trace_id: str = Field(description="The incident UUID as 32 hex (§4.5).")
+    pipeline_result: dict[str, Any] = Field(description="PipelineResult, as JSON.")

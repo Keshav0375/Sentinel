@@ -1299,64 +1299,6 @@ test-full = ["adlfs", "aiohttp (!=4.0.0a0,!=4.0.0a1)", "backports-zstd ; python_
 tqdm = ["tqdm"]
 
 [[package]]
-name = "google-auth"
-version = "2.52.0"
-description = "Google Authentication Library"
-optional = false
-python-versions = ">=3.10"
-groups = ["main"]
-files = [
-    {file = "google_auth-2.52.0-py3-none-any.whl", hash = "sha256:aee92803ba0ff93a70a3b8a35c7b4797837751cd6380b63ff38372b98f3ed627"},
-    {file = "google_auth-2.52.0.tar.gz", hash = "sha256:01f30e1a9e3638698d89464f5e603ce29d18e1c0e63ec31ac570aba4e164aaf5"},
-]
-
-[package.dependencies]
-cryptography = ">=38.0.3"
-pyasn1-modules = ">=0.2.1"
-requests = {version = ">=2.20.0,<3.0.0", optional = true, markers = "extra == \"requests\""}
-
-[package.extras]
-aiohttp = ["aiohttp (>=3.8.0,<4.0.0)", "requests (>=2.20.0,<3.0.0)"]
-cryptography = ["cryptography (>=38.0.3)"]
-enterprise-cert = ["pyopenssl"]
-pyjwt = ["pyjwt (>=2.0)"]
-pyopenssl = ["pyopenssl (>=20.0.0)"]
-reauth = ["pyu2f (>=0.1.5)"]
-requests = ["requests (>=2.20.0,<3.0.0)"]
-rsa = ["rsa (>=3.1.4,<5)"]
-testing = ["aiohttp (<3.10.0)", "aiohttp (>=3.8.0,<4.0.0)", "aioresponses", "flask", "freezegun", "grpcio", "packaging", "pyjwt (>=2.0)", "pyopenssl (<24.3.0)", "pyopenssl (>=20.0.0)", "pytest", "pytest-asyncio", "pytest-cov", "pytest-localserver", "pyu2f (>=0.1.5)", "requests (>=2.20.0,<3.0.0)", "responses", "urllib3"]
-urllib3 = ["packaging", "urllib3"]
-
-[[package]]
-name = "google-genai"
-version = "2.2.0"
-description = "GenAI Python SDK"
-optional = false
-python-versions = ">=3.10"
-groups = ["main"]
-files = [
-    {file = "google_genai-2.2.0-py3-none-any.whl", hash = "sha256:26b0815fd45fe4ccc07c3fb3a47a808732349a9fb3de74970c3d3ad897de4647"},
-    {file = "google_genai-2.2.0.tar.gz", hash = "sha256:9e50fe798289b600360b523254b9fe5af72bbc1a4fcf7d774f849aa0a9748a9e"},
-]
-
-[package.dependencies]
-anyio = ">=4.8.0,<5.0.0"
-distro = ">=1.7.0,<2"
-google-auth = {version = ">=2.48.1,<3.0.0", extras = ["requests"]}
-httpx = ">=0.28.1,<1.0.0"
-pydantic = ">=2.9.0,<3.0.0"
-requests = ">=2.28.1,<3.0.0"
-sniffio = "*"
-tenacity = ">=8.2.3,<9.2.0"
-typing-extensions = ">=4.14.0,<5.0.0"
-websockets = ">=13.0.0,<17.0"
-
-[package.extras]
-aiohttp = ["aiohttp (>=3.10.11,<4.0.0)"]
-local-tokenizer = ["protobuf", "sentencepiece (>=0.2.0)"]
-pyopenssl = ["pyopenssl"]
-
-[[package]]
 name = "googleapis-common-protos"
 version = "1.75.5"
 description = "Common protobufs used in Google APIs"
@@ -3442,33 +3384,6 @@ files = [
 defusedxml = ">=0.7.1,<0.8.0"
 
 [[package]]
-name = "pyasn1"
-version = "0.6.4"
-description = "Pure-Python implementation of ASN.1 types and DER/BER/CER codecs (X.208)"
-optional = false
-python-versions = ">=3.8"
-groups = ["main"]
-files = [
-    {file = "pyasn1-0.6.4-py3-none-any.whl", hash = "sha256:deda9277cfd454080ec40b207fb6df82206a3a2688735233cdcd8d3d565f088b"},
-    {file = "pyasn1-0.6.4.tar.gz", hash = "sha256:9c447d8431c947fe4c8febc4ed9e760bc29011a5b01e5c74b67025bd9fb8ce81"},
-]
-
-[[package]]
-name = "pyasn1-modules"
-version = "0.4.2"
-description = "A collection of ASN.1-based protocols modules"
-optional = false
-python-versions = ">=3.8"
-groups = ["main"]
-files = [
-    {file = "pyasn1_modules-0.4.2-py3-none-any.whl", hash = "sha256:29253a9207ce32b64c3ac6600edc75368f98473906e8fd1043bd6b5b1de2c14a"},
-    {file = "pyasn1_modules-0.4.2.tar.gz", hash = "sha256:677091de870a80aae844b1ca6134f54652fa2c8c5a52aa396440ac3106e941e6"},
-]
-
-[package.dependencies]
-pyasn1 = ">=0.6.1,<0.7.0"
-
-[[package]]
 name = "pycparser"
 version = "3.0"
 description = "C parser in Python"
@@ -4752,22 +4667,6 @@ mpmath = ">=1.1.0,<1.4"
 dev = ["hypothesis (>=6.70.0)", "pytest (>=7.1.0)"]
 
 [[package]]
-name = "tenacity"
-version = "9.1.4"
-description = "Retry code until it succeeds"
-optional = false
-python-versions = ">=3.10"
-groups = ["main"]
-files = [
-    {file = "tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55"},
-    {file = "tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a"},
-]
-
-[package.extras]
-doc = ["reno", "sphinx"]
-test = ["pytest", "tornado (>=4.5)", "typeguard"]
-
-[[package]]
 name = "threadpoolctl"
 version = "3.6.0"
 description = "threadpoolctl"
@@ -5765,4 +5664,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "a1a3c21cc8e8e51c89e6c015c0388ced514abd221e27fb7a0f4af02146232a4c"
+content-hash = "57559d794173be44115ef897df0842f83259b77e36719b9c69c46eabb52e3671"

@@ -2,11 +2,17 @@
 
 The suite is independent of the caller's shell and of the developer's ``.env``:
 ``Settings`` never reads ``.env`` here, ``DATABASE_URL`` is unset for the whole session
-(a test that needs it sets it to the test database), ``GROQ_API_KEY`` gets a dummy
-default, the LangFuse keys are removed so the client is disabled and nothing is ever
-sent, and the Datadog settings are removed so ``Settings`` falls back to its defaults (a
-test that needs keys passes fakes). The only database the suite touches is
-``TEST_DATABASE_URL``.
+(a test that needs it sets it to the test database), the LLM provider keys and
+``SENTINEL_PRIMARY_PROVIDER`` are removed so no test can reach a real model, the LangFuse
+keys are removed so the client is disabled and nothing is ever sent, and the Datadog
+settings are removed so ``Settings`` falls back to its defaults (a test that needs keys
+passes fakes). The only database the suite touches is
+``TEST_DATABASE_URL``. These variables are removed again before every test, so a test file
+run on its own (which may import litellm, and so load ``.env``, only mid-session) is as
+isolated as the full suite.
+
+openai-agents' default trace processor (which uploads spans to OpenAI) is dropped at
+start-up, as the app does, and any HTTP request to api.openai.com fails the test.
 """
 
 from __future__ import annotations
@@ -15,8 +21,16 @@ import os
 from collections.abc import Callable, Iterator
 from functools import cache
 from pathlib import Path
+from typing import Any
 
+import httpx
+
+# Imported first on purpose: litellm loads a developer .env into os.environ on its first
+# import. Doing that here, before pytest_configure and the fixtures below scrub the
+# environment, keeps a lazy import inside a test from re-adding DATABASE_URL or keys.
+import litellm  # noqa: F401  # pyright: ignore[reportUnusedImport]
 import pytest
+from agents import set_trace_processors
 from alembic import command
 from alembic.config import Config
 
@@ -39,15 +53,78 @@ _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 _LANGFUSE_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
 # Removed with the LangFuse keys: the suite never holds a real Datadog key or site.
 _DATADOG_VARS = ("DD_API_KEY", "DD_APP_KEY", "DD_SITE")
+# Removed too: the suite never holds a real LLM key, and the §4.7 default provider applies.
+_LLM_VARS = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "SENTINEL_PRIMARY_PROVIDER",
+    "SENTINEL_FAKE_LLM",
+)
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Before collection: a dummy GROQ_API_KEY (Settings boots without one, but agents
-    built from the default groq/ models need one), and no LangFuse keys — a keyless
-    langfuse client is a disabled no-op (no network)."""
-    os.environ.setdefault("GROQ_API_KEY", "fake-key-for-tests")
-    for var in (*_LANGFUSE_KEYS, *_DATADOG_VARS):
+    """Before collection: no LLM keys (a test that needs one passes a fake to Settings)
+    and no LangFuse keys — a keyless langfuse client is a disabled no-op (no network)."""
+    for var in (*_LANGFUSE_KEYS, *_DATADOG_VARS, *_LLM_VARS):
         os.environ.pop(var, None)
+    # Drop the SDK's default OpenAI trace exporter for the whole run, as the app does at
+    # startup (infra/tracing.install_trace_processors); a test that needs processors sets
+    # its own.
+    set_trace_processors([])
+
+
+_OPENAI_HOST = "api.openai.com"
+
+
+class OpenAIRequestBlocked(AssertionError):
+    """A test tried to reach api.openai.com (model or trace upload)."""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_openai_requests() -> Iterator[None]:
+    """Fail any httpx request to api.openai.com — the trace exporter included."""
+    real_send = httpx.Client.send
+    real_async_send = httpx.AsyncClient.send
+
+    def send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        if request.url.host == _OPENAI_HOST:
+            raise OpenAIRequestBlocked(f"request to {request.url} during tests")
+        return real_send(self, request, **kwargs)
+
+    async def async_send(
+        self: httpx.AsyncClient, request: httpx.Request, **kwargs: Any
+    ) -> httpx.Response:
+        if request.url.host == _OPENAI_HOST:
+            raise OpenAIRequestBlocked(f"request to {request.url} during tests")
+        return await real_async_send(self, request, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(httpx.Client, "send", send)
+        mp.setattr(httpx.AsyncClient, "send", async_send)
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _scrubbed_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Before every test: no DATABASE_URL, LLM, LangFuse or Datadog variable.
+
+    litellm loads a developer ``.env`` into ``os.environ`` on first import, which for a
+    test file run alone can be inside a test (e.g. a lazy ``import sentinel.main``),
+    after the session fixture ran. A test that needs one of these sets it itself.
+    """
+    for var in ("DATABASE_URL", *_LANGFUSE_KEYS, *_DATADOG_VARS, *_LLM_VARS):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_llm_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Model-call retries keep their count but not their 1s/2s waits (tests run fast).
+
+    A test of the waits themselves sets ``router.LLM_RETRY_BACKOFF_S`` back.
+    """
+    from sentinel.providers import router  # noqa: PLC0415 — after litellm's .env load
+
+    monkeypatch.setattr(router, "LLM_RETRY_BACKOFF_S", (0.0, 0.0))
 
 
 def _postgres_dsn() -> str | None:
@@ -83,11 +160,16 @@ def make_alembic_config(dsn: str, embedding_client: EmbeddingClient | None = Non
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_environment() -> Iterator[None]:
-    """No ``.env`` for Settings, no ``DATABASE_URL`` and no LangFuse keys for the session.
+    """No ``.env`` for Settings, no ``DATABASE_URL``, LLM or LangFuse keys for the session.
 
     The keys are removed again here, after collection: importing litellm loads the
     developer's ``.env`` into ``os.environ``.
     """
+    # The LLM keys are dropped for good, not restored at teardown: the openai-agents trace
+    # exporter flushes at interpreter exit and would otherwise post the session's traces
+    # to api.openai.com with whatever OPENAI_API_KEY litellm loaded from a developer .env.
+    for var in _LLM_VARS:
+        os.environ.pop(var, None)
     with pytest.MonkeyPatch.context() as mp:
         mp.setitem(Settings.model_config, "env_file", None)
         mp.delenv("DATABASE_URL", raising=False)

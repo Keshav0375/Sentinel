@@ -34,9 +34,13 @@ from alembic.config import Config
 from sentinel.config import Settings
 from sentinel.infra.database import create_pool
 from sentinel.memory.embeddings import EmbeddingClient
-from sentinel.models.tools import DeployQuery, DeployRecord, GitHubPR, ToolFailure
+from sentinel.models.tools import DeployQuery, DeployRecord, GitHubPR, TargetDeploy, ToolFailure
 from sentinel.tools import deploy_checker
-from sentinel.tools.deploy_checker import _get_deploy_details, make_deploy_checker_tool
+from sentinel.tools.deploy_checker import (
+    _get_deploy_details,
+    check_rollback_target,
+    make_deploy_checker_tool,
+)
 
 SERVICE = "sentinel-watchtower"  # the 002 seed row: metadata.repo = Keshav0375/Sentinel-deployment
 REPO = "Keshav0375/Sentinel-deployment"
@@ -816,3 +820,98 @@ async def test_token_never_reaches_logs_results_or_notes(
     ]
     for text in rendered:
         assert TOKEN not in text
+
+
+# ── check_rollback_target (the orchestrator's cross-check, not a tool) ────────
+
+
+async def _recorded_at(pool: asyncpg.Pool, sha: str) -> datetime:
+    value = await pool.fetchval("SELECT deployed_at FROM deployments WHERE commit_sha = $1", sha)
+    assert isinstance(value, datetime)
+    return value
+
+
+def _target(sha: str, at: datetime, pr: int = 42) -> TargetDeploy:
+    return TargetDeploy(pr_number=pr, commit_sha=sha, deployed_at=at)
+
+
+async def test_target_check_matches_the_row_on_sha_prefix_pr_and_time(
+    pool: asyncpg.Pool,
+) -> None:
+    await _insert(pool, ago=timedelta(minutes=20), sha="a1b2c3d4e5f6", status="failed")
+    at = await _recorded_at(pool, "a1b2c3d4e5f6")
+
+    check = await check_rollback_target(pool, SERVICE, _target("A1B2C3D", at))
+
+    assert check.ok and check.problem is None
+    assert check.deploy_id is not None and uuid.UUID(check.deploy_id)
+    assert check.record is not None
+    assert check.record.commit_sha == "a1b2c3d4e5f6"
+    assert check.record.deploy_status == "failed"  # failed deploys are rollback targets
+    assert check.record.files_changed == ["app/main.py"]
+
+
+async def test_target_check_accepts_a_full_sha_for_an_abbreviated_row(
+    pool: asyncpg.Pool,
+) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), sha="a1b2c3d")
+    at = await _recorded_at(pool, "a1b2c3d")
+    full = "a1b2c3d" + "0" * 33
+    check = await check_rollback_target(pool, SERVICE, _target(full, at))
+    assert check.ok
+
+
+async def test_target_check_tolerates_a_dropped_sub_second_part(pool: asyncpg.Pool) -> None:
+    await _insert(pool, ago=timedelta(minutes=5))
+    at = await _recorded_at(pool, "a1b2c3d")
+    check = await check_rollback_target(
+        pool, SERVICE, _target("a1b2c3d", at.replace(microsecond=0))
+    )
+    assert check.ok
+    late = at + deploy_checker.DEPLOYED_AT_TOLERANCE + timedelta(seconds=1)
+    assert not (await check_rollback_target(pool, SERVICE, _target("a1b2c3d", late))).ok
+
+
+async def test_target_check_names_the_mismatch(pool: asyncpg.Pool) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), pr=41)
+    at = await _recorded_at(pool, "a1b2c3d")
+
+    wrong_pr = await check_rollback_target(pool, SERVICE, _target("a1b2c3d", at, pr=42))
+    assert wrong_pr.record is None and wrong_pr.deploy_id is None
+    assert wrong_pr.problem is not None
+    assert "recorded as PR #41" in wrong_pr.problem and "says PR #42" in wrong_pr.problem
+
+    missing = await check_rollback_target(pool, SERVICE, _target("ffffffff", at, pr=41))
+    assert missing.problem == (
+        f"no deployments row for {SERVICE} has commit ffffffff: the rollback target is "
+        "not a recorded deploy"
+    )
+
+
+async def test_target_check_reads_only_the_incidents_service(pool: asyncpg.Pool) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), service="other-service")
+    at = await _recorded_at(pool, "a1b2c3d")
+    check = await check_rollback_target(pool, SERVICE, _target("a1b2c3d", at))
+    assert check.problem is not None and "no deployments row" in check.problem
+
+
+async def test_target_check_ignores_a_recorded_sha_under_7_characters(
+    pool: asyncpg.Pool,
+) -> None:
+    await _insert(pool, ago=timedelta(minutes=5), sha="a1b2")
+    at = await _recorded_at(pool, "a1b2")
+    check = await check_rollback_target(pool, SERVICE, _target("a1b2c3d", at))
+    assert not check.ok
+
+
+async def test_target_check_without_a_database_says_so() -> None:
+    check = await check_rollback_target(None, SERVICE, _target("a1b2c3d", datetime.now(UTC)))
+    assert check.problem == "the rollback target cannot be checked: no database is configured"
+
+
+async def test_target_check_reports_a_database_failure() -> None:
+    broken = MagicMock()
+    broken.acquire = AsyncMock(side_effect=OSError("connection refused"))
+    check = await check_rollback_target(broken, SERVICE, _target("a1b2c3d", datetime.now(UTC)))
+    assert check.problem is not None
+    assert check.problem.startswith("the rollback target cannot be checked:")

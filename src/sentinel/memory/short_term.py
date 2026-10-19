@@ -23,7 +23,7 @@ class ShortTermMemory:
         stm.create(inc_id, alert)
         stm.add_timeline_entry(inc_id, TimelineEntry(...))
         context = stm.get_context(inc_id)
-        stm.update_context(inc_id, triage_result=..., status=IncidentStatus.INVESTIGATING)
+        stm.update_context(inc_id, status=IncidentStatus.INVESTIGATING)
         trajectory = stm.get_context(inc_id)   # eval reads this
         stm.clear(inc_id)
     """
@@ -36,8 +36,8 @@ class ShortTermMemory:
     def create(self, incident_id: str, alert: AlertPayload) -> None:
         """Initialise a new incident record.
 
-        Sets all result fields to None and status to TRIAGE. Overwrites any
-        existing record for the same incident_id — callers should not reuse IDs.
+        Sets the result to None and status to TRIAGE. Overwrites any existing record
+        for the same incident_id — callers should not reuse IDs.
 
         Args:
             incident_id: Unique identifier (a UUID string, as ``Incident.id``).
@@ -47,11 +47,8 @@ class ShortTermMemory:
             "incident_id": incident_id,
             "alert": alert,
             "timeline": [],
-            "triage_result": None,
-            "log_analysis": None,
-            "deploy_correlation": None,
-            "remediation_plan": None,
-            "slack_summary": None,
+            # The PipelineResult (as JSON) once the pipeline has finished.
+            "result": None,
             "status": IncidentStatus.TRIAGE,
         }
 
@@ -109,9 +106,7 @@ class ShortTermMemory:
             incident_id: Must correspond to a known incident.
 
         Returns:
-            Dict with keys: incident_id, alert, timeline, triage_result,
-            log_analysis, deploy_correlation, remediation_plan,
-            slack_summary, status.
+            Dict with keys: incident_id, alert, timeline, result, status.
 
         Raises:
             KeyError: If no incident with incident_id exists.
@@ -125,8 +120,8 @@ class ShortTermMemory:
         Agents call this to record their results and advance the incident
         status as they complete their work::
 
-            stm.update_context(inc_id, triage_result=result)
             stm.update_context(inc_id, status=IncidentStatus.INVESTIGATING)
+            stm.update_context(inc_id, status=IncidentStatus.ESCALATED, result=...)
 
         Args:
             incident_id: Must correspond to a known incident.

@@ -4,7 +4,6 @@ Usage::
 
     python scripts/run_eval.py
     python scripts/run_eval.py --scenarios bad_deploy_01 db_pool_01
-    python scripts/run_eval.py --judge-model llama-3.3-70b-versatile
     python scripts/run_eval.py --help
 
 Results are written to:
@@ -71,15 +70,17 @@ def _print_summary(results: list[EvalRunResult]) -> None:
             note = "pipeline error"
         elif r.trajectory_missing:
             note = "no trajectory"
-        print(
-            f"  {r.scenario_id:<32} {r.score.total_score:>6.2f}  {passed:>4}  {note}"
-        )
+        print(f"  {r.scenario_id:<32} {r.score.total_score:>6.2f}  {passed:>4}  {note}")
 
     print(f"\n{sep}\n")
 
 
-def _parse_args() -> tuple[list[str] | None, str | None]:
-    """Return (scenario_ids, judge_model) from sys.argv."""
+def _parse_args() -> list[str] | None:
+    """Return the scenario ids from sys.argv (None: all).
+
+    The judge model is not an option: it is fixed by §4.7 to the provider the agents do
+    not run on (decision 2026-10-15).
+    """
     args = sys.argv[1:]
 
     if "-h" in args or "--help" in args:
@@ -87,12 +88,10 @@ def _parse_args() -> tuple[list[str] | None, str | None]:
             "Usage:\n"
             "  python scripts/run_eval.py\n"
             "  python scripts/run_eval.py --scenarios bad_deploy_01 db_pool_01\n"
-            "  python scripts/run_eval.py --judge-model llama-3.3-70b-versatile\n"
         )
         sys.exit(0)
 
     scenario_ids: list[str] | None = None
-    judge_model: str | None = None
 
     i = 0
     while i < len(args):
@@ -102,17 +101,14 @@ def _parse_args() -> tuple[list[str] | None, str | None]:
             while i < len(args) and not args[i].startswith("--"):
                 scenario_ids.append(args[i])
                 i += 1
-        elif args[i] == "--judge-model" and i + 1 < len(args):
-            judge_model = args[i + 1]
-            i += 2
         else:
             i += 1
 
-    return scenario_ids, judge_model
+    return scenario_ids
 
 
 async def main() -> None:
-    scenario_ids, judge_model = _parse_args()
+    scenario_ids = _parse_args()
 
     print("\nSentinel Eval Runner")
     print("=" * 40)
@@ -120,14 +116,9 @@ async def main() -> None:
         print(f"  Scenarios : {', '.join(scenario_ids)}")
     else:
         print("  Scenarios : all")
-    if judge_model:
-        print(f"  Judge     : {judge_model}")
     print()
 
-    results = await run_eval(
-        scenario_ids=scenario_ids,
-        judge_model=judge_model,
-    )
+    results = await run_eval(scenario_ids=scenario_ids)
 
     if not results:
         print("No scenarios were evaluated. Check logs for errors.")

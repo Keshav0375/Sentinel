@@ -8,15 +8,24 @@ from typing import Literal
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# §4.6: at most 20 tool calls per incident — a hard cap, not a default to raise.
+MAX_TOOL_CALLS_CAP = 20
+
+# One agent's whole Runner.run (providers/router.py call_with_fallback). One model call's
+# worst case is 3 attempts x 60s + the 1s and 2s waits = 183s; a run makes several model
+# calls (a tool-call turn, then the answer; up to the budget's turns). 600s fits three
+# worst-case calls or a long multi-turn tool run. The bounds keep the setting above one
+# call's worst case (router.py checks it at import) and below a runaway.
+AGENT_RUN_TIMEOUT_S = 600.0
+AGENT_RUN_TIMEOUT_MIN_S = 240.0
+AGENT_RUN_TIMEOUT_MAX_S = 1800.0
+
 # Every credential field. All optional: no secret is required to boot, and a feature whose
 # key is missing fails at use (backend.md §8.2; decision 2026-10-14). A blank value counts
 # as missing.
 _SECRET_FIELDS = (
-    "groq_api_key",
     "openai_api_key",
     "anthropic_api_key",
-    "azure_api_key",
-    "gemini_api_key",
     "dd_api_key",
     "dd_app_key",
     "github_api_token",
@@ -43,44 +52,16 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ── Groq (primary dev provider) ───────────────────────────────────────────
-    # All model defaults use groq/, so running an incident needs this key, but booting
-    # does not: resolve_model fails with a clear error when it is unset.
-    groq_api_key: SecretStr | None = None
+    # ── LLM providers (§4.7) ──────────────────────────────────────────────────
+    # Anthropic and OpenAI only. Each agent role has a fixed model pair (§4.7 table, in
+    # providers/router.py); this flag picks which side of the pair runs first. The judge
+    # always runs on the other provider. Models are not configurable per environment.
+    sentinel_primary_provider: Literal["anthropic", "openai"] = "anthropic"
 
-    # Base URL for the Groq-compatible OpenAI client.
-    groq_base_url: str = "https://api.groq.com/openai/v1"
-
-    # ── OpenAI ────────────────────────────────────────────────────────────────
-    # Required only when a sentinel_*_model field uses the "openai/" prefix.
-    openai_api_key: SecretStr | None = None
-
-    # ── Anthropic ─────────────────────────────────────────────────────────────
-    # Required only when a sentinel_*_model field uses the "anthropic/" prefix.
+    # Read at use by providers/router.py, never at boot. A missing primary-provider key
+    # falls back to the other provider; with neither, the incident escalates.
     anthropic_api_key: SecretStr | None = None
-
-    # ── Azure OpenAI ──────────────────────────────────────────────────────────
-    # Required only when a sentinel_*_model field uses the "azure/" prefix.
-    azure_api_key: SecretStr | None = None
-    azure_api_base: str = ""
-    azure_api_version: str = "2024-02-01"
-
-    # ── Gemini (future — excluded from provider layer for now) ────────────────
-    gemini_api_key: SecretStr | None = None
-
-    # ── Models — provider/model format (LiteLLM) ──────────────────────────────
-    # Each string selects both the provider and the model in one value.
-    # Change the prefix to switch providers: groq/ openai/ anthropic/ azure/
-    # See available_models.md for the full list of supported strings.
-
-    # Fast model — triage classification and eval judging.
-    sentinel_triage_model: str = "groq/llama-3.1-8b-instant"
-
-    # Capable model — log analysis, deploy correlation, remediation drafting.
-    sentinel_analysis_model: str = "groq/llama-3.3-70b-versatile"
-
-    # Judge model — kept separate so it can be a different family than the agents.
-    sentinel_judge_model: str = "groq/llama-3.1-8b-instant"
+    openai_api_key: SecretStr | None = None
 
     # Local sentence-transformers model for zero-cost embedding (384 dims).
     sentinel_embedding_model: str = "all-MiniLM-L6-v2"
@@ -99,10 +80,16 @@ class Settings(BaseSettings):
 
     sentinel_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
-    # Hard cap on tool calls per incident to prevent runaway loops (§4.6).
-    sentinel_max_tool_calls: int = 20
+    # Hard cap on tool calls per incident to prevent runaway loops (§4.6): 20 is the
+    # ceiling, so the setting may lower the cap but never raise it.
+    sentinel_max_tool_calls: int = MAX_TOOL_CALLS_CAP
 
-    # Stub provider calls in tests/CI (§9.1); /ready skips the live-provider check.
+    # The bound on one agent's Runner.run, in seconds (see AGENT_RUN_TIMEOUT_S above); a
+    # primary run past it falls back to the other provider.
+    sentinel_agent_run_timeout_s: float = AGENT_RUN_TIMEOUT_S
+
+    # Every role runs on the deterministic, no-network FakeModel (providers/fake.py) in
+    # tests/CI (§9.1); no LLM key is read. /ready skips the live-provider check.
     sentinel_fake_llm: bool = False
 
     # ── LangFuse (§6) ─────────────────────────────────────────────────────────
@@ -125,9 +112,23 @@ class Settings(BaseSettings):
     # ── Validators ────────────────────────────────────────────────────────────
     @field_validator("sentinel_max_tool_calls")
     @classmethod
-    def max_tool_calls_positive(cls, v: int) -> int:
+    def max_tool_calls_in_range(cls, v: int) -> int:
         if v < 1:
             raise ValueError("sentinel_max_tool_calls must be >= 1")
+        if v > MAX_TOOL_CALLS_CAP:
+            raise ValueError(
+                f"sentinel_max_tool_calls must be <= {MAX_TOOL_CALLS_CAP} (the §4.6 hard cap)"
+            )
+        return v
+
+    @field_validator("sentinel_agent_run_timeout_s")
+    @classmethod
+    def agent_run_timeout_in_range(cls, v: float) -> float:
+        if not AGENT_RUN_TIMEOUT_MIN_S <= v <= AGENT_RUN_TIMEOUT_MAX_S:
+            raise ValueError(
+                f"sentinel_agent_run_timeout_s must be between {AGENT_RUN_TIMEOUT_MIN_S:g} "
+                f"and {AGENT_RUN_TIMEOUT_MAX_S:g} seconds (above one model call's worst case)"
+            )
         return v
 
     @model_validator(mode="after")

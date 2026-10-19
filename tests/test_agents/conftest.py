@@ -9,5 +9,5 @@ from sentinel.config import Settings
 
 @pytest.fixture()
 def fake_settings() -> Settings:
-    """Minimal Settings with a fake Groq key — no .env required."""
-    return Settings(groq_api_key="gsk_test")
+    """Minimal Settings with fake Anthropic and OpenAI keys — no .env required."""
+    return Settings(anthropic_api_key="sk-ant-test", openai_api_key="sk-test")

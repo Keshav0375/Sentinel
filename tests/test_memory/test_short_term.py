@@ -81,17 +81,9 @@ def test_create_initialises_status_triage(stm: ShortTermMemory) -> None:
     assert ctx["status"] == IncidentStatus.TRIAGE
 
 
-def test_create_initialises_result_fields_none(stm: ShortTermMemory) -> None:
+def test_create_initialises_the_result_none(stm: ShortTermMemory) -> None:
     stm.create(INC, _make_alert())
-    ctx = stm.get_context(INC)
-    for field in (
-        "triage_result",
-        "log_analysis",
-        "deploy_correlation",
-        "remediation_plan",
-        "slack_summary",
-    ):
-        assert ctx[field] is None, f"Expected {field} to be None"
+    assert stm.get_context(INC)["result"] is None
 
 
 def test_create_multiple_incidents_tracked_independently(stm: ShortTermMemory) -> None:
@@ -182,14 +174,10 @@ def test_get_context_contains_expected_keys(stm: ShortTermMemory) -> None:
         "incident_id",
         "alert",
         "timeline",
-        "triage_result",
-        "log_analysis",
-        "deploy_correlation",
-        "remediation_plan",
-        "slack_summary",
+        "result",
         "status",
     }
-    assert expected.issubset(ctx.keys())
+    assert set(ctx.keys()) == expected
 
 
 def test_get_context_raises_for_unknown_incident(stm: ShortTermMemory) -> None:
@@ -242,30 +230,17 @@ def test_update_context_raises_for_unknown_incident(stm: ShortTermMemory) -> Non
 def test_update_context_preserves_unmodified_fields(stm: ShortTermMemory) -> None:
     alert = _make_alert()
     stm.create(INC, alert)
-    stm.update_context(INC, triage_result={"severity": "P1"})
+    stm.update_context(INC, status=IncidentStatus.INVESTIGATING)
     ctx = stm.get_context(INC)
     assert ctx["alert"] is alert  # untouched
-    assert ctx["log_analysis"] is None  # untouched
+    assert ctx["result"] is None  # untouched
 
 
-def test_update_context_sets_log_analysis(stm: ShortTermMemory) -> None:
+def test_update_context_sets_the_result(stm: ShortTermMemory) -> None:
     stm.create(INC, _make_alert())
-    analysis = {"error_patterns": ["NullPointerException"], "hypothesis": "bad deploy"}
-    stm.update_context(INC, log_analysis=analysis)
-    assert stm.get_context(INC)["log_analysis"] == analysis
-
-
-def test_update_context_sets_remediation_plan(stm: ShortTermMemory) -> None:
-    stm.create(INC, _make_alert())
-    plan = {"action_type": "rollback", "deploy_id": "deploy-abc123"}
-    stm.update_context(INC, remediation_plan=plan)
-    assert stm.get_context(INC)["remediation_plan"] == plan
-
-
-def test_update_context_sets_slack_summary(stm: ShortTermMemory) -> None:
-    stm.create(INC, _make_alert())
-    stm.update_context(INC, slack_summary="Impact: payment service down")
-    assert stm.get_context(INC)["slack_summary"] == "Impact: payment service down"
+    result = {"status": "rollback_proposed", "resolution_type": "rollback"}
+    stm.update_context(INC, result=result, status=IncidentStatus.ROLLBACK_PROPOSED)
+    assert stm.get_context(INC)["result"] == result
 
 
 # ── clear ─────────────────────────────────────────────────────────────────────
@@ -325,33 +300,22 @@ def test_full_incident_lifecycle(stm: ShortTermMemory) -> None:
     alert = _make_alert()
     stm.create(INC, alert)
 
-    # Triage step
-    stm.add_timeline_entry(INC, _make_entry("triage", "classify_severity"))
-    stm.update_context(INC, triage_result={"severity": "P1"}, status=IncidentStatus.INVESTIGATING)
+    # Pipeline steps (the tracer appends one entry per tool call)
+    stm.add_timeline_entry(INC, _make_entry("triage", "get_service_metadata"))
+    stm.update_context(INC, status=IncidentStatus.INVESTIGATING)
+    stm.add_timeline_entry(INC, _make_entry("analysis", "fetch_logs"))
+    stm.add_timeline_entry(INC, _make_entry("analysis", "get_deploy_details"))
+    stm.add_timeline_entry(INC, _make_entry("resolution", "prepare_rollback_spec"))
 
-    # Log analysis step
-    stm.add_timeline_entry(INC, _make_entry("log_analyst", "fetch_logs"))
-    stm.update_context(INC, log_analysis={"hypothesis": "null pointer"})
-
-    # Deploy correlation step
-    stm.add_timeline_entry(INC, _make_entry("deploy_correlator", "list_deploys"))
-    stm.update_context(INC, deploy_correlation={"suspect_deploy": "deploy-abc"})
-
-    # Remediation step
-    stm.add_timeline_entry(INC, _make_entry("remediation", "draft_rollback"))
-    stm.update_context(INC, status=IncidentStatus.PENDING_APPROVAL)
-
-    # Resolution
-    stm.update_context(INC, status=IncidentStatus.RESOLVED, slack_summary="Resolved.")
-    stm.add_timeline_entry(INC, _make_entry("comms", "summary_written"))
+    # Terminal: a rollback proposed (a human merges the revert PR on GitHub)
+    result = {"status": "rollback_proposed", "reflexion_loops": 1}
+    stm.update_context(INC, status=IncidentStatus.ROLLBACK_PROPOSED, result=result)
 
     # Eval reads full context
     ctx = stm.get_context(INC)
-    assert len(ctx["timeline"]) == 5
-    assert ctx["status"] == IncidentStatus.RESOLVED
-    assert ctx["triage_result"] == {"severity": "P1"}
-    assert ctx["log_analysis"] == {"hypothesis": "null pointer"}
-    assert ctx["slack_summary"] == "Resolved."
+    assert len(ctx["timeline"]) == 4
+    assert ctx["status"] == IncidentStatus.ROLLBACK_PROPOSED
+    assert ctx["result"] == result
 
     # Cleanup
     stm.clear(INC)

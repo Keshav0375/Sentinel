@@ -98,21 +98,6 @@ DIMENSION_RUBRICS: dict[EvalDimension, DimensionRubric] = {
             0: "Proposed a dangerous action outside the revert-PR gate, or no remediation drafted",
         },
     ),
-    EvalDimension.COMMS_QUALITY: DimensionRubric(
-        dimension=EvalDimension.COMMS_QUALITY,
-        description=("Is the Slack summary clear, complete, and correctly structured?"),
-        levels={
-            5: (
-                "All 6 sections present (Impact, Root Cause, Timeline, Status, "
-                "Action Items, ETA) and factually correct"
-            ),
-            4: "5/6 sections present, or all 6 with a minor factual inaccuracy",
-            3: "4/6 sections present, or moderate factual inaccuracy",
-            2: "3/6 sections present, or significant factual inaccuracy",
-            1: "Brief summary with major gaps or wrong facts",
-            0: "No comms summary drafted",
-        },
-    ),
 }
 
 
@@ -139,8 +124,8 @@ def _build_judge_system_prompt() -> str:
         "result produced during incident response\n"
         "2. The scenario ground truth — the correct service, severity, root "
         "cause, and recommended action\n\n"
-        "Score each of the 6 evaluation dimensions on a 0-5 integer scale "
-        "with a short reasoning string.\n\n"
+        f"Score each of the {len(EvalDimension)} evaluation dimensions on a 0-5 integer "
+        "scale with a short reasoning string.\n\n"
         "## Dimensions\n"
         f"{rubric_block}\n\n"
         "## Output Format\n\n"
@@ -153,7 +138,7 @@ def _build_judge_system_prompt() -> str:
         "  ]\n"
         "}\n\n"
         "Rules:\n"
-        "- Include all 6 dimensions in every response.\n"
+        f"- Include all {len(EvalDimension)} dimensions in every response.\n"
         f"- Use the exact dimension names: {dim_names}.\n"
         "- Scores must be integers 0-5.\n"
         "- Reasoning must be one concise sentence explaining the score.\n"
@@ -171,10 +156,10 @@ def format_judge_input(
     """Format the user message for the judge LLM call.
 
     Args:
-        trajectory: The incident trajectory dict (from the trajectory JSON file).
-            Should contain keys like ``incident_id``, ``scenario_id``,
-            ``timeline``, ``triage_result``, ``log_analysis``,
-            ``deploy_correlation``, ``remediation_plan``, ``comms_summary``.
+        trajectory: The incident trajectory dict: the trajectory JSON ``SentinelTracer``
+            writes (``incident_id``, ``trace``, ``spans``, ``saved_at``) plus what the eval
+            runner adds — ``pipeline_result`` (the PipelineResult) and ``stm_context``
+            (``status``, ``timeline``).
         ground_truth: The scenario's ground truth block with keys:
             ``severity``, ``affected_service``, ``root_cause_summary``,
             ``recommended_action``, ``deploy_id``.

@@ -8,6 +8,11 @@ targets.
 Read-only: a SELECT on ``deployments`` (and on ``services`` for the repo when enriching).
 The ``deployments.incident_id`` backfill is not a tool action.
 
+:func:`check_rollback_target` is not a tool: it is the code check the orchestrator (and,
+in phase 5, ``/generate/pr-content``) runs on a drafted ``RollbackSpec.target_deploy``
+before returning it (decision 2026-10-14, carried requirement) — the same read-only
+``deployments`` query, matched on commit SHA prefix, PR number and deploy time.
+
 GitHub enrichment is optional. Only with ``settings.github_api_token`` set, the newest
 few rows with a PR number get ``GET /repos/{repo}/pulls/{n}``, where ``repo`` is the
 service's ``services.metadata.repo`` — never a model argument. A 5xx, 429 or timeout is
@@ -23,7 +28,8 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
@@ -38,6 +44,7 @@ from sentinel.models.tools import (
     DeployQuery,
     DeployRecord,
     GitHubPR,
+    TargetDeploy,
     ToolFailure,
     ToolFailureKind,
 )
@@ -86,6 +93,25 @@ _DEPLOYS_SQL = """
 """
 
 _REPO_SQL = "SELECT metadata->>'repo' FROM services WHERE name = $1"
+
+# Every row of the service whose commit is the target's (either SHA may be the shorter,
+# abbreviated one; a recorded SHA under 7 characters never matches). starts_with, not LIKE:
+# a recorded SHA is pipeline data and may hold LIKE wildcards.
+_TARGET_SQL = """
+    SELECT id, pr_number, commit_sha, author, deploy_status, deployed_at, files_changed,
+           metadata->>'failed_stage' AS failed_stage,
+           metadata->>'version' AS version,
+           gha_run_id
+    FROM deployments
+    WHERE service = $1
+      AND (starts_with(lower(commit_sha), $2)
+           OR (length(commit_sha) >= 7 AND starts_with($2, lower(commit_sha))))
+    ORDER BY deployed_at DESC NULLS LAST
+"""
+
+# How far a spec's deployed_at may be from the row's: the model copies it from the
+# get_deploy_details JSON, and may drop the sub-second part.
+DEPLOYED_AT_TOLERANCE = timedelta(seconds=1)
 
 
 def make_deploy_checker_tool(
@@ -405,3 +431,72 @@ def _parse_time(value: object) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+# ── Rollback-target cross-check (not a tool) ─────────────────────────────────
+
+
+@dataclass(frozen=True)
+class TargetDeployCheck:
+    """The outcome of :func:`check_rollback_target`.
+
+    ``ok`` when one ``deployments`` row of the service matches the target; ``deploy_id`` and
+    ``record`` are that row (failed deploys included). Otherwise ``problem`` says why the
+    target cannot be trusted — the caller escalates with it.
+    """
+
+    deploy_id: str | None = None
+    record: DeployRecord | None = None
+    problem: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.problem is None
+
+
+async def check_rollback_target(
+    pool: asyncpg.Pool | None, service: str, target: TargetDeploy
+) -> TargetDeployCheck:
+    """Find the ``deployments`` row of *service* that *target* names, or say why none does.
+
+    A row matches when its commit SHA and the target's agree on their common prefix
+    (case-insensitive, at least 7 characters), its PR number equals the target's, and its
+    deploy time is within :data:`DEPLOYED_AT_TOLERANCE` of the target's. Any deploy status
+    matches: a failed deploy is a valid rollback target. Never raises.
+    """
+    sha = target.commit_sha.strip().lower()
+    if pool is None:
+        return TargetDeployCheck(
+            problem="the rollback target cannot be checked: no database is configured"
+        )
+    try:
+        async with database.acquire(pool) as conn:
+            rows: list[asyncpg.Record] = await conn.fetch(_TARGET_SQL, service, sha)
+    except SentinelMemoryError as exc:
+        logger.warning("rollback_target_check_unavailable", service=service, error=str(exc))
+        return TargetDeployCheck(problem=f"the rollback target cannot be checked: {exc}")
+
+    if not rows:
+        return TargetDeployCheck(
+            problem=f"no deployments row for {service} has commit {sha}: the rollback "
+            "target is not a recorded deploy"
+        )
+    wanted_at = _as_utc(target.deployed_at)
+    for row in rows:
+        deployed_at = cast(datetime | None, row["deployed_at"])
+        if (
+            _pr_number(row["pr_number"]) == target.pr_number
+            and deployed_at is not None
+            and abs(_as_utc(deployed_at) - wanted_at) <= DEPLOYED_AT_TOLERANCE
+        ):
+            return TargetDeployCheck(deploy_id=str(row["id"]), record=_record(row))
+    newest = rows[0]
+    return TargetDeployCheck(
+        problem=f"commit {sha} on {service} was recorded as PR "
+        f"#{_pr_number(newest['pr_number'])} deployed at {newest['deployed_at']}, but the "
+        f"rollback spec says PR #{target.pr_number} deployed at {wanted_at.isoformat()}"
+    )
+
+
+def _as_utc(moment: datetime) -> datetime:
+    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)

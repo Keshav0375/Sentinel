@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from sentinel.models.deploy import CorrelatedDeploy, Deploy, DeployCorrelation
+from sentinel.models.deploy import CorrelatedDeploy, Deploy
 
 
 def _deploy(deploy_id: str = "deploy-abc123", ts: datetime | None = None) -> Deploy:
@@ -70,52 +70,7 @@ def test_deploy_json_round_trip() -> None:
     assert reloaded.files_changed == d.files_changed
 
 
-# ── DeployCorrelation ─────────────────────────────────────────────────────────
-
-
-def _correlated(sha: str = "a1b2c3d", ts: datetime | None = None) -> CorrelatedDeploy:
-    return CorrelatedDeploy(
-        pr_number=42,
-        commit_sha=sha,
-        deployed_at=ts or datetime(2026, 5, 10, 2, 45, 0, tzinfo=UTC),
-        version=f"pr-42-{sha}",
-        deploy_status="succeeded",
-        failed_stage="none",
-    )
-
-
-def test_deploy_correlation_defaults() -> None:
-    corr = DeployCorrelation(evidence="no recent deploys found")
-    assert corr.recent_deploys == []
-    assert corr.suspect_deploy is None
-    assert corr.confidence == 0.0
-
-
-def test_deploy_correlation_with_suspect() -> None:
-    culprit = _correlated("a1b2c3d")
-    distractor = _correlated("f7e8d9a", datetime(2026, 5, 9, 14, 0, 0, tzinfo=UTC))
-    corr = DeployCorrelation(
-        recent_deploys=[culprit, distractor],
-        suspect_deploy=culprit,
-        confidence=0.92,
-        evidence="pr-42 landed 15 min before the first failed check",
-    )
-    assert len(corr.recent_deploys) == 2
-    assert corr.suspect_deploy is not None
-    assert corr.suspect_deploy.commit_sha == "a1b2c3d"
-    assert corr.confidence == 0.92
-
-
-def test_deploy_correlation_json_round_trip() -> None:
-    culprit = _correlated()
-    corr = DeployCorrelation(
-        recent_deploys=[culprit],
-        suspect_deploy=culprit,
-        confidence=0.85,
-        evidence="timing correlation",
-    )
-    reloaded = DeployCorrelation.model_validate_json(corr.model_dump_json())
-    assert reloaded == corr
+# ── CorrelatedDeploy ──────────────────────────────────────────────────────────
 
 
 def test_correlated_deploy_requires_the_record_fields() -> None:

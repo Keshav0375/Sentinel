@@ -29,5 +29,17 @@ class AgentError(SentinelError):
     """An agent run failed or produced output that violates its contract."""
 
 
+class ProviderUnavailableError(AgentError):
+    """No LLM provider can serve a call: its credential (and the fallback's) is not set."""
+
+
+class ToolBudgetExhausted(AgentError):
+    """The incident's tool-call budget (``sentinel_max_tool_calls``, §4.6) is spent.
+
+    Raised by the orchestrator's budget guard to stop an agent run after a tool call was
+    refused; the orchestrator escalates with the context gathered so far.
+    """
+
+
 class EvalError(SentinelError):
     """The eval pipeline could not score a run."""

@@ -158,19 +158,18 @@ Alert fires
     │
     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      Orchestrator Agent                      │
-│  (coordinates handoffs, enforces 20-call cap, writes STM)   │
+│          Orchestrator (Python code, not an LLM agent)        │
+│  plans on signal_type · reflexion ≤ 2 loops · decision gate  │
+│  reverification (1 retry) · hard 20-tool-call budget         │
 └──┬──────────┬──────────┬──────────┬──────────┬─────────────┘
-   │          │          │          │          │
    ▼          ▼          ▼          ▼          ▼
-Triage    Log      Deploy    Remediation  Comms
-Agent   Analyst  Correlator   Agent      Agent
-   │       │          │          │       (no tools:
-get_    fetch_     get_      prepare_   writes the
-service_ logs     deploy_   rollback_   summary)
-metadata          details    spec  or
-search_                     format_
-past_                       escalation
+Triage    Analysis   Reflexion  Resolution  Reverification
+   │          │      (critique,     │       (PASS / FAIL /
+get_      fetch_      no tools)  prepare_    ESCALATE,
+service_  logs                   rollback_   no tools)
+metadata  get_                   spec  or
+search_   deploy_                format_
+past_     details                escalation
 incidents                      │
                                ▼
               Rollback spec ──► GitHub Actions opens the revert PR
@@ -185,7 +184,7 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 
 ## Features
 
-- **Multi-agent pipeline** — 5 specialist agents (Triage, Log Analyst, Deploy Correlator, Remediation, Comms) orchestrated via OpenAI Agents SDK handoffs
+- **Multi-agent pipeline** — 5 pipeline agents (Triage, Analysis, Reflexion, Resolution, Reverification) run by a Python orchestrator that enforces every cap in code; a sixth, the PR content generator, writes the revert PR for `/generate/pr-content`
 - **HITL safety gate** — the backend only drafts a rollback spec or an escalation; GitHub Actions opens the revert PR and a human merges or closes it on GitHub. No agent has a tool that acts on the world
 - **Episodic memory** — past incidents embedded and stored in SQLite; similar incidents surface automatically during triage
 - **Semantic memory** — service map, dependency graph, and runbooks loaded from seed data
@@ -201,7 +200,7 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 ### Prerequisites
 
 - Python 3.12+
-- [Groq API key](https://console.groq.com/keys) (free tier is sufficient)
+- An Anthropic and/or OpenAI API key (not needed to boot; an incident without one escalates)
 - Docker + docker-compose (optional but recommended)
 
 ### 1. Clone and configure
@@ -210,7 +209,7 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 git clone https://github.com/keshxv/sentinel.git
 cd sentinel
 cp .env.example .env
-# Edit .env — add your GROQ_API_KEY
+# Edit .env — add ANTHROPIC_API_KEY and OPENAI_API_KEY
 ```
 
 ### 2a. Run with Docker
@@ -233,25 +232,17 @@ uvicorn sentinel.main:app --reload
 
 Dashboard: [http://localhost:8000](http://localhost:8000)
 
-### 3. Switch providers (optional)
+### 3. Switch the primary provider (optional)
 
-Model strings use the `provider/model` format. Swap any provider with 3 env vars — no code changes.
+Each agent role runs a fixed Anthropic/OpenAI model pair (architecture §4.7, in
+`src/sentinel/providers/router.py`). Anthropic runs first by default; a rate limit, timeout
+or API error re-runs the agent once on OpenAI. To run OpenAI first:
 
-**Switch analysis to Anthropic Claude:**
 ```env
-SENTINEL_ANALYSIS_MODEL=anthropic/claude-sonnet-4-6
-ANTHROPIC_API_KEY=sk-ant-...
+SENTINEL_PRIMARY_PROVIDER=openai
 ```
 
-**Switch everything to OpenAI:**
-```env
-SENTINEL_TRIAGE_MODEL=openai/gpt-4o-mini
-SENTINEL_ANALYSIS_MODEL=openai/gpt-4o
-SENTINEL_JUDGE_MODEL=openai/gpt-4o-mini
-OPENAI_API_KEY=sk-...
-```
-
-See [available_models.md](available_models.md) for the full model table and provider capability matrix.
+The eval judge always runs on the provider the agents do not use.
 
 ### 4. Fire a scenario
 
@@ -284,8 +275,8 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 **What you'll see:**
 
 1. Select `bad_deploy_01` from the dropdown — a critical API gateway alert fires
-2. Watch the five agent cards light up in sequence as each specialist completes its analysis
-3. The Remediation Agent drafts a rollback spec (or an escalation) and the incident resolves
+2. Watch the agent cards light up as triage, analysis and the reflexion critique run
+3. The Resolution Agent drafts a rollback spec, reverification checks it, and the incident ends `rollback_proposed` (or `escalated`)
 4. Switch to `/eval` to see the LLM judge's per-dimension scores
 
 ---
@@ -295,7 +286,7 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 | Layer | Technology |
 |-------|-----------|
 | Agent framework | [openai-agents](https://github.com/openai/openai-agents-python) (Agents SDK) |
-| LLM | LiteLLM multi-provider — `groq/`, `openai/`, `anthropic/`, `azure/` via `provider/model` env var. Default: Groq (free tier). See [available_models.md](available_models.md). |
+| LLM | LiteLLM — Anthropic (default) and OpenAI, a fixed model pair per agent role with automatic fallback (§4.7). |
 | API layer | FastAPI + uvicorn |
 | Memory — episodic | SQLite via aiosqlite + cosine similarity |
 | Memory — semantic | SQLite (service map, runbooks) |
@@ -336,7 +327,7 @@ Pass threshold: **3.0 / 5.0** (60%)
 ```
 sentinel/
 ├── src/sentinel/
-│   ├── agents/          # 5 specialist agents + orchestrator
+│   ├── agents/          # 6 LLM agents + the Python orchestrator
 │   ├── tools/           # Tool implementations (fetch_logs, prepare_rollback_spec, …)
 │   ├── memory/          # Episodic (SQLite + embeddings), semantic, short-term
 │   ├── eval/            # Rubric, LLM-as-judge, batch runner, report generator
@@ -360,7 +351,7 @@ sentinel/
 
 ## Architecture Decisions
 
-**Why multi-agent, not single agent?** Each specialist has a focused system prompt and constrained tool set. This makes each agent independently testable and improvable — changing the Log Analyst's prompt doesn't risk breaking Triage.
+**Why multi-agent, not single agent?** Each specialist has a focused system prompt and constrained tool set. This makes each agent independently testable and improvable — changing the Analysis prompt doesn't risk breaking Triage.
 
 **Why HITL at the tool level, not the prompt level?** There is no "execute rollback" tool — only `prepare_rollback_spec` and `format_escalation`, which draft and return. An agent can't bypass the gate by ignoring a prompt instruction: it has no tool that acts, and the revert PR a human merges on GitHub is the only path to a rollback.
 

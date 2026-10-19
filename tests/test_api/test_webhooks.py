@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from sentinel.api.webhooks import AlertDeduplicator, _new_incident_id, make_alert_router
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.pipeline import PipelineInput
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -216,26 +217,47 @@ def test_receive_alert_distinct_alerts_create_separate_incidents() -> None:
 
 
 def test_receive_alert_triggers_pipeline_for_new_alert() -> None:
-    """pipeline_fn must be queued as a background task for new alerts."""
-    calls: list[tuple[str, str]] = []
+    """pipeline_fn must be queued as a background task for new alerts, with a PipelineInput."""
+    calls: list[PipelineInput] = []
 
-    async def fake_pipeline(incident_id: str, alert: AlertPayload) -> None:
-        calls.append((incident_id, alert.alert_id))
+    async def fake_pipeline(request: PipelineInput) -> None:
+        calls.append(request)
 
     payload = _make_payload(alert_id="alert-pipeline-new")
     client = TestClient(_make_test_app(pipeline_fn=fake_pipeline))
-    _post_alert(client, payload)
+    response = _post_alert(client, payload)
     # TestClient runs background tasks synchronously before returning
     assert len(calls) == 1
-    assert calls[0][1] == "alert-pipeline-new"
+    request = calls[0]
+    assert request.alert.alert_id == "alert-pipeline-new"
+    assert request.incident_id == response.json()["incident_id"]  # type: ignore[attr-defined]
+    # The alert carries no signal type: the full pipeline, with a fresh correlation id.
+    assert request.signal_type == "runtime_error"
+    assert uuid.UUID(request.correlation_id)
+
+
+def test_receive_alert_passes_the_alerts_signal_type_and_correlation_id() -> None:
+    calls: list[PipelineInput] = []
+
+    async def fake_pipeline(request: PipelineInput) -> None:
+        calls.append(request)
+
+    correlation_id = str(uuid.uuid4())
+    payload = _make_payload(alert_id="alert-signal").model_copy(
+        update={"metadata": {"signal_type": "deploy_failure", "correlation_id": correlation_id}}
+    )
+    client = TestClient(_make_test_app(pipeline_fn=fake_pipeline))
+    _post_alert(client, payload)
+    assert calls[0].signal_type == "deploy_failure"
+    assert calls[0].correlation_id == correlation_id
 
 
 def test_receive_alert_does_not_trigger_pipeline_for_duplicate() -> None:
     """pipeline_fn must NOT be queued for duplicate alerts within TTL."""
     calls: list[str] = []
 
-    async def fake_pipeline(incident_id: str, alert: AlertPayload) -> None:
-        calls.append(incident_id)
+    async def fake_pipeline(request: PipelineInput) -> None:
+        calls.append(request.incident_id)
 
     dedup = AlertDeduplicator()
     payload = _make_payload(alert_id="alert-pipeline-dedup")

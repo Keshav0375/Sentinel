@@ -35,11 +35,8 @@ class IncidentDetail(BaseModel):
     alert: AlertPayload
     status: str
     timeline: list[TimelineEntry]
-    triage_result: dict[str, Any] | None
-    log_analysis: dict[str, Any] | None
-    deploy_correlation: dict[str, Any] | None
-    remediation_plan: dict[str, Any] | None
-    slack_summary: str | None
+    # The PipelineResult once the pipeline has finished (rollback_proposed | escalated).
+    result: dict[str, Any] | None
 
 
 def make_incidents_router(short_term_memory: ShortTermMemory) -> APIRouter:
@@ -81,9 +78,8 @@ def make_incidents_router(short_term_memory: ShortTermMemory) -> APIRouter:
     ) -> IncidentDetail:
         """Return the full context for a single incident.
 
-        Includes the original alert, every timeline step logged so far,
-        and the output of each specialist agent (may be null if that agent
-        has not run yet).
+        Includes the original alert, every timeline step logged so far, and the
+        pipeline result (null until the pipeline has finished).
 
         Raises 404 if the incident_id is not in short-term memory.
         """
@@ -100,11 +96,7 @@ def make_incidents_router(short_term_memory: ShortTermMemory) -> APIRouter:
             alert=ctx["alert"],
             status=str(ctx["status"]),
             timeline=ctx["timeline"],
-            triage_result=ctx["triage_result"],
-            log_analysis=ctx["log_analysis"],
-            deploy_correlation=ctx["deploy_correlation"],
-            remediation_plan=ctx["remediation_plan"],
-            slack_summary=ctx["slack_summary"],
+            result=ctx["result"],
         )
 
     return router
