@@ -112,13 +112,16 @@ def test_low_confidence_without_next_tool_call_is_valid() -> None:
     assert result.supporting_evidence == ["get_deploy_details: pr-42 deployed 15 min before"]
 
 
-@pytest.mark.parametrize(
-    ("confidence", "clamped"),
-    [(-0.1, 0.0), (1.01, 1.0), (7, 1.0), (float("nan"), 0.0), ("0.85", 0.85)],
-)
-def test_confidence_is_clamped_to_the_unit_interval(confidence: Any, clamped: float) -> None:
-    result = ReflexionResult.model_validate(_sample(confidence=confidence))
-    assert result.confidence == clamped
+@pytest.mark.parametrize("confidence", [85, 95, 1.01, -1, -0.1, float("nan"), float("inf")])
+def test_confidence_outside_the_unit_interval_is_rejected_not_clamped(confidence: Any) -> None:
+    """85 is not 0.85, nor 1.0: a reply on the wrong scale is unparsed, never gate-ready."""
+    with pytest.raises(ValidationError, match="between 0.0 and 1.0"):
+        ReflexionResult.model_validate(_sample(confidence=confidence))
+
+
+@pytest.mark.parametrize(("confidence", "parsed"), [(0, 0.0), (1, 1.0), ("0.85", 0.85)])
+def test_confidence_on_the_unit_interval_is_kept(confidence: Any, parsed: float) -> None:
+    assert ReflexionResult.model_validate(_sample(confidence=confidence)).confidence == parsed
 
 
 def test_confidence_that_is_not_a_number_is_rejected() -> None:
@@ -184,7 +187,7 @@ def test_blank_commit_sha_drops_the_deploy_and_keeps_the_confidence() -> None:
 
 def test_constructor_repairs_like_validation() -> None:
     result = ReflexionResult(
-        confidence=1.5,
+        confidence=0.95,
         supporting_evidence=[],
         missing_or_contradictory=[],
         additional_data_needed=[],
@@ -192,7 +195,7 @@ def test_constructor_repairs_like_validation() -> None:
         deploy=None,
         next_tool_call=None,
     )
-    assert (result.confidence, result.specific_deploy_identified) == (1.0, False)
+    assert (result.confidence, result.specific_deploy_identified) == (0.95, False)
 
 
 def test_only_confidence_is_needed_to_parse() -> None:

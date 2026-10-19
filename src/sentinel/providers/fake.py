@@ -270,7 +270,7 @@ def reflexion_turn(
     """A ``reflexion`` reply (§4.3), validated as a :class:`ReflexionResult` now.
 
     ``specific_deploy_identified`` follows ``deploy``; the result is repaired exactly as a
-    model's reply would be (confidence clamped, a call above 0.7 dropped).
+    model's reply would be (a call above 0.7 dropped); a confidence outside [0, 1] raises.
 
     ``inconsistent=True`` sends the JSON a careless model would, which repairs to the same
     result: ``specific_deploy_identified`` is true even with no deploy (the one repair that

@@ -581,6 +581,36 @@ async def test_an_explicit_false_with_a_deploy_keeps_the_gate_shut(
     assert _runs(script, "resolution") == 0 and target_ok == []
 
 
+@pytest.mark.parametrize("confidence", [85, -1])
+async def test_a_confidence_off_the_unit_interval_is_unparsed_and_never_passes_the_gate(
+    confidence: float, target_ok: list[TargetDeploy], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = MagicMock()
+    monkeypatch.setattr(orchestrator, "logger", log)
+    request = _request()
+    critique = {
+        "confidence": confidence,
+        "supporting_evidence": ["checks fail since pr-42"],
+        "missing_or_contradictory": [],
+        "additional_data_needed": [],
+        "specific_deploy_identified": True,
+        "deploy": {"commit_sha": SHA, "pr_number": PR},
+        "next_tool_call": None,
+    }
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis(), *_analysis())
+        script.on(REFLEXION_AGENT, *(FakeTurn(output=critique) for _ in range(2)))
+        result = await run_pipeline(request, _deps())
+    assert result.status == "escalated"
+    assert result.parse_failures == 2 and result.reflexion_loops == 1
+    assert result.escalation is not None
+    assert result.escalation.missing[0] == REFLEXION_UNPARSEABLE
+    assert _runs(script, "resolution") == 0 and target_ok == []
+    unparsed = [c for c in log.warning.call_args_list if c.args == ("agent_output_unparsed",)]
+    assert {c.kwargs["agent"] for c in unparsed} == {REFLEXION_AGENT}
+
+
 # ── Reverification ────────────────────────────────────────────────────────────
 
 

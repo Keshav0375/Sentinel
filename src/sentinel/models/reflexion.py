@@ -78,7 +78,8 @@ class ReflexionResult(BaseModel):
     The schema (what the model is asked for) has every field required. Validation is
     tolerant, but a repair only ever makes the decision gate stricter, never looser:
 
-    - ``confidence`` is clamped to [0.0, 1.0] (NaN → 0.0).
+    - ``confidence`` must be in [0.0, 1.0]: anything else (85 meaning 85 %, -1, NaN) is not
+      repaired but rejected, so the reply counts as unparsed and never reaches the gate.
     - ``specific_deploy_identified`` is the model's own ``true`` AND a deploy that parsed.
       An explicit (or omitted) false always wins — a deploy never sets it — and true with
       no deploy is repaired to false.
@@ -128,10 +129,10 @@ class ReflexionResult(BaseModel):
 
     @field_validator("confidence")
     @classmethod
-    def _clamped(cls, value: float) -> float:
-        if math.isnan(value):
-            return 0.0
-        return min(1.0, max(0.0, value))
+    def _in_unit_interval(cls, value: float) -> float:
+        if math.isnan(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("confidence must be between 0.0 and 1.0")
+        return value
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
