@@ -14,6 +14,7 @@ from sentinel.models.reflexion import (
     DeployDetailsCall,
     FetchLogsCall,
     ReflexionResult,
+    SuspectDeploy,
 )
 
 
@@ -89,57 +90,101 @@ def test_confident_reply_drops_a_next_tool_call() -> None:
 @pytest.mark.parametrize(
     "tool", ["prepare_rollback_spec", "format_escalation", "get_service_metadata", "rm_rf"]
 )
-def test_next_tool_call_is_restricted_to_analysis_tools(tool: str) -> None:
+def test_next_tool_call_outside_the_analysis_tools_is_dropped(tool: str) -> None:
+    """Only an analysis tool can be named; anything else is dropped, the critique kept."""
     call = {"tool": tool, "args": {"service": "sentinel-watchtower"}}
-    with pytest.raises(ValidationError):
-        ReflexionResult.model_validate(_sample(next_tool_call=call))
+    result = ReflexionResult.model_validate(_sample(next_tool_call=call))
+    assert result.next_tool_call is None
+    assert result.confidence == 0.4
+    assert result.needs_more_evidence
 
 
-def test_next_tool_call_args_must_fit_the_named_tool() -> None:
+def test_next_tool_call_args_that_do_not_fit_are_dropped() -> None:
     call = {"tool": "fetch_logs", "args": {"window_minutes": 60}}  # no service
+    result = ReflexionResult.model_validate(_sample(next_tool_call=call))
+    assert result.next_tool_call is None
+
+
+def test_low_confidence_without_next_tool_call_is_valid() -> None:
+    """The orchestrator loops without guidance, or escalates — the reply is not discarded."""
+    result = ReflexionResult.model_validate(_sample(next_tool_call=None))
+    assert result.needs_more_evidence
+    assert result.next_tool_call is None
+    assert result.supporting_evidence == ["get_deploy_details: pr-42 deployed 15 min before"]
+
+
+@pytest.mark.parametrize(
+    ("confidence", "clamped"),
+    [(-0.1, 0.0), (1.01, 1.0), (7, 1.0), (float("nan"), 0.0), ("0.85", 0.85)],
+)
+def test_confidence_is_clamped_to_the_unit_interval(confidence: Any, clamped: float) -> None:
+    result = ReflexionResult.model_validate(_sample(confidence=confidence))
+    assert result.confidence == clamped
+
+
+def test_confidence_that_is_not_a_number_is_rejected() -> None:
     with pytest.raises(ValidationError):
-        ReflexionResult.model_validate(_sample(next_tool_call=call))
+        ReflexionResult.model_validate(_sample(confidence="high"))
 
 
-def test_low_confidence_requires_next_tool_call() -> None:
-    with pytest.raises(ValidationError, match="requires next_tool_call"):
-        ReflexionResult.model_validate(_sample(next_tool_call=None))
+def test_identified_without_a_deploy_is_repaired_to_not_identified() -> None:
+    result = ReflexionResult.model_validate(
+        _sample(confidence=0.9, specific_deploy_identified=True, deploy=None)
+    )
+    assert result.specific_deploy_identified is False
+    assert result.confidence == 0.9
 
 
-@pytest.mark.parametrize("confidence", [-0.1, 1.01, 7])
-def test_confidence_outside_unit_interval_is_rejected(confidence: float) -> None:
-    with pytest.raises(ValidationError, match="between 0.0 and 1.0"):
-        ReflexionResult.model_validate(_sample(confidence=confidence))
+def test_deploy_without_identification_is_repaired_to_identified() -> None:
+    result = ReflexionResult.model_validate(
+        _sample(confidence=0.85, deploy={"commit_sha": "a1b2c3d", "pr_number": 42})
+    )
+    assert result.specific_deploy_identified is True
+    assert result.deploy is not None and result.deploy.commit_sha == "a1b2c3d"
+    assert result.confidence == 0.85
 
 
-def test_identified_deploy_requires_the_deploy() -> None:
-    with pytest.raises(ValidationError, match="deploy is null"):
-        ReflexionResult.model_validate(_sample(confidence=0.9, specific_deploy_identified=True))
-
-
-def test_deploy_without_identification_is_rejected() -> None:
-    with pytest.raises(ValidationError, match="specific_deploy_identified is false"):
-        ReflexionResult.model_validate(_sample(deploy={"commit_sha": "a1b2c3d", "pr_number": 42}))
-
-
-def test_blank_commit_sha_is_rejected() -> None:
-    with pytest.raises(ValidationError, match="blank"):
-        ReflexionResult.model_validate(
-            _sample(
-                confidence=0.9,
-                specific_deploy_identified=True,
-                deploy={"commit_sha": "  ", "pr_number": 42},
-            )
+def test_blank_commit_sha_drops_the_deploy_and_keeps_the_confidence() -> None:
+    result = ReflexionResult.model_validate(
+        _sample(
+            confidence=0.9,
+            specific_deploy_identified=True,
+            deploy={"commit_sha": "  ", "pr_number": 42},
         )
+    )
+    assert result.deploy is None
+    assert result.specific_deploy_identified is False
+    assert result.confidence == 0.9
 
 
-def test_every_field_is_required() -> None:
-    """The model must answer every field: none silently defaults."""
-    for field in ReflexionResult.model_fields:
-        reply = _sample()
-        del reply[field]
-        with pytest.raises(ValidationError):
-            ReflexionResult.model_validate(reply)
+def test_constructor_repairs_like_validation() -> None:
+    result = ReflexionResult(
+        confidence=1.5,
+        supporting_evidence=[],
+        missing_or_contradictory=[],
+        additional_data_needed=[],
+        specific_deploy_identified=False,
+        deploy=SuspectDeploy(commit_sha="a1b2c3d", pr_number=42),
+        next_tool_call=None,
+    )
+    assert (result.confidence, result.specific_deploy_identified) == (1.0, True)
+
+
+def test_only_confidence_is_needed_to_parse() -> None:
+    """An omitted list is empty and an omitted deploy or call is null: never discarded."""
+    result = ReflexionResult.model_validate({"confidence": 0.75})
+    assert result.confidence == 0.75
+    assert result.supporting_evidence == []
+    assert result.deploy is None and result.specific_deploy_identified is False
+    assert result.next_tool_call is None
+    with pytest.raises(ValidationError):
+        ReflexionResult.model_validate({"deploy": None})
+
+
+def test_the_schema_still_asks_for_every_field() -> None:
+    """Tolerant to parse, strict to ask: the model is told every field is required."""
+    schema = ReflexionResult.model_json_schema()
+    assert set(schema["required"]) == set(ReflexionResult.model_fields)
 
 
 def test_usable_as_a_strict_agent_output_type() -> None:

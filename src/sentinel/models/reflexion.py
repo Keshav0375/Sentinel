@@ -10,9 +10,17 @@ calls no tool itself, and nothing here acts on the world.
 
 from __future__ import annotations
 
-from typing import Literal, Self
+import math
+from typing import Any, Literal, Self, cast
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from sentinel.models.tools import DeployQuery, LogFetchInput
 
@@ -67,11 +75,16 @@ class SuspectDeploy(BaseModel):
 class ReflexionResult(BaseModel):
     """Output of the ``reflexion`` prompt: the critique the orchestrator acts on.
 
-    Invariants (validated):
-    - ``confidence`` is in [0.0, 1.0].
-    - ``deploy`` is set exactly when ``specific_deploy_identified`` is true.
-    - ``next_tool_call`` is required below :data:`REFLEXION_CONFIDENCE_THRESHOLD`; at or
-      above it, any value is dropped (no further evidence is requested).
+    The schema (what the model is asked for) has every field required. Validation is
+    tolerant, so a reply whose confidence and deploy parsed is never discarded over an
+    inconsistency; it is repaired:
+
+    - ``confidence`` is clamped to [0.0, 1.0] (NaN → 0.0).
+    - ``specific_deploy_identified`` follows ``deploy``: true exactly when a deploy parsed.
+    - A ``deploy`` or ``next_tool_call`` that does not parse (a blank SHA, a tool that is
+      not an analysis tool) is dropped to null; an omitted list is empty.
+    - ``next_tool_call`` is kept only below :data:`REFLEXION_CONFIDENCE_THRESHOLD`; it may
+      be null there (the orchestrator then loops without guidance or escalates).
     """
 
     confidence: float = Field(
@@ -97,23 +110,29 @@ class ReflexionResult(BaseModel):
         "Null otherwise."
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _repair(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        reply = dict(cast(dict[str, Any], data))
+        for name in _LIST_FIELDS:
+            if reply.get(name) is None:
+                reply[name] = []
+        reply["deploy"] = _parsed_or_none(_DEPLOY, reply.get("deploy"))
+        reply["next_tool_call"] = _parsed_or_none(_NEXT_CALL, reply.get("next_tool_call"))
+        reply["specific_deploy_identified"] = reply["deploy"] is not None
+        return reply
+
     @field_validator("confidence")
     @classmethod
-    def _in_unit_interval(cls, value: float) -> float:
-        if not 0.0 <= value <= 1.0:
-            raise ValueError("confidence must be between 0.0 and 1.0")
-        return value
+    def _clamped(cls, value: float) -> float:
+        if math.isnan(value):
+            return 0.0
+        return min(1.0, max(0.0, value))
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
-        if self.specific_deploy_identified and self.deploy is None:
-            raise ValueError("specific_deploy_identified is true but deploy is null")
-        if not self.specific_deploy_identified and self.deploy is not None:
-            raise ValueError("deploy is set but specific_deploy_identified is false")
-        if self.needs_more_evidence and self.next_tool_call is None:
-            raise ValueError(
-                f"confidence < {REFLEXION_CONFIDENCE_THRESHOLD} requires next_tool_call"
-            )
         if not self.needs_more_evidence:
             self.next_tool_call = None
         return self
@@ -122,3 +141,24 @@ class ReflexionResult(BaseModel):
     def needs_more_evidence(self) -> bool:
         """True below the §4.3 threshold: the orchestrator may loop back to Analysis."""
         return self.confidence < REFLEXION_CONFIDENCE_THRESHOLD
+
+
+_LIST_FIELDS: tuple[str, ...] = (
+    "supporting_evidence",
+    "missing_or_contradictory",
+    "additional_data_needed",
+)
+_DEPLOY: TypeAdapter[SuspectDeploy] = TypeAdapter(SuspectDeploy)
+_NEXT_CALL: TypeAdapter[FetchLogsCall | DeployDetailsCall] = TypeAdapter(
+    FetchLogsCall | DeployDetailsCall
+)
+
+
+def _parsed_or_none(adapter: TypeAdapter[Any], value: Any) -> Any:
+    """*value* validated by *adapter*, or None when it is absent or does not parse."""
+    if value is None:
+        return None
+    try:
+        return adapter.validate_python(value)
+    except ValidationError:
+        return None

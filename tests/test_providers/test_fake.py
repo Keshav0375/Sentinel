@@ -309,11 +309,13 @@ async def test_scripted_reflexion_turns_drive_a_loop_back_then_a_confident_resul
     assert script.calls == [(REFLEXION_AGENT, SONNET)] * 2
 
 
-def test_reflexion_turn_validates_the_contract_up_front() -> None:
-    with pytest.raises(ValueError, match="requires next_tool_call"):
-        reflexion_turn(0.3)
-    with pytest.raises(ValueError, match="between 0.0 and 1.0"):
-        reflexion_turn(1.5)
+def test_reflexion_turn_goes_through_the_contract_up_front() -> None:
+    """The scripted reply is what ReflexionResult accepts: repaired, never rejected."""
+    low = reflexion_turn(0.3).output
+    assert isinstance(low, ReflexionResult)
+    assert low.needs_more_evidence and low.next_tool_call is None
+    high = reflexion_turn(1.5).output
+    assert isinstance(high, ReflexionResult) and high.confidence == 1.0
 
 
 async def test_unscripted_reflexion_is_low_confidence_and_valid() -> None:

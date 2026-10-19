@@ -194,8 +194,8 @@ def reflexion_turn(
 ) -> FakeTurn:
     """A ``reflexion`` reply (§4.3), validated as a :class:`ReflexionResult` now.
 
-    ``specific_deploy_identified`` follows ``deploy``. Below the 0.7 threshold
-    ``next_tool_call`` is required, as the model's own reply would need it.
+    ``specific_deploy_identified`` follows ``deploy``; the result is repaired exactly as a
+    model's reply would be (confidence clamped, a call above 0.7 dropped).
     """
     result = ReflexionResult(
         confidence=confidence,
