@@ -442,12 +442,15 @@ class TargetDeployCheck:
 
     ``ok`` when one ``deployments`` row of the service matches the target; ``deploy_id`` and
     ``record`` are that row (failed deploys included). Otherwise ``problem`` says why the
-    target cannot be trusted — the caller escalates with it.
+    target cannot be trusted — the caller escalates with it. ``unavailable`` is True when
+    the check could not run (no database, or a database/driver error), so ``problem`` says
+    nothing about the target itself.
     """
 
     deploy_id: str | None = None
     record: DeployRecord | None = None
     problem: str | None = None
+    unavailable: bool = False
 
     @property
     def ok(self) -> bool:
@@ -467,14 +470,17 @@ async def check_rollback_target(
     sha = target.commit_sha.strip().lower()
     if pool is None:
         return TargetDeployCheck(
-            problem="the rollback target cannot be checked: no database is configured"
+            problem="the rollback target cannot be checked: no database is configured",
+            unavailable=True,
         )
     try:
         async with database.acquire(pool) as conn:
             rows: list[asyncpg.Record] = await conn.fetch(_TARGET_SQL, service, sha)
     except SentinelMemoryError as exc:
         logger.warning("rollback_target_check_unavailable", service=service, error=str(exc))
-        return TargetDeployCheck(problem=f"the rollback target cannot be checked: {exc}")
+        return TargetDeployCheck(
+            problem=f"the rollback target cannot be checked: {exc}", unavailable=True
+        )
 
     if not rows:
         return TargetDeployCheck(

@@ -886,6 +886,7 @@ async def test_target_check_names_the_mismatch(pool: asyncpg.Pool) -> None:
         f"no deployments row for {SERVICE} has commit ffffffff: the rollback target is "
         "not a recorded deploy"
     )
+    assert wrong_pr.unavailable is False and missing.unavailable is False
 
 
 async def test_target_check_reads_only_the_incidents_service(pool: asyncpg.Pool) -> None:
@@ -907,6 +908,7 @@ async def test_target_check_ignores_a_recorded_sha_under_7_characters(
 async def test_target_check_without_a_database_says_so() -> None:
     check = await check_rollback_target(None, SERVICE, _target("a1b2c3d", datetime.now(UTC)))
     assert check.problem == "the rollback target cannot be checked: no database is configured"
+    assert check.unavailable is True
 
 
 async def test_target_check_reports_a_database_failure() -> None:
@@ -915,3 +917,4 @@ async def test_target_check_reports_a_database_failure() -> None:
     check = await check_rollback_target(broken, SERVICE, _target("a1b2c3d", datetime.now(UTC)))
     assert check.problem is not None
     assert check.problem.startswith("the rollback target cannot be checked:")
+    assert check.unavailable is True
