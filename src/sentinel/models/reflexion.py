@@ -11,6 +11,7 @@ calls no tool itself, and nothing here acts on the world.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any, Literal, Self, cast
 
 from pydantic import (
@@ -139,6 +140,20 @@ class ReflexionResult(BaseModel):
         if not self.needs_more_evidence:
             self.next_tool_call = None
         return self
+
+    @classmethod
+    def is_explicit_reply(cls, data: Mapping[str, Any]) -> bool:
+        """Whether *data* states every gate-relevant key itself: ``confidence`` and
+        ``specific_deploy_identified``, and the ``deploy`` key when that is true (a null
+        deploy is then repaired to not identified, as in any reply).
+
+        ``coerce_output`` requires it of an object found inside a reply (not of a whole
+        reply): validation fills defaults, so a quoted ``{"confidence": 0.95}`` would
+        otherwise parse as a critique.
+        """
+        if "confidence" not in data or "specific_deploy_identified" not in data:
+            return False
+        return data["specific_deploy_identified"] is not True or "deploy" in data
 
     @property
     def needs_more_evidence(self) -> bool:

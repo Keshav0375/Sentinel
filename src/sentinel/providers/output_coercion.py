@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 
 from pydantic import BaseModel, ValidationError
@@ -12,12 +13,18 @@ def coerce_output[T: BaseModel](text: str, schema: type[T]) -> T | None:
     """Parse a plain-text agent response into a Pydantic model.
 
     Used when structured outputs are not available (e.g. Anthropic provider). Real models
-    frame their JSON: a code fence, a sentence before it, a note after it. The whole reply
-    (fences stripped) is tried first; otherwise every balanced ``{…}`` object in the reply
-    is a candidate — fenced or not, with prose around it, braces inside JSON strings
-    ignored — and the last one that validates as *schema* wins (a model that corrects
-    itself puts the corrected object last). Top-level objects are tried before the objects
-    nested inside them. Returns None if nothing validates so callers can fall back.
+    frame their JSON (a sentence before it, a code fence, a note after it) and may quote
+    other JSON — echoed tool data — around their answer. The candidates, in order:
+
+    1. the whole reply as JSON (one enclosing code fence stripped);
+    2. the LAST fenced ```json block that validates;
+    3. the FIRST top-level ``{…}`` object in the reply that validates (braces inside JSON
+       strings ignored; objects nested in another object are never candidates).
+
+    In steps 2 and 3 a schema with an ``is_explicit_reply(data)`` classmethod (one whose
+    validation fills defaults, e.g. ``ReflexionResult``) only accepts an object that states
+    every gate-relevant key itself, so a stray quoted object is never taken as the answer.
+    Returns None if nothing validates so callers can fall back.
 
     Args:
         text: Raw text returned by the agent (may contain markdown fences and prose).
@@ -40,27 +47,32 @@ def coerce_output[T: BaseModel](text: str, schema: type[T]) -> T | None:
     except ValueError:  # ValidationError subclasses it; anything malformed lands here
         pass
 
-    top_level = list(_balanced_objects(text))
-    for start, end in reversed(top_level):
+    for block in reversed(_JSON_FENCE.findall(text)):
+        parsed = _validate(block, schema)
+        if parsed is not None:
+            return parsed
+    for start, end in _balanced_objects(text):
         parsed = _validate(text[start:end], schema)
         if parsed is not None:
             return parsed
-    for start, end in reversed(top_level):
-        nested = _nested_objects(text, start, end)
-        for inner_start, inner_end in reversed(nested):
-            parsed = _validate(text[inner_start:inner_end], schema)
-            if parsed is not None:
-                return parsed
     return None
 
 
+# A ```json fenced block (any case), inline or on its own lines; group 1 is its content.
+_JSON_FENCE = re.compile(r"```json[ \t]*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
 def _validate[T: BaseModel](candidate: str, schema: type[T]) -> T | None:
-    """*candidate* as *schema* when it is a JSON object that validates, else None."""
+    """*candidate* as *schema* when it is a JSON object that validates (and, for a schema
+    with ``is_explicit_reply``, states its gate-relevant keys itself), else None."""
     try:
         data: object = json.loads(candidate)
     except ValueError:
         return None
     if not isinstance(data, dict):
+        return None
+    explicit = getattr(schema, "is_explicit_reply", None)
+    if callable(explicit) and not explicit(data):
         return None
     try:
         return schema.model_validate(data)
@@ -112,37 +124,6 @@ def _object_end(text: str, start: int, stop: int) -> int | None:
             if depth == 0:
                 return i + 1
     return None
-
-
-def _nested_objects(text: str, start: int, end: int) -> list[tuple[int, int]]:
-    """Every object nested inside the object at ``text[start:end]``, in document order.
-
-    Walks the outer object's JSON, skipping its strings, so only real nested objects count.
-    """
-    found: list[tuple[int, int]] = []
-    in_string = False
-    escaped = False
-    i = start + 1
-    while i < end - 1:
-        char = text[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-        elif char == '"':
-            in_string = True
-        elif char == "{":
-            inner_end = _object_end(text, i, end - 1)
-            if inner_end is not None:
-                found.append((i, inner_end))
-                found.extend(_nested_objects(text, i, inner_end))
-                i = inner_end
-                continue
-        i += 1
-    return found
 
 
 def _strip_fences(text: str) -> str:

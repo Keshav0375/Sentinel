@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
+from sentinel.models.reflexion import ReflexionResult
 from sentinel.providers.output_coercion import _strip_fences, coerce_output
 
 
@@ -121,15 +122,33 @@ def test_coerce_ignores_braces_inside_json_strings() -> None:
     assert result.name == 'uses {curly} and } and " quote'
 
 
-def test_coerce_prefers_the_last_valid_object() -> None:
+def test_coerce_takes_the_first_top_level_object_that_validates() -> None:
+    """Not the last: a quoted object after the answer must never replace it."""
     text = (
-        'First try: {"name": "draft", "value": 1}\n'
-        'Corrected: {"name": "final", "value": 2}\n'
+        'Answer: {"name": "real", "value": 1}\n'
+        'For reference the tool returned {"name": "echoed", "value": 2}\n'
         'Unrelated: {"other": true}'
     )
     result = coerce_output(text, _SimpleModel)
     assert result is not None
-    assert result.name == "final"
+    assert result.name == "real"
+
+
+def test_coerce_takes_the_last_json_fence_before_any_bare_object() -> None:
+    text = (
+        'Draft: {"name": "bare", "value": 0}\n'
+        '```json\n{"name": "first-fence", "value": 1}\n```\n'
+        'Corrected:\n```json\n{"name": "last-fence", "value": 2}\n```'
+    )
+    result = coerce_output(text, _SimpleModel)
+    assert result is not None
+    assert result.name == "last-fence"
+
+
+def test_a_fence_that_does_not_validate_falls_through_to_bare_objects() -> None:
+    text = '```json\n{"other": 1}\n```\nAnswer: {"name": "bare", "value": 3}'
+    result = coerce_output(text, _SimpleModel)
+    assert result is not None and result.name == "bare"
 
 
 def test_coerce_skips_objects_that_do_not_match_the_schema() -> None:
@@ -139,11 +158,9 @@ def test_coerce_skips_objects_that_do_not_match_the_schema() -> None:
     assert result.name == "good"
 
 
-def test_coerce_finds_an_object_nested_in_a_wrapper() -> None:
+def test_coerce_never_takes_an_object_nested_in_another() -> None:
     text = 'Result: {"critique": {"name": "inner", "value": 9}, "note": "{x}"}'
-    result = coerce_output(text, _SimpleModel)
-    assert result is not None
-    assert result.name == "inner"
+    assert coerce_output(text, _SimpleModel) is None
 
 
 def test_coerce_prefers_a_top_level_object_over_its_nested_ones() -> None:
@@ -170,6 +187,69 @@ def test_coerce_parses_a_nested_schema_in_framed_text() -> None:
 
 def test_coerce_returns_none_on_an_unclosed_object() -> None:
     assert coerce_output('Critique:\n{"name": "cut", "value": 1', _SimpleModel) is None
+
+
+# ── Schemas with repair defaults: only an explicit critique counts ────────────
+
+_CRITIQUE_03 = (
+    '{"confidence": 0.3, "supporting_evidence": [], "missing_or_contradictory": ["no logs"], '
+    '"additional_data_needed": [], "specific_deploy_identified": false, "deploy": null, '
+    '"next_tool_call": null}'
+)
+_QUOTED = '{"confidence": 0.95, "deploy": {"commit_sha": "abcdef1", "pr_number": 4}}'
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"Critique:\n{_CRITIQUE_03}\n\nThe tool output said {_QUOTED}, which is stale.",
+        f"```json\n{_CRITIQUE_03}\n```\nAn earlier run claimed {_QUOTED}.",
+        f"The log line was {_QUOTED}.\nMy critique: {_CRITIQUE_03}",
+        f"An earlier critic wrote ```json{_QUOTED}``` but:\n```json\n{_CRITIQUE_03}\n```",
+    ],
+    ids=["bare-then-quote", "fence-then-quote", "quote-then-bare", "quoted-fence-then-fence"],
+)
+def test_a_quoted_confident_object_never_replaces_the_critique(text: str) -> None:
+    """The reviewer's case: a real 0.3 critique and an echoed 0.95 object -> 0.3."""
+    result = coerce_output(text, ReflexionResult)
+    assert result is not None
+    assert result.confidence == 0.3
+    assert result.specific_deploy_identified is False
+
+
+@pytest.mark.parametrize(
+    "embedded",
+    [
+        '{"confidence": 0.95}',
+        '{"confidence": 0.95, "deploy": {"commit_sha": "abcdef1", "pr_number": 4}}',
+        '{"confidence": 0.95, "specific_deploy_identified": true}',
+    ],
+    ids=["confidence-only", "no-flag", "true-without-deploy-key"],
+)
+def test_an_embedded_object_missing_gate_keys_is_not_a_critique(embedded: str) -> None:
+    assert coerce_output(f"Here it is: {embedded}", ReflexionResult) is None
+    assert coerce_output(f"```json\n{embedded}\n```\nNote.", ReflexionResult) is None
+
+
+def test_an_explicit_embedded_critique_is_taken() -> None:
+    critique = (
+        '{"confidence": 0.85, "specific_deploy_identified": true, '
+        '"deploy": {"commit_sha": "a1b2c3d", "pr_number": 42}}'
+    )
+    result = coerce_output(f"Critique:\n{critique}", ReflexionResult)
+    assert result is not None and result.specific_deploy_identified is True
+
+
+def test_an_embedded_true_with_a_null_deploy_parses_as_not_identified() -> None:
+    embedded = '{"confidence": 0.95, "specific_deploy_identified": true, "deploy": null}'
+    result = coerce_output(f"Here it is: {embedded}", ReflexionResult)
+    assert result is not None and result.specific_deploy_identified is False
+
+
+def test_a_whole_reply_needs_no_explicit_keys() -> None:
+    """Step 1 is the model's own whole answer: defaults apply, and they shut the gate."""
+    result = coerce_output('{"confidence": 0.95}', ReflexionResult)
+    assert result is not None and result.specific_deploy_identified is False
 
 
 # ── _strip_fences unit tests ──────────────────────────────────────────────────
