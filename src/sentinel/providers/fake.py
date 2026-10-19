@@ -273,8 +273,9 @@ def reflexion_turn(
     model's reply would be (confidence clamped, a call above 0.7 dropped).
 
     ``inconsistent=True`` sends the JSON a careless model would, which repairs to the same
-    result: ``specific_deploy_identified`` contradicts ``deploy``, the SHA is padded with
-    spaces, an empty list is null, and a confident reply still names a next tool call.
+    result: ``specific_deploy_identified`` is true even with no deploy (the one repair that
+    is allowed: it only shuts the gate), the SHA is padded with spaces, an empty list is
+    null, and a confident reply still names a next tool call.
     """
     result = ReflexionResult(
         confidence=confidence,
@@ -288,7 +289,7 @@ def reflexion_turn(
     if not inconsistent:
         return FakeTurn(output=result, usage=usage)
     reply: dict[str, Any] = result.model_dump(mode="json")
-    reply["specific_deploy_identified"] = deploy is None
+    reply["specific_deploy_identified"] = True
     if deploy is not None:
         reply["deploy"]["commit_sha"] = f" {deploy.commit_sha} "
     for name in ("supporting_evidence", "missing_or_contradictory", "additional_data_needed"):

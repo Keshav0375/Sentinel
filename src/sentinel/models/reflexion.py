@@ -76,11 +76,12 @@ class ReflexionResult(BaseModel):
     """Output of the ``reflexion`` prompt: the critique the orchestrator acts on.
 
     The schema (what the model is asked for) has every field required. Validation is
-    tolerant, so a reply whose confidence and deploy parsed is never discarded over an
-    inconsistency; it is repaired:
+    tolerant, but a repair only ever makes the decision gate stricter, never looser:
 
     - ``confidence`` is clamped to [0.0, 1.0] (NaN → 0.0).
-    - ``specific_deploy_identified`` follows ``deploy``: true exactly when a deploy parsed.
+    - ``specific_deploy_identified`` is the model's own ``true`` AND a deploy that parsed.
+      An explicit (or omitted) false always wins — a deploy never sets it — and true with
+      no deploy is repaired to false.
     - A ``deploy`` or ``next_tool_call`` that does not parse (a blank SHA, a tool that is
       not an analysis tool) is dropped to null; an omitted list is empty.
     - ``next_tool_call`` is kept only below :data:`REFLEXION_CONFIDENCE_THRESHOLD`; it may
@@ -121,7 +122,8 @@ class ReflexionResult(BaseModel):
                 reply[name] = []
         reply["deploy"] = _parsed_or_none(_DEPLOY, reply.get("deploy"))
         reply["next_tool_call"] = _parsed_or_none(_NEXT_CALL, reply.get("next_tool_call"))
-        reply["specific_deploy_identified"] = reply["deploy"] is not None
+        claimed = reply.get("specific_deploy_identified") is True
+        reply["specific_deploy_identified"] = claimed and reply["deploy"] is not None
         return reply
 
     @field_validator("confidence")

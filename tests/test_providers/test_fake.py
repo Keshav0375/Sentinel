@@ -435,6 +435,6 @@ def test_an_inconsistent_reflexion_reply_repairs_to_the_consistent_one(
 ) -> None:
     raw = reflexion_turn(**turn_args, inconsistent=True).output
     assert isinstance(raw, dict)
-    assert raw["specific_deploy_identified"] is (turn_args.get("deploy") is None)  # contradicts
+    assert raw["specific_deploy_identified"] is True  # contradicts a missing deploy
     assert raw["next_tool_call"] is not None
     assert ReflexionResult.model_validate(raw) == reflexion_turn(**turn_args).output

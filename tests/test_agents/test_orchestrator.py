@@ -560,6 +560,27 @@ async def test_high_confidence_without_a_specific_deploy_escalates(
     assert _runs(script, "resolution") == 0
 
 
+async def test_an_explicit_false_with_a_deploy_keeps_the_gate_shut(
+    target_ok: list[TargetDeploy],
+) -> None:
+    """The reviewer's case: a deploy never overrides the critique's own false."""
+    request = _request()
+    critique = {
+        "confidence": 0.9,
+        "specific_deploy_identified": False,
+        "deploy": {"commit_sha": "abcdef1", "pr_number": 4},
+    }
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis())
+        script.on(REFLEXION_AGENT, FakeTurn(output=critique))
+        result = await run_pipeline(request, _deps())
+    assert result.status == "escalated"
+    assert result.escalation is not None
+    assert "one specific deploy" in result.escalation.missing[0]
+    assert _runs(script, "resolution") == 0 and target_ok == []
+
+
 # ── Reverification ────────────────────────────────────────────────────────────
 
 

@@ -14,7 +14,6 @@ from sentinel.models.reflexion import (
     DeployDetailsCall,
     FetchLogsCall,
     ReflexionResult,
-    SuspectDeploy,
 )
 
 
@@ -135,13 +134,39 @@ def test_identified_without_a_deploy_is_repaired_to_not_identified() -> None:
     assert result.confidence == 0.9
 
 
-def test_deploy_without_identification_is_repaired_to_identified() -> None:
+def test_an_explicit_false_wins_over_a_deploy() -> None:
+    """A repair never opens the gate: a deploy does not turn the model's false into true."""
     result = ReflexionResult.model_validate(
-        _sample(confidence=0.85, deploy={"commit_sha": "a1b2c3d", "pr_number": 42})
+        {
+            "confidence": 0.9,
+            "specific_deploy_identified": False,
+            "deploy": {"commit_sha": "abcdef1", "pr_number": 4},
+        }
+    )
+    assert result.specific_deploy_identified is False
+    assert result.confidence == 0.9
+    assert result.deploy is not None and result.deploy.commit_sha == "abcdef1"  # kept, unused
+
+
+@pytest.mark.parametrize("claimed", [None, "true", 1])
+def test_anything_but_an_explicit_true_is_not_identified(claimed: Any) -> None:
+    reply = _sample(confidence=0.9, deploy={"commit_sha": "abcdef1", "pr_number": 4})
+    if claimed is None:
+        del reply["specific_deploy_identified"]
+    else:
+        reply["specific_deploy_identified"] = claimed
+    assert ReflexionResult.model_validate(reply).specific_deploy_identified is False
+
+
+def test_identified_with_a_deploy_stays_identified() -> None:
+    result = ReflexionResult.model_validate(
+        _sample(
+            confidence=0.85,
+            specific_deploy_identified=True,
+            deploy={"commit_sha": "a1b2c3d", "pr_number": 42},
+        )
     )
     assert result.specific_deploy_identified is True
-    assert result.deploy is not None and result.deploy.commit_sha == "a1b2c3d"
-    assert result.confidence == 0.85
 
 
 def test_blank_commit_sha_drops_the_deploy_and_keeps_the_confidence() -> None:
@@ -163,11 +188,11 @@ def test_constructor_repairs_like_validation() -> None:
         supporting_evidence=[],
         missing_or_contradictory=[],
         additional_data_needed=[],
-        specific_deploy_identified=False,
-        deploy=SuspectDeploy(commit_sha="a1b2c3d", pr_number=42),
+        specific_deploy_identified=True,
+        deploy=None,
         next_tool_call=None,
     )
-    assert (result.confidence, result.specific_deploy_identified) == (1.0, True)
+    assert (result.confidence, result.specific_deploy_identified) == (1.0, False)
 
 
 def test_only_confidence_is_needed_to_parse() -> None:
