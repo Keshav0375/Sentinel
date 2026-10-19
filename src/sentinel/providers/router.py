@@ -10,8 +10,11 @@ runs first, and a provider error re-runs the agent once on the other one::
 
 Before a run fails over, each model call is retried (:data:`LLM_RETRY_BACKOFF_S`: three
 attempts, 1s then 2s apart — CONVENTIONS "3 attempts") under a per-call timeout
-(:data:`LLM_CALL_TIMEOUT_S`), and each ``Runner.run`` has an overall bound
-(:data:`AGENT_RUN_TIMEOUT_S`); a run that times out falls back like a provider error.
+(:data:`LLM_CALL_TIMEOUT_S`) — worst case :data:`LLM_CALL_WORST_CASE_S` = 3 x 60s + 1s + 2s
+= 183s per call — and each ``Runner.run`` has an overall bound,
+``settings.sentinel_agent_run_timeout_s`` (default 600s, 240-1800s), always above one call's
+worst case so a run's own retries never trip it; a run that times out falls back like a
+provider error.
 
 The judge is not a role here: it runs on a model NO role uses, primary or fallback, and on
 the non-primary provider (decision 2026-10-18), so an agent never grades itself even after a
@@ -47,16 +50,16 @@ from agents import (
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.items import TResponseStreamEvent
 
-from sentinel.config import Settings
+from sentinel.config import AGENT_RUN_TIMEOUT_MIN_S, Settings
 from sentinel.exceptions import ProviderUnavailableError
 from sentinel.infra.logging import get_logger
 from sentinel.providers.capabilities import ProviderCapabilities, common_capabilities
 from sentinel.providers.fake import FakeModel
 
 __all__ = [
-    "AGENT_RUN_TIMEOUT_S",
     "JUDGE_MODELS",
     "LLM_CALL_TIMEOUT_S",
+    "LLM_CALL_WORST_CASE_S",
     "LLM_RETRY_BACKOFF_S",
     "MODEL_MAP",
     "PROVIDERS",
@@ -140,9 +143,17 @@ _FALLBACK_ERRORS: Final = (openai.APIError, TimeoutError)
 LLM_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0)
 # One model call (one LLM request) — passed to LiteLLM and enforced around the call.
 LLM_CALL_TIMEOUT_S: float = 60.0
-# One agent's whole Runner.run (every model call, retry and tool call of it); past it the
-# run is cancelled and falls back, or fails when it was the fallback.
-AGENT_RUN_TIMEOUT_S: float = 180.0
+# One model call's worst case: every attempt times out, plus the waits between them
+# (3 x 60s + 1s + 2s = 183s). The per-run bound (Settings.sentinel_agent_run_timeout_s,
+# at least AGENT_RUN_TIMEOUT_MIN_S) must exceed it — checked below at import.
+LLM_CALL_WORST_CASE_S: Final = LLM_CALL_TIMEOUT_S * (len(LLM_RETRY_BACKOFF_S) + 1) + sum(
+    LLM_RETRY_BACKOFF_S
+)
+if LLM_CALL_WORST_CASE_S >= AGENT_RUN_TIMEOUT_MIN_S:
+    raise RuntimeError(
+        f"one model call can take {LLM_CALL_WORST_CASE_S:g}s, not below the smallest per-run "
+        f"bound {AGENT_RUN_TIMEOUT_MIN_S:g}s: a run's own retries would trip its timeout"
+    )
 # Seam for the backoff wait (tests record it instead of sleeping).
 _sleep = asyncio.sleep
 
@@ -380,6 +391,11 @@ def _litellm_settings(agent: Agent[Any]) -> ModelSettings:
     )
 
 
+def _run_timeout(settings: Settings) -> float:
+    """The bound on one Runner.run (seam: tests shrink it below the settings minimum)."""
+    return settings.sentinel_agent_run_timeout_s
+
+
 @dataclass(frozen=True)
 class RoutedRun:
     """A finished :func:`call_with_fallback` run and the model that produced it."""
@@ -403,7 +419,8 @@ async def call_with_fallback(
     hierarchy or a timeout, log ``primary_provider_failed`` and re-run with
     ``agent.clone(model=fallback)``. Any other error, or a failure with no fallback
     available, propagates. Each model call is retried first (:class:`RetryingModel`), and
-    each run is bounded by :data:`AGENT_RUN_TIMEOUT_S` — a timed-out primary run falls back.
+    each run is bounded by ``settings.sentinel_agent_run_timeout_s`` — a timed-out primary
+    run falls back.
     Tool calls a cancelled primary run made stay made: the caller's budget counts them.
 
     Args:
@@ -430,10 +447,11 @@ async def call_with_fallback(
     )
     primary, fallback = model_for(role, settings)
     model_settings = _litellm_settings(agent)
+    bound = _run_timeout(settings)
 
     async def run(model: Model) -> RunResult:
         routed = agent.clone(model=RetryingModel(model, role), model_settings=model_settings)
-        return await asyncio.wait_for(Runner.run(routed, input, **kwargs), AGENT_RUN_TIMEOUT_S)
+        return await asyncio.wait_for(Runner.run(routed, input, **kwargs), bound)
 
     try:
         result = await run(primary)

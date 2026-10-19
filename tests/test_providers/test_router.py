@@ -412,7 +412,7 @@ async def test_a_run_past_its_overall_timeout_falls_back(
     monkeypatch: pytest.MonkeyPatch, router_log: MagicMock
 ) -> None:
     """The per-agent bound cancels the whole run (no per-call retry) and fails over."""
-    monkeypatch.setattr(router, "AGENT_RUN_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(router, "_run_timeout", lambda _settings: 0.05)
     with fake_script() as script:
         script.on(
             "triage_agent", FakeTurn(output="too late", delay=30), FakeTurn(output="fallback")
@@ -428,7 +428,7 @@ async def test_a_run_past_its_overall_timeout_falls_back(
 
 
 async def test_a_fallback_that_times_out_too_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(router, "AGENT_RUN_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(router, "_run_timeout", lambda _settings: 0.05)
     with fake_script() as script:
         script.hang_on(HAIKU, seconds=30)
         script.hang_on(GPT4O_MINI, seconds=30)
@@ -468,7 +468,7 @@ async def test_runs_carry_the_litellm_timeout_and_no_client_retries() -> None:
 
 
 def test_retry_policy_is_three_attempts_one_then_two_seconds() -> None:
-    """CONVENTIONS: 3 attempts per LLM call; the per-call and per-agent bounds.
+    """CONVENTIONS: 3 attempts per LLM call, 60s each, 1s then 2s apart.
 
     The backoff is read from the source: the suite zeroes it (tests/conftest.py).
     """
@@ -476,7 +476,45 @@ def test_retry_policy_is_three_attempts_one_then_two_seconds() -> None:
 
     assert "LLM_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0)" in inspect.getsource(router)
     assert router.LLM_CALL_TIMEOUT_S == 60.0
-    assert router.AGENT_RUN_TIMEOUT_S == 180.0
+    assert router.LLM_CALL_WORST_CASE_S == 3 * 60.0 + 1.0 + 2.0
+
+
+def test_the_run_bound_exceeds_one_calls_worst_case() -> None:
+    """A run's own retries never trip its timeout, at the default or the smallest setting."""
+    from sentinel.config import AGENT_RUN_TIMEOUT_MAX_S, AGENT_RUN_TIMEOUT_MIN_S  # noqa: PLC0415
+
+    default = _settings().sentinel_agent_run_timeout_s
+    assert default == 600.0
+    assert router.LLM_CALL_WORST_CASE_S < AGENT_RUN_TIMEOUT_MIN_S <= default
+    assert default <= AGENT_RUN_TIMEOUT_MAX_S
+    assert router._run_timeout(_settings(sentinel_agent_run_timeout_s=900)) == 900  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("seconds", [60, 183, 239, 1801])
+def test_a_run_bound_outside_its_range_is_refused(seconds: float) -> None:
+    with pytest.raises(ValueError, match="sentinel_agent_run_timeout_s"):
+        _settings(sentinel_agent_run_timeout_s=seconds)
+
+
+async def test_the_configured_run_bound_is_the_one_applied() -> None:
+    seen: list[float] = []
+    real = asyncio.wait_for
+
+    async def spy(aw: Any, timeout: float | None) -> Any:
+        seen.append(timeout)  # type: ignore[arg-type]
+        return await real(aw, timeout)
+
+    async def run(agent: Agent[Any], input: Any, **kwargs: Any) -> MagicMock:
+        return MagicMock()
+
+    with (
+        patch("agents.Runner.run", side_effect=run),
+        patch.object(router.asyncio, "wait_for", spy),
+    ):
+        await call_with_fallback(
+            _agent(), "a", role="triage", settings=_settings(sentinel_agent_run_timeout_s=450)
+        )
+    assert seen == [450]
 
 
 # ── Capabilities ──────────────────────────────────────────────────────────────

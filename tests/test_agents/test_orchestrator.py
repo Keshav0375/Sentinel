@@ -944,7 +944,7 @@ async def test_a_timed_out_primary_run_and_its_fallback_both_count_against_the_b
     """A primary run cancelled by the per-agent timeout keeps its tool calls counted."""
     from sentinel.providers import router  # noqa: PLC0415
 
-    monkeypatch.setattr(router, "AGENT_RUN_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(router, "_run_timeout", lambda _settings: 0.2)
     request = _request()
     metadata = _calls("get_service_metadata", 2, {"service_name": SERVICE})
     with fake_script() as script:

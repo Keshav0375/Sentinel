@@ -11,6 +11,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # §4.6: at most 20 tool calls per incident — a hard cap, not a default to raise.
 MAX_TOOL_CALLS_CAP = 20
 
+# One agent's whole Runner.run (providers/router.py call_with_fallback). One model call's
+# worst case is 3 attempts x 60s + the 1s and 2s waits = 183s; a run makes several model
+# calls (a tool-call turn, then the answer; up to the budget's turns). 600s fits three
+# worst-case calls or a long multi-turn tool run. The bounds keep the setting above one
+# call's worst case (router.py checks it at import) and below a runaway.
+AGENT_RUN_TIMEOUT_S = 600.0
+AGENT_RUN_TIMEOUT_MIN_S = 240.0
+AGENT_RUN_TIMEOUT_MAX_S = 1800.0
+
 # Every credential field. All optional: no secret is required to boot, and a feature whose
 # key is missing fails at use (backend.md §8.2; decision 2026-10-14). A blank value counts
 # as missing.
@@ -75,6 +84,10 @@ class Settings(BaseSettings):
     # ceiling, so the setting may lower the cap but never raise it.
     sentinel_max_tool_calls: int = MAX_TOOL_CALLS_CAP
 
+    # The bound on one agent's Runner.run, in seconds (see AGENT_RUN_TIMEOUT_S above); a
+    # primary run past it falls back to the other provider.
+    sentinel_agent_run_timeout_s: float = AGENT_RUN_TIMEOUT_S
+
     # Every role runs on the deterministic, no-network FakeModel (providers/fake.py) in
     # tests/CI (§9.1); no LLM key is read. /ready skips the live-provider check.
     sentinel_fake_llm: bool = False
@@ -105,6 +118,16 @@ class Settings(BaseSettings):
         if v > MAX_TOOL_CALLS_CAP:
             raise ValueError(
                 f"sentinel_max_tool_calls must be <= {MAX_TOOL_CALLS_CAP} (the §4.6 hard cap)"
+            )
+        return v
+
+    @field_validator("sentinel_agent_run_timeout_s")
+    @classmethod
+    def agent_run_timeout_in_range(cls, v: float) -> float:
+        if not AGENT_RUN_TIMEOUT_MIN_S <= v <= AGENT_RUN_TIMEOUT_MAX_S:
+            raise ValueError(
+                f"sentinel_agent_run_timeout_s must be between {AGENT_RUN_TIMEOUT_MIN_S:g} "
+                f"and {AGENT_RUN_TIMEOUT_MAX_S:g} seconds (above one model call's worst case)"
             )
         return v
 
