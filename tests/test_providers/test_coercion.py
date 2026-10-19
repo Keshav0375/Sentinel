@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from pydantic import BaseModel
 
 from sentinel.providers.output_coercion import _strip_fences, coerce_output
@@ -78,6 +79,97 @@ def test_coerce_returns_none_on_missing_required_field() -> None:
 def test_coerce_returns_none_on_wrong_type() -> None:
     result = coerce_output('{"name": 123, "value": "not-an-int"}', _SimpleModel)
     assert result is None
+
+
+# ── Framed replies (real models wrap their JSON) ──────────────────────────────
+
+_OBJ = '{"name": "framed", "value": 5}'
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"Here is my critique:\n```json\n{_OBJ}\n```",
+        f"Here is my critique:\n```json{_OBJ}```",
+        f"```json{_OBJ}```\n\nNote: confidence is limited by the missing logs.",
+        f"```json\n{_OBJ}\n```\n\nNote: {{this}} is prose, not JSON.",
+        f"Critique:\n{_OBJ}",
+        f"Critique:\n{_OBJ}\nThat is all.",
+        f"```\n{_OBJ}\n```",
+        f'I said "hi {{" before.\n{_OBJ}',
+    ],
+    ids=[
+        "prose-then-fence",
+        "prose-then-inline-fence",
+        "inline-fence-then-note",
+        "fence-then-note-with-braces",
+        "prose-then-bare",
+        "bare-between-prose",
+        "plain-fence",
+        "stray-quote-and-brace-in-prose",
+    ],
+)
+def test_coerce_finds_the_object_in_framed_replies(text: str) -> None:
+    result = coerce_output(text, _SimpleModel)
+    assert result == _SimpleModel(name="framed", value=5)
+
+
+def test_coerce_ignores_braces_inside_json_strings() -> None:
+    text = 'Answer:\n{"name": "uses {curly} and } and \\" quote", "value": 1}\nDone.'
+    result = coerce_output(text, _SimpleModel)
+    assert result is not None
+    assert result.name == 'uses {curly} and } and " quote'
+
+
+def test_coerce_prefers_the_last_valid_object() -> None:
+    text = (
+        'First try: {"name": "draft", "value": 1}\n'
+        'Corrected: {"name": "final", "value": 2}\n'
+        'Unrelated: {"other": true}'
+    )
+    result = coerce_output(text, _SimpleModel)
+    assert result is not None
+    assert result.name == "final"
+
+
+def test_coerce_skips_objects_that_do_not_match_the_schema() -> None:
+    text = '{"name": "good", "value": 3}\n\nMetadata: {"tokens": 12}'
+    result = coerce_output(text, _SimpleModel)
+    assert result is not None
+    assert result.name == "good"
+
+
+def test_coerce_finds_an_object_nested_in_a_wrapper() -> None:
+    text = 'Result: {"critique": {"name": "inner", "value": 9}, "note": "{x}"}'
+    result = coerce_output(text, _SimpleModel)
+    assert result is not None
+    assert result.name == "inner"
+
+
+def test_coerce_prefers_a_top_level_object_over_its_nested_ones() -> None:
+    class _Loose(BaseModel):
+        name: str = "default"
+
+    text = '{"name": "outer", "child": {"name": "inner"}}'
+    result = coerce_output(text, _Loose)
+    assert result is not None
+    assert result.name == "outer"
+
+
+def test_coerce_parses_a_nested_schema_in_framed_text() -> None:
+    class _Outer(BaseModel):
+        inner: _SimpleModel
+        tags: list[str]
+
+    text = 'Sure!\n```json\n{"inner": {"name": "n", "value": 4}, "tags": ["a}", "{b"]}\n```'
+    result = coerce_output(text, _Outer)
+    assert result is not None
+    assert result.inner.value == 4
+    assert result.tags == ["a}", "{b"]
+
+
+def test_coerce_returns_none_on_an_unclosed_object() -> None:
+    assert coerce_output('Critique:\n{"name": "cut", "value": 1', _SimpleModel) is None
 
 
 # ── _strip_fences unit tests ──────────────────────────────────────────────────
