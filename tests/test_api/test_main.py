@@ -20,7 +20,7 @@ from sentinel.main import create_app, make_pipeline_fn
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource, IncidentAlert
 from sentinel.models.incident import IncidentStatus
 from sentinel.models.pipeline import PipelineInput, PipelineResult
 from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
@@ -43,9 +43,13 @@ def _make_alert(service: str = "api-gateway") -> AlertPayload:
     )
 
 
+def _make_incident_alert(service: str = "api-gateway") -> IncidentAlert:
+    return IncidentAlert(title="error_rate", severity="critical", service=service)
+
+
 def _populated_stm(incident_id: str = "inc-test0001") -> ShortTermMemory:
     stm = ShortTermMemory()
-    stm.create(incident_id, _make_alert())
+    stm.create(incident_id, _make_incident_alert())
     return stm
 
 

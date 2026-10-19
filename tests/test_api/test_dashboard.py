@@ -143,13 +143,14 @@ class TestDashboardRoute:
         assert "hitl" not in html.lower()
         assert "Approve" not in html
 
-    def test_dashboard_references_webhooks_alert(self) -> None:
+    def test_dashboard_references_webhooks_incident(self) -> None:
         from sentinel.main import create_app
 
         app = create_app()
         with TestClient(app) as client:
             html = client.get("/").text
-        assert "/webhooks/alert" in html
+        assert "/webhooks/incident" in html
+        assert "/webhooks/alert" not in html
 
     def test_dashboard_references_api_scenarios(self) -> None:
         from sentinel.main import create_app

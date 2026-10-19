@@ -7,7 +7,18 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from sentinel.models.alert import AlertAck, AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.alert import (
+    SIGNAL_TYPES,
+    AlertPayload,
+    AlertSeverity,
+    AlertSource,
+    IncidentAlert,
+    IncidentContext,
+    IncidentPayload,
+    IncidentTags,
+    PRDetails,
+    parse_tags,
+)
 
 # ── AlertSource ───────────────────────────────────────────────────────────────
 
@@ -112,22 +123,128 @@ def test_alert_payload_json_round_trip() -> None:
     assert reloaded.metadata == p.metadata
 
 
-# ── AlertAck ──────────────────────────────────────────────────────────────────
+# ── IncidentPayload ───────────────────────────────────────────────────────────
+
+_CID = "3f2b8c1e-4d5a-4b6c-9d7e-8f9a0b1c2d3e"
 
 
-def test_alert_ack_fields() -> None:
-    ack = AlertAck(alert_id="alert-123", incident_id="inc-001")
-    assert ack.alert_id == "alert-123"
-    assert ack.incident_id == "inc-001"
-    assert ack.received_at.tzinfo is not None
+def _incident(**overrides: object) -> IncidentPayload:
+    body: dict[str, object] = {"signal_type": "runtime_error", "correlation_id": _CID, "title": "t"}
+    body.update(overrides)
+    return IncidentPayload.model_validate(body)
 
 
-def test_alert_ack_explicit_received_at() -> None:
-    ts = datetime(2026, 5, 10, 3, 0, 0, tzinfo=UTC)
-    ack = AlertAck(alert_id="a", incident_id="i", received_at=ts)
-    assert ack.received_at == ts
-
-
-def test_alert_ack_missing_incident_id_raises() -> None:
+@pytest.mark.parametrize("field", ["signal_type", "correlation_id", "title"])
+def test_incident_payload_requires_three_fields(field: str) -> None:
+    body: dict[str, object] = {"signal_type": "runtime_error", "correlation_id": _CID, "title": "t"}
+    del body[field]
     with pytest.raises(ValidationError):
-        AlertAck(alert_id="a")  # type: ignore[call-arg]
+        IncidentPayload.model_validate(body)
+
+
+def test_incident_payload_rejects_bad_values() -> None:
+    with pytest.raises(ValidationError):
+        _incident(signal_type="deploy-failure")
+    with pytest.raises(ValidationError, match="not a UUID"):
+        _incident(correlation_id="corr-1")
+    with pytest.raises(ValidationError, match="blank"):
+        _incident(title="   ")
+
+
+def test_incident_payload_defaults_and_ignores_unknown_keys() -> None:
+    p = _incident(surprise=1, context=None, tags=None)
+    assert p.severity == "unknown"
+    assert p.tags == IncidentTags()
+    assert p.context == IncidentContext()
+    assert p.raw_payload is None
+    assert not hasattr(p, "surprise")
+
+
+def test_correlation_id_normalised() -> None:
+    assert _incident(correlation_id=_CID.upper().replace("-", "")).correlation_id == _CID
+
+
+def test_title_is_stripped() -> None:
+    assert _incident(title="  deploy failed ").title == "deploy failed"
+
+
+def test_tags_string_parsed() -> None:
+    tags = _incident(
+        tags="service:sentinel-watchtower, deploy_status:failed,failed_stage:verify,"
+        "version:a:b,env:dev,novalue,empty:,service:last"
+    ).tags
+    assert tags.service == "last"  # the last duplicate wins
+    assert tags.deploy_status == "failed"
+    assert tags.failed_stage == "verify"
+    assert tags.version == "a:b"  # split on the FIRST colon only
+
+
+def test_tags_object_ignores_unknown_keys() -> None:
+    tags = _incident(tags={"service": "svc", "env": "dev"}).tags
+    assert tags.service == "svc"
+    assert not hasattr(tags, "env")
+
+
+@pytest.mark.parametrize("bad", [["service:x"], 3])
+def test_tags_other_types_rejected(bad: object) -> None:
+    with pytest.raises(ValidationError):
+        _incident(tags=bad)
+
+
+def test_parse_tags_leaves_other_types_alone() -> None:
+    assert parse_tags(None) == {}
+    assert parse_tags(["a"]) == ["a"]
+
+
+def test_signal_types() -> None:
+    assert SIGNAL_TYPES == ("deploy_failure", "runtime_error")
+
+
+# ── IncidentAlert ─────────────────────────────────────────────────────────────
+
+
+def test_incident_alert_from_payload_fallbacks() -> None:
+    alert = IncidentAlert.from_payload(_incident())
+    assert alert.alert_id == "unknown"
+    assert alert.service == "unknown"
+    assert alert.severity == "unknown"
+    assert alert.title == "t"
+
+
+def test_incident_alert_from_payload_copies_fields() -> None:
+    ts = datetime(2026, 10, 15, tzinfo=UTC)
+    alert = IncidentAlert.from_payload(
+        _incident(
+            alert_id="a-1",
+            dd_event_id="evt",
+            source="datadog",
+            severity="critical",
+            tags={"service": "svc"},
+            timestamp=ts,
+        )
+    )
+    assert (alert.alert_id, alert.dd_event_id, alert.source) == ("a-1", "evt", "datadog")
+    assert (alert.severity, alert.service, alert.timestamp) == ("critical", "svc", ts)
+    assert alert.tags.service == "svc"
+
+
+def test_pr_sha() -> None:
+    assert IncidentAlert(title="t").pr_sha is None
+    blank = IncidentContext(pr_details=PRDetails(sha="  "))
+    assert IncidentAlert(title="t", context=blank).pr_sha is None
+    padded = IncidentContext(pr_details=PRDetails(sha=" abc1234 "))
+    assert IncidentAlert(title="t", context=padded).pr_sha == "abc1234"
+
+
+def test_from_phase1_maps_fields() -> None:
+    p = _minimal_payload(service="svc", metadata={})
+    alert = IncidentAlert.from_phase1(p)
+    assert alert.alert_id == p.alert_id
+    assert alert.source == "datadog"
+    assert alert.severity == "critical"
+    assert alert.service == "svc"
+    assert alert.tags.service == "svc"
+    assert alert.timestamp == p.timestamp
+    assert alert.title == f"{p.metric} {p.current_value} (threshold {p.threshold}) on svc"
+    titled = IncidentAlert.from_phase1(_minimal_payload(metadata={"title": " Checkout down "}))
+    assert titled.title == "Checkout down"

@@ -1,17 +1,38 @@
-"""Webhook receiver — POST /webhooks/alert."""
+"""Webhook receiver — ``POST /webhooks/incident`` (§3.1).
+
+Accepts an :class:`~sentinel.models.alert.IncidentPayload`, answers ``202`` at once and runs
+the pipeline as one ``asyncio`` task per incident. No auth here: the app mounts the router
+behind ``require_incident_write`` (backend 5.5).
+
+- **Correlation id.** The body's ``correlation_id`` (a UUID) is authoritative. An
+  ``X-Correlation-ID`` header that differs is logged (``correlation_header_mismatch``), never
+  rejected. Every 202 sets the response header to the body's id.
+- **Dedupe (§3.1).** On ``correlation_id``: a 24 h in-memory cache first, then the stored
+  incidents (``EpisodicMemory.find_incident_by_correlation_id``; an unavailable database is
+  logged and treated as a miss). A duplicate answers 202 with the original ``incident_id``
+  and ``status: "duplicate"`` and starts nothing.
+- **One task per incident.** Created in the handler, outside any span (§4.5), with its own
+  entry in the shared short-term memory. The router keeps a strong reference to each task
+  until it finishes. The pipeline persists its own outcome (``run_pipeline``).
+"""
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Annotated, Final, Literal
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, Header, Response
+from pydantic import BaseModel
 
+from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra.logging import get_logger
+from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertAck, AlertPayload
+from sentinel.models.alert import IncidentPayload
 from sentinel.models.pipeline import PipelineInput
 
 logger = get_logger("sentinel.api.webhooks")
@@ -19,77 +40,67 @@ logger = get_logger("sentinel.api.webhooks")
 # Type alias for the async pipeline callback injected at app startup.
 PipelineFn = Callable[[PipelineInput], Awaitable[None]]
 
-_DEDUP_TTL_SECONDS: float = 60.0
+DEDUP_TTL_SECONDS: Final = 24 * 60 * 60.0
+CORRELATION_HEADER: Final = "X-Correlation-ID"
+ACCEPTED_MESSAGE: Final = "Agent pipeline triggered"
+DUPLICATE_MESSAGE: Final = "Duplicate correlation_id: pipeline already triggered"
+
+
+class IncidentAck(BaseModel):
+    """The 202 body: the incident id, the correlation id, and whether it was a duplicate."""
+
+    incident_id: str
+    correlation_id: str
+    status: Literal["accepted", "duplicate"]
+    message: str
 
 
 @dataclass
 class _CacheEntry:
-    """Single entry in the dedup cache."""
+    """Single entry in the dedupe cache."""
 
     incident_id: str
-    recorded_at: float  # time.monotonic() — avoids clock/timezone issues
+    recorded_at: float  # clock() — monotonic seconds, immune to wall-clock changes
 
 
-class AlertDeduplicator:
-    """Idempotency cache for incoming alerts.
+class CorrelationDeduplicator:
+    """In-memory idempotency cache: correlation_id → incident_id, expiring after 24 h.
 
-    Prevents the same alert from spawning multiple parallel pipeline runs when
-    a monitoring system delivers the same alert more than once within a short
-    window (common with PagerDuty and Datadog retry behaviour).
-
-    Cache entries expire after ``TTL_SECONDS`` (default 60). After expiry, the
-    same ``alert_id`` is treated as a fresh alert.
+    The first line of the dedupe; the incidents table (looked up by the router) is the
+    second, so a restart does not forget a stored incident.
     """
 
-    TTL_SECONDS: float = _DEDUP_TTL_SECONDS
+    TTL_SECONDS: float = DEDUP_TTL_SECONDS
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
         self._cache: dict[str, _CacheEntry] = {}
 
-    def check(self, alert_id: str) -> str | None:
-        """Return the stored incident_id if the alert is a duplicate within TTL.
-
-        Evicts the cache entry on the spot if it has expired.
-
-        Args:
-            alert_id: Unique identifier from the incoming ``AlertPayload``.
-
-        Returns:
-            The incident_id assigned on first receipt, or ``None`` if the alert
-            is new or its cache entry has expired.
-        """
-        entry = self._cache.get(alert_id)
+    def check(self, correlation_id: str) -> str | None:
+        """The incident_id recorded for *correlation_id*, or None (evicts an expired entry)."""
+        entry = self._cache.get(correlation_id)
         if entry is None:
             return None
-        if time.monotonic() - entry.recorded_at >= self.TTL_SECONDS:
-            del self._cache[alert_id]
+        if self._clock() - entry.recorded_at >= self.TTL_SECONDS:
+            del self._cache[correlation_id]
             return None
         return entry.incident_id
 
-    def record(self, alert_id: str, incident_id: str) -> None:
-        """Store a new alert_id → incident_id mapping with the current timestamp.
-
-        Args:
-            alert_id: Unique ID from the monitoring system.
-            incident_id: Sentinel incident ID assigned to this alert.
-        """
-        self._cache[alert_id] = _CacheEntry(
-            incident_id=incident_id,
-            recorded_at=time.monotonic(),
+    def record(self, correlation_id: str, incident_id: str) -> None:
+        """Remember *correlation_id* → *incident_id* (expired entries are dropped first)."""
+        self.evict_expired()
+        self._cache[correlation_id] = _CacheEntry(
+            incident_id=incident_id, recorded_at=self._clock()
         )
 
     def evict_expired(self) -> int:
-        """Remove all entries older than ``TTL_SECONDS``.
-
-        Returns:
-            Number of evicted entries.
-        """
-        now = time.monotonic()
+        """Remove every entry older than ``TTL_SECONDS``; returns how many."""
+        now = self._clock()
         expired = [
-            aid for aid, entry in self._cache.items() if now - entry.recorded_at >= self.TTL_SECONDS
+            cid for cid, entry in self._cache.items() if now - entry.recorded_at >= self.TTL_SECONDS
         ]
-        for aid in expired:
-            del self._cache[aid]
+        for cid in expired:
+            del self._cache[cid]
         return len(expired)
 
     @property
@@ -98,75 +109,128 @@ class AlertDeduplicator:
         return len(self._cache)
 
 
-def _new_incident_id() -> str:
-    """Generate a unique incident ID in the same format as ``Incident.id``."""
-    return str(uuid.uuid4())
+def _same_uuid(a: str, b: str) -> bool:
+    """True when both are UUIDs and equal; a non-UUID counts as different."""
+    try:
+        return uuid.UUID(a) == uuid.UUID(b)
+    except ValueError:
+        return False
 
 
-def make_alert_router(
-    deduplicator: AlertDeduplicator,
+async def _await(awaitable: Awaitable[None]) -> None:
+    """Wrap an awaitable as the coroutine ``asyncio.create_task`` takes."""
+    await awaitable
+
+
+def make_incident_router(
     short_term_memory: ShortTermMemory,
+    episodic_memory: EpisodicMemory,
     pipeline_fn: PipelineFn | None = None,
+    *,
+    deduplicator: CorrelationDeduplicator | None = None,
+    tasks: set[asyncio.Task[None]] | None = None,
 ) -> APIRouter:
-    """Create the alert webhook router with deduplication and background pipeline.
+    """Create the incident webhook router.
 
     Args:
-        deduplicator: ``AlertDeduplicator`` for idempotency checks.
-        short_term_memory: ``ShortTermMemory`` to register new incidents.
-        pipeline_fn: Optional async callback ``(PipelineInput) → None`` that runs the
-            orchestrator pipeline in the background. The input's ``signal_type`` and
-            ``correlation_id`` come from the alert's metadata when present
-            (``PipelineInput.from_alert``) until phase 5's webhook body carries them. When
-            ``None``, the endpoint logs a warning and skips the pipeline (useful
-            for testing the API layer in isolation, or before 6.3 is wired).
+        short_term_memory: Shared ``ShortTermMemory``; each new incident gets its entry.
+        episodic_memory: Looked up by correlation_id for the persistent half of the dedupe.
+        pipeline_fn: Async callback ``(PipelineInput) → None`` that runs the orchestrator.
+            When ``None`` the endpoint logs ``pipeline_not_wired`` and starts nothing.
+        deduplicator: The in-memory cache (default: a fresh 24 h one).
+        tasks: Where the running pipeline tasks are kept alive until they finish
+            (default: a fresh set).
 
     Returns:
-        ``APIRouter`` with ``POST /webhooks/alert`` registered.
+        ``APIRouter`` with ``POST /webhooks/incident`` registered.
     """
     router = APIRouter()
+    dedup = deduplicator if deduplicator is not None else CorrelationDeduplicator()
+    running: set[asyncio.Task[None]] = tasks if tasks is not None else set()
 
-    @router.post("/webhooks/alert", status_code=202, response_model=AlertAck)
-    async def receive_alert(  # pyright: ignore[reportUnusedFunction]
-        payload: AlertPayload,
-        background_tasks: BackgroundTasks,
-    ) -> AlertAck:
-        """Accept an alert from a monitoring system.
-
-        Assigns an incident_id, deduplicates within a 60-second window, creates
-        an incident in short-term memory, and queues the orchestrator pipeline
-        as a background task. Returns 202 Accepted immediately.
-        """
-        # ── Deduplication ──────────────────────────────────────────────────────
-        existing_id = deduplicator.check(payload.alert_id)
-        if existing_id is not None:
-            logger.info(
-                "alert_deduplicated",
-                alert_id=payload.alert_id,
-                incident_id=existing_id,
+    async def _stored_original(correlation_id: str) -> str | None:
+        try:
+            return await episodic_memory.find_incident_by_correlation_id(correlation_id)
+        except SentinelMemoryError as exc:
+            logger.warning(
+                "dedupe_lookup_unavailable", correlation_id=correlation_id, error=str(exc)
             )
-            return AlertAck(alert_id=payload.alert_id, incident_id=existing_id)
+            return None
 
-        # ── New alert ──────────────────────────────────────────────────────────
-        incident_id = _new_incident_id()
-        deduplicator.record(payload.alert_id, incident_id)
-        short_term_memory.create(incident_id, payload)
+    def _duplicate(correlation_id: str, incident_id: str, source: str) -> IncidentAck:
+        logger.info(
+            "incident_deduplicated",
+            correlation_id=correlation_id,
+            incident_id=incident_id,
+            source=source,
+        )
+        return IncidentAck(
+            incident_id=incident_id,
+            correlation_id=correlation_id,
+            status="duplicate",
+            message=DUPLICATE_MESSAGE,
+        )
+
+    @router.post("/webhooks/incident", status_code=202, response_model=IncidentAck)
+    async def receive_incident(  # pyright: ignore[reportUnusedFunction]
+        payload: IncidentPayload,
+        response: Response,
+        x_correlation_id: Annotated[str | None, Header()] = None,
+    ) -> IncidentAck:
+        """Accept an incident: dedupe on correlation_id, then start its pipeline task.
+
+        Answers 202 immediately; the pipeline runs as its own task and persists its own
+        outcome.
+        """
+        correlation_id = payload.correlation_id
+        if x_correlation_id is not None and not _same_uuid(x_correlation_id, correlation_id):
+            logger.warning(
+                "correlation_header_mismatch",
+                header=x_correlation_id,
+                correlation_id=correlation_id,
+            )
+        response.headers[CORRELATION_HEADER] = correlation_id
+
+        # ── Deduplication: cache, then the stored incidents, then the cache again ──
+        existing = dedup.check(correlation_id)
+        if existing is not None:
+            return _duplicate(correlation_id, existing, "memory")
+        stored = await _stored_original(correlation_id)
+        if stored is not None:
+            dedup.record(correlation_id, stored)
+            return _duplicate(correlation_id, stored, "db")
+        # The lookup awaited: a concurrent request may have recorded the id meanwhile.
+        existing = dedup.check(correlation_id)
+        if existing is not None:
+            return _duplicate(correlation_id, existing, "memory")
+
+        # ── New incident (no await from the re-check to the record) ────────────
+        incident_id = str(uuid.uuid4())
+        request = PipelineInput.from_payload(incident_id, payload)
+        dedup.record(correlation_id, incident_id)
+        short_term_memory.create(incident_id, request.alert)
 
         logger.info(
-            "alert_received",
-            alert_id=payload.alert_id,
+            "incident_received",
             incident_id=incident_id,
-            service=payload.service,
-            severity=str(payload.severity),
+            correlation_id=correlation_id,
+            signal_type=payload.signal_type,
+            service=request.alert.service,
+            severity=request.alert.severity,
         )
 
         if pipeline_fn is not None:
-            background_tasks.add_task(pipeline_fn, PipelineInput.from_alert(incident_id, payload))
+            task = asyncio.create_task(_await(pipeline_fn(request)), name=f"incident-{incident_id}")
+            running.add(task)
+            task.add_done_callback(running.discard)
         else:
-            logger.warning(
-                "pipeline_not_wired",
-                incident_id=incident_id,
-            )
+            logger.warning("pipeline_not_wired", incident_id=incident_id)
 
-        return AlertAck(alert_id=payload.alert_id, incident_id=incident_id)
+        return IncidentAck(
+            incident_id=incident_id,
+            correlation_id=correlation_id,
+            status="accepted",
+            message=ACCEPTED_MESSAGE,
+        )
 
     return router

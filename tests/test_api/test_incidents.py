@@ -29,7 +29,7 @@ from sentinel.infra.database import create_pool
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.alert import IncidentAlert
 from sentinel.models.incident import TimelineEntry
 
 T0 = datetime(2026, 10, 1, tzinfo=UTC)
@@ -230,15 +230,9 @@ async def _insert_deployment(
     return str(row["id"])
 
 
-def _alert(service: str = "payment-service") -> AlertPayload:
-    return AlertPayload(
-        alert_id="alert-live",
-        source=AlertSource.DATADOG,
-        service=service,
-        metric="error_rate",
-        threshold=0.05,
-        current_value=0.34,
-        severity=AlertSeverity.CRITICAL,
+def _alert(service: str = "payment-service") -> IncidentAlert:
+    return IncidentAlert(
+        alert_id="alert-live", title="db_connection_pool", severity="critical", service=service
     )
 
 

@@ -9,13 +9,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from sentinel.models.alert import AlertPayload
+from sentinel.models.alert import IncidentAlert
 
 
 class Severity(StrEnum):
     """Internal incident severity, assigned by the Triage Agent.
 
-    Distinct from AlertSeverity (the raw value from the monitoring tool).
+    Distinct from the alert's raw severity string (whatever the monitoring tool sent).
     P1 = production down / revenue impacting.
     P2 = major degradation, most users affected.
     P3 = minor degradation, subset of users affected.
@@ -83,7 +83,7 @@ class Incident(BaseModel):
 
     # A UUID string: episodic memory stores it as incidents.id (UUID, §5.3).
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    alert: AlertPayload
+    alert: IncidentAlert
     status: IncidentStatus = IncidentStatus.TRIAGE
     severity: Severity | None = None
     affected_service: str | None = None

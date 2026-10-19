@@ -3,8 +3,9 @@
 ``PipelineInput`` is the phase-4 contract between the webhook and the orchestrator
 (decision 2026-10-15): the incident id, the alert, the §3.1 ``signal_type`` the plan step
 reads, and the correlation id carried from the Event Grid bridge (§2.1). Phase 5 owns the
-real ``POST /webhooks/incident`` body; until then :meth:`PipelineInput.from_alert` derives
-the two new fields from the alert's ``metadata`` (see there).
+real ``POST /webhooks/incident`` body: :meth:`PipelineInput.from_payload` builds the input
+from an ``IncidentPayload`` (§3.1). :meth:`PipelineInput.from_alert` is the Phase-1 adapter
+for the eval runner and scenario scripts.
 
 ``PipelineResult`` is the terminal outcome: ``rollback_proposed`` with the rollback spec
 GitHub Actions turns into a revert PR, or ``escalated`` with the context a human needs.
@@ -17,11 +18,17 @@ term memory and ``GET /incidents/{id}`` with the rest.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Final, Literal, Self, get_args
+from typing import Any, Final, Literal, Self
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
-from sentinel.models.alert import AlertPayload
+from sentinel.models.alert import (
+    SIGNAL_TYPES,
+    AlertPayload,
+    IncidentAlert,
+    IncidentPayload,
+    SignalType,
+)
 from sentinel.models.tools import EscalationContext, RollbackSpec
 
 __all__ = [
@@ -34,9 +41,6 @@ __all__ = [
     "SignalType",
 ]
 
-# §3.1: deploy_failure (case ii, rollback fast path) | runtime_error (case iii, full loop).
-SignalType = Literal["deploy_failure", "runtime_error"]
-SIGNAL_TYPES: Final[tuple[SignalType, ...]] = get_args(SignalType)
 # An alert that does not say which case it is runs the full pipeline.
 DEFAULT_SIGNAL_TYPE: Final[SignalType] = "runtime_error"
 
@@ -57,7 +61,7 @@ class PipelineInput(BaseModel):
     """One incident for the orchestrator to run."""
 
     incident_id: str = Field(description="Incident id: a UUID string (incidents.id, §5.3).")
-    alert: AlertPayload
+    alert: IncidentAlert
     signal_type: SignalType = Field(description="Which §3.1 case the incident is.")
     correlation_id: str = Field(description="The bridge's correlation UUID (§2.1).")
 
@@ -66,11 +70,26 @@ class PipelineInput(BaseModel):
     def _is_uuid(cls, value: str) -> str:
         return _uuid_str(value)
 
+    @property
+    def pinned_sha(self) -> str | None:
+        """The failed deploy's commit (``context.pr_details.sha``) the fast path pins to."""
+        return self.alert.pr_sha
+
+    @classmethod
+    def from_payload(cls, incident_id: str, payload: IncidentPayload) -> PipelineInput:
+        """The input for a ``POST /webhooks/incident`` body (§3.1)."""
+        return cls(
+            incident_id=incident_id,
+            alert=IncidentAlert.from_payload(payload),
+            signal_type=payload.signal_type,
+            correlation_id=payload.correlation_id,
+        )
+
     @classmethod
     def from_alert(cls, incident_id: str, alert: AlertPayload) -> PipelineInput:
-        """The input for *alert*, deriving the two fields today's alert does not carry.
+        """Phase-1 adapter for eval/scenario scripts: the input for a Phase-1 *alert*.
 
-        Until phase 5 lands the ``POST /webhooks/incident`` body (§3.1), the derivation is:
+        The two fields a Phase-1 alert does not carry are derived:
 
         - ``signal_type``: ``alert.metadata["signal_type"]`` when it is ``deploy_failure``
           or ``runtime_error`` (any case), else :data:`DEFAULT_SIGNAL_TYPE` (the full
@@ -81,7 +100,7 @@ class PipelineInput(BaseModel):
         metadata = alert.metadata
         return cls(
             incident_id=incident_id,
-            alert=alert,
+            alert=IncidentAlert.from_phase1(alert),
             signal_type=_signal_type(metadata.get("signal_type")),
             correlation_id=_correlation_id(metadata.get("correlation_id")),
         )

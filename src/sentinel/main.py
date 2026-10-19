@@ -28,7 +28,7 @@ from sentinel.api.health import db_readiness, make_health_router
 from sentinel.api.incidents import make_incidents_router
 from sentinel.api.scenarios import make_scenarios_router
 from sentinel.api.trajectories import make_trajectories_router
-from sentinel.api.webhooks import AlertDeduplicator, PipelineFn, make_alert_router
+from sentinel.api.webhooks import PipelineFn, make_incident_router
 from sentinel.config import Settings, get_settings
 from sentinel.infra.dashboard_emitter import DashboardEventEmitter
 from sentinel.infra.database import close_pool, init_pool_from_settings
@@ -63,7 +63,7 @@ def make_pipeline_fn(
     event_bus: EventBus | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> PipelineFn:
-    """Build the async pipeline callback fired by the webhook for each new alert.
+    """Build the async pipeline callback fired by the webhook for each new incident.
 
     Each incident runs the Python orchestrator (``agents/orchestrator.run_pipeline``),
     which builds its agents per run, so provider credentials are read at use (§4.7), never
@@ -83,7 +83,7 @@ def make_pipeline_fn(
 
     Returns:
         Async callable ``(PipelineInput) → None`` suitable for passing to
-        ``make_alert_router`` as ``pipeline_fn``.
+        ``make_incident_router`` as ``pipeline_fn``.
     """
 
     async def run_incident(request: PipelineInput) -> None:
@@ -137,7 +137,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     3. Seed service map and runbooks (idempotent INSERT OR REPLACE).
     4. Build memory clients (SemanticMemory, EpisodicMemory, ShortTermMemory).
     5. Apply the SDK defaults (chat-completions API, trace export key).
-    6. Wire alert deduplicator and pipeline callback (agents are built per incident).
+    6. Wire the pipeline callback (agents are built per incident).
     7. Mount all API routers.
 
     On exit (or a failed startup) the LangFuse client is shut down (flushing pending
@@ -212,7 +212,6 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
 
     # ── API wiring ────────────────────────────────────────────────────────────
     # Agents are built per-incident inside make_pipeline_fn.
-    deduplicator = AlertDeduplicator()
     pipeline_fn = make_pipeline_fn(
         lambda: settings,
         semantic_memory,
@@ -222,7 +221,7 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
         pool=pool,
     )
 
-    app.include_router(make_alert_router(deduplicator, short_term_memory, pipeline_fn))
+    app.include_router(make_incident_router(short_term_memory, episodic_memory, pipeline_fn))
     app.include_router(make_incidents_router(short_term_memory, episodic_memory))
     app.include_router(make_health_router(db_readiness(pool)))
     app.include_router(make_events_router(event_bus))

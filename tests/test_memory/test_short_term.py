@@ -7,21 +7,14 @@ from datetime import UTC, datetime
 import pytest
 
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.alert import IncidentAlert
 from sentinel.models.incident import IncidentStatus, TimelineEntry
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
-def _make_alert(service: str = "payment-service") -> AlertPayload:
-    return AlertPayload(
-        source=AlertSource.DATADOG,
-        service=service,
-        metric="error_rate",
-        threshold=0.05,
-        current_value=0.34,
-        severity=AlertSeverity.CRITICAL,
-    )
+def _make_alert(service: str = "payment-service") -> IncidentAlert:
+    return IncidentAlert(title="error_rate", severity="critical", service=service)
 
 
 def _make_entry(agent: str = "triage", action: str = "classify") -> TimelineEntry:

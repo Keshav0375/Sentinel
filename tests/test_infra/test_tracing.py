@@ -46,7 +46,7 @@ from sentinel.infra.tracing import (
     trace_incident,
 )
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.alert import IncidentAlert
 
 # ── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -94,14 +94,7 @@ def _handoff_span_data(from_agent: str = "orchestrator", to_agent: str = "triage
 
 def _make_stm(incident_id: str = "inc-test0001") -> ShortTermMemory:
     stm = ShortTermMemory()
-    alert = AlertPayload(
-        source=AlertSource.DATADOG,
-        service="api-gateway",
-        metric="error_rate",
-        threshold=0.05,
-        current_value=0.34,
-        severity=AlertSeverity.CRITICAL,
-    )
+    alert = IncidentAlert(title="error_rate", severity="critical", service="api-gateway")
     stm.create(incident_id, alert)
     return stm
 
@@ -396,14 +389,7 @@ def test_tracer_shutdown_clears_state() -> None:
 def test_tracer_multiple_incidents_isolated(tmp_path: Path) -> None:
     """Events from two concurrent traces must not cross-contaminate."""
     stm = ShortTermMemory()
-    alert = AlertPayload(
-        source=AlertSource.DATADOG,
-        service="svc",
-        metric="m",
-        threshold=0.1,
-        current_value=0.9,
-        severity=AlertSeverity.CRITICAL,
-    )
+    alert = IncidentAlert(title="m", severity="critical", service="svc")
     stm.create("inc-alpha001", alert)
     stm.create("inc-beta0001", alert)
 

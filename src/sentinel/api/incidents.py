@@ -20,7 +20,7 @@ from pydantic import BaseModel, JsonValue
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload
+from sentinel.models.alert import IncidentAlert
 from sentinel.models.incident import TimelineEntry
 from sentinel.models.memory import DeploymentRow, IncidentRow
 
@@ -44,7 +44,7 @@ class IncidentTrajectoryResponse(BaseModel):
 def _in_flight_row(context: dict[str, Any]) -> IncidentRow:
     """An incident only short-term memory holds, as an IncidentRow with status in_progress."""
     incident_id: str = context["incident_id"]
-    alert: AlertPayload = context["alert"]
+    alert: IncidentAlert = context["alert"]
     timeline: list[TimelineEntry] = context["timeline"]
     trajectory: dict[str, JsonValue] = {
         "timeline": {
@@ -58,7 +58,8 @@ def _in_flight_row(context: dict[str, Any]) -> IncidentRow:
     return IncidentRow(
         id=incident_id,
         alert_id=alert.alert_id,
-        severity=str(alert.severity),
+        dd_event_id=alert.dd_event_id,
+        severity=alert.severity,
         service=alert.service,
         status=IN_PROGRESS,
         trajectory=trajectory,

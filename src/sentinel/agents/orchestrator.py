@@ -2,7 +2,7 @@
 
 One call runs one incident and never raises::
 
-    result = await run_pipeline(PipelineInput.from_alert(incident_id, alert), deps)
+    result = await run_pipeline(PipelineInput.from_payload(incident_id, payload), deps)
     result.status        # "rollback_proposed" | "escalated"
 
 Every cap is enforced here, in code (decision 2026-10-15):
@@ -11,7 +11,9 @@ Every cap is enforced here, in code (decision 2026-10-15):
   loop: triage → analysis → reflexion, and below 0.7 confidence analysis runs again with
   the critique's next tool call, at most :data:`REFLEXION_MAX_LOOPS` times.
   ``deploy_failure`` is the fast path: triage → analysis of the failed deploy → one
-  critique, no loop back — still through the same gate and reverification.
+  critique, no loop back — still through the same gate and reverification. When the alert
+  carries ``context.pr_details.sha`` the fast path is pinned to it: the rollback target must
+  be that failed deploy's commit, else the incident escalates (ignored on ``runtime_error``).
 - **Unparsed replies.** A triage, analysis or reflexion reply that does not parse as its
   model is logged (``agent_output_unparsed``: agent, role, model, reply length and SHA-256
   prefix — never the text) and counted in ``PipelineResult.parse_failures``. An unparsed
@@ -32,6 +34,10 @@ Every cap is enforced here, in code (decision 2026-10-15):
   re-runs and parallel calls in one turn included — counts against
   ``settings.sentinel_max_tool_calls``. Past it a call is refused, the run is stopped before
   its next model call, and the incident escalates with the context gathered so far.
+
+A ``rollback_proposed`` incident also backfills the ``deployments`` row the target was
+verified against: after the incident row is stored, its ``incident_id`` is set to this
+incident (``link_deployment``; a failure is logged, never fatal).
 
 Every agent call goes through ``call_with_fallback`` (spans carry no sensitive data). An
 exception anywhere escalates. At the end the incident is stored (``store_incident`` with its
@@ -305,6 +311,8 @@ class _IncidentRun:
         self.started_at = datetime.now(UTC)
         # True when the resolution agent drafted the escalation (format_escalation).
         self.escalation_drafted = False
+        # The deployments row a PASSed rollback draft was verified against (the backfill).
+        self.verified_deploy_id: str | None = None
         self.triage: TriageResult | None = None
         self.analysis: AnalysisResult | None = None
         self.critique: ReflexionResult | None = None
@@ -341,11 +349,14 @@ class _IncidentRun:
 
         fast = self.request.signal_type == "deploy_failure"
         max_loops = 0 if fast else REFLEXION_MAX_LOOPS
+        pin = self.request.pinned_sha if fast else None
         plan = (
             "fast path — the failed deploy, one critique, no loop back"
             if fast
             else f"full loop — up to {max_loops} reflexion loops"
         )
+        if pin is not None:
+            plan += f", pinned to {pin}"
         self._note("plan", f"{self.request.signal_type}: {plan}")
 
         guidance: ReflexionResult | None = None
@@ -397,11 +408,17 @@ class _IncidentRun:
                     f"deploy_failure fast path: the rollback target {check.record.commit_sha} "
                     f"is a {check.record.deploy_status} deploy, not the failed one"
                 )
+            if pin is not None and not _same_commit(check.record.commit_sha, pin):
+                return self._escalate(
+                    f"deploy_failure fast path: the rollback target {check.record.commit_sha} "
+                    f"is not the failed deploy's commit {pin} (context.pr_details.sha)"
+                )
             draft = _pinned(draft, check)
             self._note("target_check", f"deployments row {check.deploy_id}")
 
             verdict = await self._reverify(draft, check)
             if verdict.outcome is ReverificationOutcome.PASS:
+                self.verified_deploy_id = check.deploy_id
                 return draft
             if verdict.outcome is ReverificationOutcome.ESCALATE:
                 return self._escalate(f"reverification escalated: {verdict.reason}")
@@ -739,6 +756,34 @@ async def _store(run: _IncidentRun, result: PipelineResult) -> None:
             incident_id=result.incident_id,
             error_type=type(exc).__name__,
             error=str(exc),
+        )
+        return
+    if result.status == "rollback_proposed" and run.verified_deploy_id is not None:
+        await _link_deployment(run, run.verified_deploy_id)
+
+
+async def _link_deployment(run: _IncidentRun, deploy_id: str) -> None:
+    """Point the verified ``deployments`` row at the stored incident; never raises."""
+    incident_id = run.request.incident_id
+    try:
+        linked = await run.deps.episodic_memory.link_deployment(incident_id, deploy_id)
+    except Exception as exc:
+        logger.warning(
+            "deployment_not_linked",
+            incident_id=incident_id,
+            deploy_id=deploy_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return
+    if linked:
+        logger.info("deployment_linked", incident_id=incident_id, deploy_id=deploy_id)
+    else:
+        logger.warning(
+            "deployment_not_linked",
+            incident_id=incident_id,
+            deploy_id=deploy_id,
+            error="no deployments row with that id",
         )
 
 

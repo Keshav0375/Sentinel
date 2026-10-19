@@ -10,7 +10,8 @@ timeline have no columns of their own and live in ``trajectory`` JSONB as
 :class:`Incident` cannot supply stay NULL/default: the phase-4 pipeline passes an
 :class:`~sentinel.models.memory.IncidentOutcome` for correlation_id, root_cause_confidence,
 resolution_type, reflexion_loops and langfuse_trace_id (and its result, in ``trajectory`` as
-``pipeline_result``); dd_event_id, pr_* and eval_score are written by later phases.
+``pipeline_result``); dd_event_id comes from the alert (the webhook is its source, §2.1);
+pr_* and eval_score are written by later phases.
 ``resolved_at`` is written when the incident has one, since ``mttr_seconds`` is derived
 from it.
 
@@ -18,15 +19,16 @@ Provenance: ``root_cause`` and ``resolution`` are agent output, not verified fac
 stored ``provenance`` records ``root_cause_by`` / ``resolution_by`` (the agent named by the
 pipeline's outcome, else ``"unknown"``), ``model_generated: true`` and ``stored_at``; it
 reads back inside ``EpisodicRecord.raw_timeline["provenance"]``. The embedded symptom text
-holds only what was observed (the alert: service, metric, value, threshold, severity, and a
-title/description when the alert metadata carries one) — never an agent's hypothesis or
+holds only what was observed (the alert: service, title, severity, and the deploy_status /
+failed_stage tags when it carries them) — never an agent's hypothesis or
 root cause, so recall is not keyed on earlier model output.
 
 Read API for ``GET /incidents*`` (§3.2): :meth:`get_incident_row` /
 :meth:`list_incident_rows` return the full §5.3 row (:class:`IncidentRow`, no embedding),
 :meth:`stored_incident_ids` says which ids have a row, and :meth:`get_linked_deployment`
-reads the ``deployments`` row whose ``incident_id`` is the incident (written by the
-pipeline, never here).
+reads the ``deployments`` row whose ``incident_id`` is the incident (written by
+:meth:`link_deployment`, the pipeline's backfill). :meth:`find_incident_by_correlation_id`
+backs the webhook's correlation_id dedupe.
 
 With no pool (no ``DATABASE_URL``) every method raises
 :class:`~sentinel.exceptions.SentinelMemoryError` — there are no silent empty results.
@@ -130,7 +132,7 @@ class EpisodicMemory:
         symptoms = _build_symptom_text(incident)
         embedding = await self._embeddings.embed(symptoms)
 
-        severity = incident.severity.value if incident.severity else incident.alert.severity.value
+        severity = incident.severity.value if incident.severity else incident.alert.severity
         service = incident.affected_service or incident.alert.service
 
         mttr_seconds: int | None = None
@@ -162,20 +164,23 @@ class EpisodicMemory:
         if outcome is not None:
             trajectory["pipeline_result"] = outcome.pipeline_result
         outcome_columns, outcome_values = _outcome_columns(outcome)
-        # $13… are the outcome's columns, in _OUTCOME_COLUMNS order (none without one).
+        # $14… are the outcome's columns, in _OUTCOME_COLUMNS order (none without one).
         extra_names = "".join(f", {name}" for name in outcome_columns)
-        extra_params = "".join(f", ${13 + i}" for i in range(len(outcome_columns)))
+        extra_params = "".join(f", ${14 + i}" for i in range(len(outcome_columns)))
         extra_updates = "".join(f",\n{name} = EXCLUDED.{name}" for name in outcome_columns)
 
         async with database.acquire(pool) as conn:
             await conn.execute(
                 f"""
                 INSERT INTO incidents
-                    (id, alert_id, severity, service, status, root_cause, resolution,
-                     trajectory, created_at, resolved_at, mttr_seconds, embedding{extra_names})
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12{extra_params})
+                    (id, alert_id, dd_event_id, severity, service, status, root_cause,
+                     resolution, trajectory, created_at, resolved_at, mttr_seconds,
+                     embedding{extra_names})
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12,
+                        $13{extra_params})
                 ON CONFLICT (id) DO UPDATE SET
                     alert_id = EXCLUDED.alert_id,
+                    dd_event_id = EXCLUDED.dd_event_id,
                     severity = EXCLUDED.severity,
                     service = EXCLUDED.service,
                     status = EXCLUDED.status,
@@ -194,6 +199,7 @@ class EpisodicMemory:
                 """,
                 incident_uuid,
                 incident.alert.alert_id,
+                incident.alert.dd_event_id,
                 severity,
                 service,
                 incident.status.value,
@@ -401,6 +407,49 @@ class EpisodicMemory:
             )
         return None if row is None else _row_to_deployment(row)
 
+    async def find_incident_by_correlation_id(self, correlation_id: str) -> str | None:
+        """The id of the oldest stored incident with *correlation_id*, or None.
+
+        None as well when *correlation_id* is not a UUID (the column is UUID-typed).
+
+        Raises:
+            SentinelMemoryError: no database, or the query failed.
+        """
+        pool = self._require_pool()
+        correlation_uuid = _as_uuid(correlation_id)
+        if correlation_uuid is None:
+            return None
+        async with database.acquire(pool) as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM incidents WHERE correlation_id = $1 "
+                "ORDER BY created_at ASC NULLS LAST, id LIMIT 1",
+                correlation_uuid,
+            )
+        return None if row is None else str(row["id"])
+
+    async def link_deployment(self, incident_id: str, deploy_id: str) -> bool:
+        """Set ``deployments.incident_id`` on the row *deploy_id*; False when no such row.
+
+        Overwrites any previous link. The incident row must already exist (FK).
+
+        Raises:
+            SentinelMemoryError: no database, an id is not a UUID, or the write failed.
+        """
+        pool = self._require_pool()
+        incident_uuid = _as_uuid(incident_id)
+        if incident_uuid is None:
+            raise SentinelMemoryError(f"{incident_id!r} is not a UUID")
+        deploy_uuid = _as_uuid(deploy_id)
+        if deploy_uuid is None:
+            raise SentinelMemoryError(f"{deploy_id!r} is not a UUID")
+        async with database.acquire(pool) as conn:
+            status = await conn.execute(
+                "UPDATE deployments SET incident_id = $1 WHERE id = $2",
+                incident_uuid,
+                deploy_uuid,
+            )
+        return status.split()[-1] != "0"
+
     # ── MemoryStore protocol ──────────────────────────────────────────────────
 
     async def store(self, record: Any) -> None:
@@ -509,20 +558,16 @@ def _as_vector(value: Any) -> list[float] | None:
 def _build_symptom_text(incident: Incident) -> str:
     """The text embedded for similarity search: only what the alert observed.
 
-    Service, metric, current value vs threshold, severity, and the alert's title /
-    description when its metadata carries them. Agent output (triage's affected service,
-    the analysis hypothesis, any root cause) is deliberately left out.
+    Service, title, severity, and the deploy_status / failed_stage tags when present.
+    Agent output (triage's affected service, the analysis hypothesis, any root cause) is
+    deliberately left out.
     """
     alert = incident.alert
-    parts: list[str] = [
-        f"Service {alert.service} {alert.metric}",
-        f"current {alert.current_value} threshold {alert.threshold}",
-        f"severity {alert.severity}",
-    ]
-    for key in ("title", "description"):
-        value = alert.metadata.get(key)
-        if isinstance(value, str) and value.strip():
-            parts.append(value.strip())
+    parts: list[str] = [f"Service {alert.service} {alert.title}", f"severity {alert.severity}"]
+    for key in ("deploy_status", "failed_stage"):
+        value = getattr(alert.tags, key)
+        if value:
+            parts.append(f"{key} {value}")
     return " ".join(parts)
 
 
