@@ -203,9 +203,10 @@ async def test_pipeline_fn_marks_rollback_proposed_and_stores_the_result() -> No
 
 
 @pytest.mark.asyncio
-async def test_get_incident_returns_the_9_3_outputs_of_the_stored_result() -> None:
-    """target_deploy, target_sha and evidence_summary are stored with the result and
-    returned by GET /incidents/{id} (the §9.3 job reads them)."""
+async def test_get_incident_returns_the_9_3_outputs_of_an_unstored_result() -> None:
+    """target_deploy, target_sha and evidence_summary of an incident not yet stored are
+    returned by GET /incidents/{id} under trajectory.pipeline_result, where the §9.3 job
+    reads them (stored rows keep them there too)."""
     from fastapi.testclient import TestClient  # noqa: PLC0415
 
     from sentinel.api.incidents import make_incidents_router  # noqa: PLC0415
@@ -213,14 +214,19 @@ async def test_get_incident_returns_the_9_3_outputs_of_the_stored_result() -> No
     stm = _populated_stm(_INCIDENT)
     with patch(_RUN_PATCH, new_callable=AsyncMock, return_value=_result()):
         await _make_fn(stm)(_request())
+    episodic = MagicMock(spec=EpisodicMemory)
+    episodic.get_incident_row = AsyncMock(return_value=None)
     app = FastAPI()
-    app.include_router(make_incidents_router(stm))
+    app.include_router(make_incidents_router(stm, episodic))
     with TestClient(app) as client:
         body = client.get(f"/incidents/{_INCIDENT}").json()
 
-    assert body["result"]["target_deploy"] == "a1b2c3d"
-    assert body["result"]["target_sha"] == "a1b2c3d"
-    assert body["result"]["evidence_summary"] == "checks fail since pr-42"
+    assert body["status"] == "in_progress"
+    pipeline_result = body["trajectory"]["pipeline_result"]
+    assert pipeline_result["target_deploy"] == "a1b2c3d"
+    assert pipeline_result["target_sha"] == "a1b2c3d"
+    assert pipeline_result["evidence_summary"] == "checks fail since pr-42"
+    assert pipeline_result["resolution_type"] == "rollback"
 
 
 @pytest.mark.asyncio

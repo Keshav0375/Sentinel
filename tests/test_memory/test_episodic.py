@@ -33,7 +33,12 @@ from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
 from sentinel.models.incident import Incident, IncidentStatus, Severity, TimelineEntry
-from sentinel.models.memory import EpisodicRecord, IncidentOutcome, MemoryQueryResult
+from sentinel.models.memory import (
+    EpisodicRecord,
+    IncidentOutcome,
+    IncidentRow,
+    MemoryQueryResult,
+)
 from sentinel.models.tools import IncidentSearchInput, SimilarIncident, ToolFailure
 from sentinel.tools.incident_search import _search_past_incidents
 
@@ -216,6 +221,10 @@ def _calls() -> dict[str, Callable[[EpisodicMemory], Any]]:
         "get_incident": lambda m: m.get_incident(some_id),
         "get": lambda m: m.get(some_id),
         "list_incidents": lambda m: m.list_incidents(),
+        "get_incident_row": lambda m: m.get_incident_row(some_id),
+        "list_incident_rows": lambda m: m.list_incident_rows(),
+        "stored_incident_ids": lambda m: m.stored_incident_ids([]),  # empty: still raises
+        "get_linked_deployment": lambda m: m.get_linked_deployment(some_id),
         "delete": lambda m: m.delete(some_id),
     }
 
@@ -784,3 +793,103 @@ async def test_a_store_without_an_outcome_leaves_the_outcome_columns(
     assert row["resolution_type"] == "escalated" and row["reflexion_loops"] == 1
     assert row["correlation_id"] is None
     assert "pipeline_result" not in json.loads(row["trajectory"])
+
+
+# ── Read API for GET /incidents* ──────────────────────────────────────────────
+
+
+async def test_get_incident_row_returns_the_full_row(mem: EpisodicMemory) -> None:
+    inc = _make_incident("payment-service", "db_connection_pool", status=IncidentStatus.ESCALATED)
+    outcome = IncidentOutcome(
+        correlation_id=str(uuid.uuid4()),
+        root_cause="rc",
+        root_cause_by="analysis",
+        root_cause_confidence=0.8,
+        resolution="r",
+        resolution_by="resolution",
+        resolution_type="rollback",
+        reflexion_loops=1,
+        langfuse_trace_id="a" * 32,
+        pipeline_result={"status": "rollback_proposed"},
+    )
+    await mem.store_incident(inc, outcome=outcome)
+
+    row = await mem.get_incident_row(inc.id)
+
+    assert row is not None
+    assert row.id == inc.id and row.service == "payment-service"
+    assert row.status == inc.status.value
+    assert row.correlation_id == outcome.correlation_id
+    assert row.root_cause == "rc" and row.resolution_type == "rollback"
+    assert row.root_cause_confidence == pytest.approx(0.8)
+    assert row.reflexion_loops == 1 and row.langfuse_trace_id == "a" * 32
+    assert isinstance(row.trajectory, dict)
+    assert row.trajectory["pipeline_result"] == {"status": "rollback_proposed"}
+    assert row.eval_score is None and row.pr_number is None
+    assert "embedding" not in IncidentRow.model_fields
+    assert await mem.get_incident_row("not-a-uuid") is None
+    assert await mem.get_incident_row(str(uuid.uuid4())) is None
+
+
+async def test_list_incident_rows_filters_and_orders_like_list_incidents(
+    mem: EpisodicMemory,
+) -> None:
+    older = _make_incident("payment-service", "cpu", status=IncidentStatus.RESOLVED)
+    older.created_at = datetime(2026, 10, 1, tzinfo=UTC)
+    newer = _make_incident("api-gateway", "error_rate", status=IncidentStatus.ESCALATED)
+    newer.created_at = datetime(2026, 10, 2, tzinfo=UTC)
+    await mem.store_incident(older)
+    await mem.store_incident(newer)
+
+    assert [r.id for r in await mem.list_incident_rows()] == [newer.id, older.id]
+    only = await mem.list_incident_rows(status="escalated")
+    assert [r.id for r in only] == [newer.id]
+    assert [r.id for r in await mem.list_incident_rows(service="payment-service")] == [older.id]
+    assert len(await mem.list_incident_rows(limit=1)) == 1
+    with pytest.raises(ValueError, match="limit"):
+        await mem.list_incident_rows(limit=0)
+
+
+async def test_stored_incident_ids_returns_the_given_ids_with_a_row(mem: EpisodicMemory) -> None:
+    inc = _make_incident("payment-service", "db_connection_pool")
+    await mem.store_incident(inc)
+
+    given = inc.id.upper()
+    found = await mem.stored_incident_ids([given, str(uuid.uuid4()), "not-a-uuid"])
+
+    assert found == {given}
+    assert await mem.stored_incident_ids([]) == set()
+
+
+async def test_get_linked_deployment_returns_the_newest_linked_row(
+    mem: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    inc = _make_incident("payment-service", "db_connection_pool")
+    bare = _make_incident("api-gateway", "error_rate")
+    await mem.store_incident(inc)
+    await mem.store_incident(bare)
+    t0 = datetime(2026, 10, 1, tzinfo=UTC)
+
+    async def deploy(sha: str, incident_id: str | None, deployed_at: datetime) -> None:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO deployments (service, commit_sha, deploy_status, incident_id,"
+                " deployed_at, files_changed, metadata) VALUES"
+                " ('payment-service', $1, 'failed', $2, $3, '[\"a.py\"]'::jsonb,"
+                " '{\"k\": 1}'::jsonb)",
+                sha,
+                None if incident_id is None else uuid.UUID(incident_id),
+                deployed_at,
+            )
+
+    await deploy("old0000", inc.id, t0)
+    await deploy("new1111", inc.id, t0 + timedelta(hours=1))
+    await deploy("free222", None, t0 + timedelta(hours=2))
+
+    linked = await mem.get_linked_deployment(inc.id)
+
+    assert linked is not None
+    assert linked.commit_sha == "new1111" and linked.incident_id == inc.id
+    assert linked.files_changed == ["a.py"] and linked.metadata == {"k": 1}
+    assert await mem.get_linked_deployment(bare.id) is None
+    assert await mem.get_linked_deployment("not-a-uuid") is None

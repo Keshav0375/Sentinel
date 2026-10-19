@@ -1,11 +1,12 @@
-"""Memory models — EpisodicRecord, IncidentOutcome, Runbook, SemanticRecord, MemoryQueryResult."""
+"""Memory models — EpisodicRecord, IncidentOutcome, IncidentRow, DeploymentRow, Runbook,
+SemanticRecord, MemoryQueryResult."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
 from sentinel.models.service import ServiceMetadata
 
@@ -90,3 +91,50 @@ class IncidentOutcome(BaseModel):
     reflexion_loops: int = Field(ge=0)
     langfuse_trace_id: str = Field(description="The incident UUID as 32 hex (§4.5).")
     pipeline_result: dict[str, Any] = Field(description="PipelineResult, as JSON.")
+
+
+class IncidentRow(BaseModel):
+    """One ``incidents`` row (§5.3) as stored: every column except ``embedding``.
+
+    What ``GET /incidents*`` returns (decision 2026-10-19). An incident still in flight
+    (short-term memory only) has the same shape with ``status: "in_progress"``.
+    UUID columns are strings; JSONB columns are their decoded JSON.
+    """
+
+    id: str
+    alert_id: str
+    dd_event_id: str | None = None
+    correlation_id: str | None = None
+    severity: str
+    service: str
+    status: str
+    root_cause: str | None = None
+    root_cause_confidence: float | None = None
+    resolution: str | None = None
+    resolution_type: str | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    trajectory: JsonValue = None
+    eval_score: JsonValue = None
+    langfuse_trace_id: str | None = None
+    reflexion_loops: int | None = None
+    created_at: datetime | None = None
+    resolved_at: datetime | None = None
+    mttr_seconds: int | None = None
+
+
+class DeploymentRow(BaseModel):
+    """One ``deployments`` row (§5.3), every column. UUIDs as strings, JSONB decoded."""
+
+    id: str
+    service: str
+    pr_number: int | None = None
+    commit_sha: str
+    author: str | None = None
+    deploy_status: str
+    gha_run_id: int | None = None
+    dd_deploy_event_id: str | None = None
+    files_changed: JsonValue = None
+    incident_id: str | None = None
+    deployed_at: datetime | None = None
+    metadata: JsonValue = None

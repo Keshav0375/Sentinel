@@ -223,7 +223,7 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
     )
 
     app.include_router(make_alert_router(deduplicator, short_term_memory, pipeline_fn))
-    app.include_router(make_incidents_router(short_term_memory))
+    app.include_router(make_incidents_router(short_term_memory, episodic_memory))
     app.include_router(make_health_router(short_term_memory))
     app.include_router(make_events_router(event_bus))
     app.include_router(make_scenarios_router())
