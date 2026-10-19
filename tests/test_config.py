@@ -155,6 +155,7 @@ def test_sample_env_loads(no_settings_env: None) -> None:
     assert s.sentinel_primary_provider == "anthropic"
     for field in ("dd_api_key", "dd_app_key", "github_api_token"):
         assert getattr(s, field) is None, field
+    assert s.sentinel_api_tenant_id is None and s.sentinel_api_audience is None
 
 
 def test_sample_env_has_no_api_token() -> None:
@@ -192,6 +193,34 @@ def test_blank_secret_counts_as_unset(
     for field in _SECRET_FIELDS:
         assert getattr(s, field) is None, field
     assert s.langfuse_base_url is None
+
+
+def test_api_auth_settings_default_none(no_settings_env: None) -> None:
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_api_tenant_id is None
+    assert s.sentinel_api_audience is None
+
+
+def test_api_auth_settings_read_env(no_settings_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTINEL_API_TENANT_ID", "11111111-2222-3333-4444-555555555555")
+    monkeypatch.setenv("SENTINEL_API_AUDIENCE", "api://x/sentinel-backend-d1-dev")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_api_tenant_id == "11111111-2222-3333-4444-555555555555"
+    assert s.sentinel_api_audience == "api://x/sentinel-backend-d1-dev"
+    # Public identifiers, not secrets: plain str.
+    assert type(s.sentinel_api_tenant_id) is str
+    assert type(s.sentinel_api_audience) is str
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_api_auth_blank_counts_as_unset(
+    blank: str, no_settings_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SENTINEL_API_TENANT_ID", blank)
+    monkeypatch.setenv("SENTINEL_API_AUDIENCE", blank)
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_api_tenant_id is None
+    assert s.sentinel_api_audience is None
 
 
 def test_secrets_are_secretstr_and_masked() -> None:

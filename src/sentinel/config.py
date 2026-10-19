@@ -109,6 +109,16 @@ class Settings(BaseSettings):
     # Read-only fine-grained PAT on Keshav0375/Sentinel-deployment ("Pull requests: read" only).
     github_api_token: SecretStr | None = None
 
+    # ── Inbound auth: Entra bearer (§3.6; decision 2026-10-19) ───────────────
+    # Public identifiers, not secrets (ConfigMap / GitHub variables). Both unset → every
+    # protected route returns 401 and startup logs auth_not_configured; boot still works.
+    # The IDENTITY tenant (R4) holding the backend app registration — NOT AZURE_TENANT_ID,
+    # which stays the workload-identity/resource tenant read by azure-identity.
+    sentinel_api_tenant_id: str | None = None
+    # The app registration's identifier URI, infra's naming:
+    # api://<identity_tenant_id>/sentinel-backend-<deployment>-<env>
+    sentinel_api_audience: str | None = None
+
     # ── Validators ────────────────────────────────────────────────────────────
     @field_validator("sentinel_max_tool_calls")
     @classmethod
@@ -141,7 +151,13 @@ class Settings(BaseSettings):
             raise ValueError("sentinel_db_pool_min must be <= sentinel_db_pool_max")
         return self
 
-    @field_validator(*_SECRET_FIELDS, "langfuse_base_url", mode="before")
+    @field_validator(
+        *_SECRET_FIELDS,
+        "langfuse_base_url",
+        "sentinel_api_tenant_id",
+        "sentinel_api_audience",
+        mode="before",
+    )
     @classmethod
     def blank_is_unset(cls, v: object) -> object:
         """A blank or whitespace-only value counts as missing (None)."""
