@@ -26,16 +26,20 @@ from sentinel.models.reverification import (
 from sentinel.models.tools import EscalationContext, LogFetchInput
 from sentinel.providers import fake as fake_module
 from sentinel.providers.fake import (
+    FRAMINGS,
     REFLEXION_AGENT,
     REVERIFICATION_AGENT,
     FakeModel,
     FakeScriptError,
     FakeToolCall,
     FakeTurn,
+    Framing,
     fake_script,
+    frame,
     reflexion_turn,
     reverification_turn,
 )
+from sentinel.providers.output_coercion import coerce_output
 from sentinel.providers.router import ROLES, call_with_fallback, model_for, model_name
 
 HAIKU = "anthropic/claude-haiku-4-5"
@@ -360,3 +364,76 @@ async def test_unscripted_reverification_escalates() -> None:
         result = await Runner.run(_reverification_agent(), "x", run_config=NO_TRACING)
     verdict = parse_reverification(result.final_output)
     assert verdict.outcome is ReverificationOutcome.ESCALATE and verdict.parsed
+
+
+# ── Realistic framing and inconsistent replies ────────────────────────────────
+
+
+def _plain_reflexion_agent() -> Agent[Any]:
+    """The reflexion agent as it runs live: no structured outputs, JSON as text."""
+    return Agent(name=REFLEXION_AGENT, instructions="critique", model=FakeModel(HAIKU))
+
+
+@pytest.mark.parametrize("framing", FRAMINGS)
+async def test_every_framing_wraps_json_and_still_coerces(framing: Framing) -> None:
+    deploy = SuspectDeploy(commit_sha="a1b2c3d", pr_number=42)
+    expected = reflexion_turn(0.85, deploy=deploy).output
+    with fake_script() as script:
+        script.frame_outputs(framing)
+        script.on(REFLEXION_AGENT, reflexion_turn(0.85, deploy=deploy))
+        result = await Runner.run(_plain_reflexion_agent(), "x", run_config=NO_TRACING)
+
+    text = result.final_output
+    assert isinstance(text, str)
+    assert (text == expected.model_dump_json()) is (framing == "bare")  # type: ignore[union-attr]
+    assert coerce_output(text, ReflexionResult) == expected
+
+
+def test_frame_shapes() -> None:
+    assert frame("{}", "fence") == "```json\n{}\n```"
+    assert frame("{}", "prose_fence").startswith("Here is my answer:\n```json")
+    assert frame("{}", "fence_note").startswith("```json{}```\n\nNote:")
+    assert frame("{}", "prose_bare") == "Result:\n{}\nLet me know if you need more."
+    assert frame("{}", "bare") == "{}"
+
+
+async def test_a_turn_framing_overrides_the_script_and_text_is_never_framed() -> None:
+    with fake_script() as script:
+        script.frame_outputs("fence")
+        script.on(
+            REFLEXION_AGENT,
+            FakeTurn(output={"confidence": 0.9}, framing="prose_bare"),
+            FakeTurn(output="plain words"),
+        )
+        first = await Runner.run(_plain_reflexion_agent(), "x", run_config=NO_TRACING)
+        second = await Runner.run(_plain_reflexion_agent(), "x", run_config=NO_TRACING)
+    assert first.final_output == 'Result:\n{"confidence": 0.9}\nLet me know if you need more.'
+    assert second.final_output == "plain words"
+
+
+async def test_structured_outputs_are_never_framed() -> None:
+    """With an output_type the SDK parses the JSON itself: a framing would break it."""
+    with fake_script() as script:
+        script.frame_outputs("prose_fence")
+        script.on(REFLEXION_AGENT, reflexion_turn(0.4))
+        result = await Runner.run(_reflexion_agent(), "x", run_config=NO_TRACING)
+    assert isinstance(result.final_output, ReflexionResult)
+
+
+@pytest.mark.parametrize(
+    "turn_args",
+    [
+        {"confidence": 0.85, "deploy": SuspectDeploy(commit_sha="a1b2c3d", pr_number=42)},
+        {"confidence": 0.9},
+        {"confidence": 0.4, "next_tool_call": _LOGS_CALL, "supporting_evidence": ["x"]},
+    ],
+    ids=["confident-deploy", "confident-no-deploy", "low"],
+)
+def test_an_inconsistent_reflexion_reply_repairs_to_the_consistent_one(
+    turn_args: dict[str, Any],
+) -> None:
+    raw = reflexion_turn(**turn_args, inconsistent=True).output
+    assert isinstance(raw, dict)
+    assert raw["specific_deploy_identified"] is (turn_args.get("deploy") is None)  # contradicts
+    assert raw["next_tool_call"] is not None
+    assert ReflexionResult.model_validate(raw) == reflexion_turn(**turn_args).output

@@ -35,6 +35,14 @@ agent names (decision 2026-10-15)::
     script.on(REVERIFICATION_AGENT, reverification_turn("FAIL", "wrong target"),
               reverification_turn("PASS"))
 
+Real models frame their JSON — a sentence before it, a code fence, a note after it — and
+get the bookkeeping fields slightly wrong. A *framing* wraps every JSON output of agents
+without structured outputs, script-wide or per turn, and ``inconsistent=True`` makes a
+reflexion reply contradict itself the way models do (the contract repairs it)::
+
+    script.frame_outputs("prose_fence")          # "Here is my analysis:\n```json\n{..}\n```"
+    script.on(REFLEXION_AGENT, reflexion_turn(0.85, deploy=..., inconsistent=True))
+
 Unscripted, they answer with the cautious outcome: reflexion with confidence 0.0 and a
 ``fetch_logs`` next call, reverification with an ``ESCALATE``.
 
@@ -52,7 +60,7 @@ from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequenc
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Literal, cast, get_args
 
 from agents import (
     AgentOutputSchemaBase,
@@ -86,6 +94,7 @@ from sentinel.models.reverification import ReverificationOutcome
 from sentinel.models.tools import LogFetchInput, RollbackSpec
 
 __all__ = [
+    "FRAMINGS",
     "PR_CONTENT_AGENT",
     "REFLEXION_AGENT",
     "REVERIFICATION_AGENT",
@@ -94,8 +103,10 @@ __all__ = [
     "FakeScriptError",
     "FakeToolCall",
     "FakeTurn",
+    "Framing",
     "active_script",
     "fake_script",
+    "frame",
     "pr_content_turn",
     "reflexion_turn",
     "reverification_turn",
@@ -109,6 +120,25 @@ REFLEXION_AGENT = "reflexion"
 REVERIFICATION_AGENT = "reverification"
 # Agent name of the revert-PR writer (backend §3.4).
 PR_CONTENT_AGENT = "pr_content_generator"
+
+
+# How a model wraps its JSON reply: bare (as-is), a fenced block, prose then a fence, an
+# inline fence then a trailing note, prose then the bare object.
+Framing = Literal["bare", "fence", "prose_fence", "fence_note", "prose_bare"]
+FRAMINGS: tuple[Framing, ...] = get_args(Framing)
+
+
+def frame(text: str, framing: Framing) -> str:
+    """*text* (a JSON reply) wrapped the way a chat model often sends it."""
+    if framing == "fence":
+        return f"```json\n{text}\n```"
+    if framing == "prose_fence":
+        return f"Here is my answer:\n```json\n{text}\n```"
+    if framing == "fence_note":
+        return f"```json{text}```\n\nNote: this is based on the {{evidence}} gathered so far."
+    if framing == "prose_bare":
+        return f"Result:\n{text}\nLet me know if you need more."
+    return text
 
 
 class FakeScriptError(RuntimeError):
@@ -133,12 +163,15 @@ class FakeTurn:
         tool_calls: Tool or handoff calls to emit instead of a final output.
         usage: ``(input_tokens, output_tokens)``; estimated from the text when None.
         error: Raised instead of responding (e.g. a litellm RateLimitError).
+        framing: How a JSON output is wrapped as text (agents without structured
+            outputs only); None uses the script's :meth:`FakeScript.frame_outputs`.
     """
 
     output: str | Mapping[str, Any] | BaseModel | None = None
     tool_calls: Sequence[FakeToolCall] = ()
     usage: tuple[int, int] | None = None
     error: BaseException | None = None
+    framing: Framing | None = None
 
 
 class FakeScript:
@@ -148,11 +181,17 @@ class FakeScript:
         self._turns: defaultdict[str, deque[FakeTurn]] = defaultdict(deque)
         self._failures: dict[str, BaseException] = {}
         self.calls: list[tuple[str, str]] = []  # (agent name, model) per model call
+        self.framing: Framing = "bare"
         self._call_ids = 0
 
     def on(self, key: str, *turns: FakeTurn) -> FakeScript:
         """Queue *turns* for the agent named *key* (or the output type named *key*)."""
         self._turns[key].extend(turns)
+        return self
+
+    def frame_outputs(self, framing: Framing) -> FakeScript:
+        """Wrap every JSON output (of agents without structured outputs) in *framing*."""
+        self.framing = framing
         return self
 
     def fail_on(self, model: str, error: BaseException) -> FakeScript:
@@ -179,6 +218,7 @@ class FakeScript:
         self._turns.clear()
         self._failures.clear()
         self.calls.clear()
+        self.framing = "bare"
         self._call_ids = 0
 
 
@@ -190,12 +230,17 @@ def reflexion_turn(
     supporting_evidence: Sequence[str] = (),
     missing_or_contradictory: Sequence[str] = (),
     additional_data_needed: Sequence[str] = (),
+    inconsistent: bool = False,
     usage: tuple[int, int] | None = None,
 ) -> FakeTurn:
     """A ``reflexion`` reply (§4.3), validated as a :class:`ReflexionResult` now.
 
     ``specific_deploy_identified`` follows ``deploy``; the result is repaired exactly as a
     model's reply would be (confidence clamped, a call above 0.7 dropped).
+
+    ``inconsistent=True`` sends the JSON a careless model would, which repairs to the same
+    result: ``specific_deploy_identified`` contradicts ``deploy``, the SHA is padded with
+    spaces, an empty list is null, and a confident reply still names a next tool call.
     """
     result = ReflexionResult(
         confidence=confidence,
@@ -206,7 +251,19 @@ def reflexion_turn(
         deploy=deploy,
         next_tool_call=next_tool_call,
     )
-    return FakeTurn(output=result, usage=usage)
+    if not inconsistent:
+        return FakeTurn(output=result, usage=usage)
+    reply: dict[str, Any] = result.model_dump(mode="json")
+    reply["specific_deploy_identified"] = deploy is None
+    if deploy is not None:
+        reply["deploy"]["commit_sha"] = f" {deploy.commit_sha} "
+    for name in ("supporting_evidence", "missing_or_contradictory", "additional_data_needed"):
+        if not reply[name]:
+            reply[name] = None
+    if reply["next_tool_call"] is None:
+        stray = FetchLogsCall(tool="fetch_logs", args=LogFetchInput(service="unknown"))
+        reply["next_tool_call"] = stray.model_dump(mode="json")
+    return FakeTurn(output=reply, usage=usage)
 
 
 def reverification_turn(
@@ -367,6 +424,8 @@ class FakeModel(Model):
                 out_text = json.dumps([[c.name, dict(c.arguments)] for c in turn.tool_calls])
             else:
                 out_text = _output_text(turn.output, output_schema if structured else None)
+                if not structured and isinstance(turn.output, BaseModel | Mapping):
+                    out_text = frame(out_text, turn.framing or script.framing)
                 items = [_message_item(out_text)]
 
             in_tokens, out_tokens = turn.usage or (

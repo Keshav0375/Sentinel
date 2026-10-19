@@ -50,11 +50,13 @@ from sentinel.models.pipeline import PipelineInput, PipelineResult, SignalType
 from sentinel.models.reflexion import FetchLogsCall, SuspectDeploy
 from sentinel.models.tools import DeployRecord, LogFetchInput, TargetDeploy
 from sentinel.providers import (
+    FRAMINGS,
     REFLEXION_AGENT,
     REVERIFICATION_AGENT,
     FakeScript,
     FakeToolCall,
     FakeTurn,
+    Framing,
     fake_script,
     reflexion_turn,
     reverification_turn,
@@ -268,6 +270,53 @@ async def test_high_confidence_specific_deploy_proposes_the_rollback(
     assert result.models_used == [HAIKU, SONNET]
     assert [t.commit_sha for t in target_ok] == [SHA]
     assert _runs(script, REVERIFICATION_AGENT) == 1
+
+
+@pytest.mark.parametrize("framing", FRAMINGS)
+async def test_framed_and_inconsistent_replies_still_propose_the_rollback(
+    framing: Framing, target_ok: list[TargetDeploy]
+) -> None:
+    """Live-model realism: JSON in prose and fences, a self-contradicting critique."""
+    request = _request()
+    with fake_script() as script:
+        script.frame_outputs(framing)
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis())
+        script.on(
+            REFLEXION_AGENT,
+            reflexion_turn(0.85, deploy=DEPLOY, supporting_evidence=["x"], inconsistent=True),
+        )
+        script.on("resolution", *_rollback(request))
+        script.on(REVERIFICATION_AGENT, reverification_turn("PASS"))
+        result = await run_pipeline(request, _deps())
+
+    assert result.status == "rollback_proposed"
+    assert result.parse_failures == 0
+    assert result.reflexion_loops == 0
+    assert result.rollback_spec is not None
+    assert result.rollback_spec.target_deploy.commit_sha == SHA
+
+
+@pytest.mark.parametrize("framing", ["prose_fence", "fence_note"])
+async def test_a_framed_low_then_high_critique_loops_once(
+    framing: Framing, target_ok: list[TargetDeploy]
+) -> None:
+    request = _request()
+    with fake_script() as script:
+        script.frame_outputs(framing)
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis(), *_analysis())
+        low = reflexion_turn(
+            0.4,
+            next_tool_call=FetchLogsCall(tool="fetch_logs", args=LogFetchInput(service=SERVICE)),
+            inconsistent=True,
+        )
+        script.on(REFLEXION_AGENT, low, reflexion_turn(0.9, deploy=DEPLOY, inconsistent=True))
+        script.on("resolution", *_rollback(request))
+        script.on(REVERIFICATION_AGENT, reverification_turn("PASS"))
+        result = await run_pipeline(request, _deps())
+    assert result.status == "rollback_proposed"
+    assert (result.reflexion_loops, result.parse_failures) == (1, 0)
 
 
 async def test_the_result_validates_as_a_round_trip(target_ok: list[TargetDeploy]) -> None:
