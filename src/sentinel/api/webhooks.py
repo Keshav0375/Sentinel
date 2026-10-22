@@ -16,8 +16,9 @@ behind ``require_incident_write`` (backend 5.5).
   entry in the shared short-term memory. The shared :class:`IncidentTasks` keeps each task
   until it ends, logs a task failure with its incident_id, caps concurrency (429 +
   ``Retry-After``; a duplicate still answers 202 and a 429'd correlation_id is not
-  remembered) and, at shutdown, answers 503 + ``Retry-After``. The pipeline persists its
-  own outcome (``run_pipeline``).
+  remembered) and, at shutdown, answers 503 + ``Retry-After`` (checked again after the
+  dedupe lookup, so a 503'd correlation_id is not remembered either). The pipeline persists
+  its own outcome (``run_pipeline``).
 """
 
 from __future__ import annotations
@@ -129,6 +130,15 @@ def _same_uuid(a: str, b: str) -> bool:
 def _too_large(limit: int) -> HTTPException:
     logger.warning("webhook_body_too_large", limit_bytes=limit)
     return HTTPException(status_code=413, detail=f"request body exceeds {limit} bytes")
+
+
+def _shutting_down(correlation_id: str) -> HTTPException:
+    logger.warning("incident_rejected_shutting_down", correlation_id=correlation_id)
+    return HTTPException(
+        status_code=503,
+        detail=SHUTTING_DOWN_DETAIL,
+        headers={"Retry-After": str(RETRY_AFTER_S)},
+    )
 
 
 async def read_capped_body(request: Request, limit: int) -> bytes:
@@ -259,12 +269,7 @@ def make_incident_router(
             )
         response.headers[CORRELATION_HEADER] = correlation_id
         if running.closing:
-            logger.warning("incident_rejected_shutting_down", correlation_id=correlation_id)
-            raise HTTPException(
-                status_code=503,
-                detail=SHUTTING_DOWN_DETAIL,
-                headers={"Retry-After": str(RETRY_AFTER_S)},
-            )
+            raise _shutting_down(correlation_id)
 
         # ── Deduplication: cache, then the stored incidents, then the cache again ──
         existing = dedup.check(correlation_id)
@@ -278,6 +283,10 @@ def make_incident_router(
         existing = dedup.check(correlation_id)
         if existing is not None:
             return _duplicate(correlation_id, existing, "memory")
+        # Shutdown may have begun during the lookup: answer 503 before anything is recorded,
+        # so the sender's retry is not swallowed as a duplicate of an incident that never ran.
+        if running.closing:
+            raise _shutting_down(correlation_id)
 
         # ── New incident (no await from the re-check to the record) ────────────
         if pipeline_fn is not None and running.at_capacity:

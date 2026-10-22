@@ -563,6 +563,17 @@ class _SlowLookup:
         return None
 
 
+class _ShutdownDuringLookup:
+    """An episodic stand-in whose correlation lookup begins the shutdown drain, then misses."""
+
+    def __init__(self, tasks: IncidentTasks) -> None:
+        self._tasks = tasks
+
+    async def find_incident_by_correlation_id(self, correlation_id: str) -> str | None:
+        await self._tasks.shutdown(0)
+        return None
+
+
 @pytest.mark.parametrize("n", [2, 5])
 async def test_concurrent_duplicate_posts_start_one_pipeline(n: int) -> None:
     stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
@@ -619,6 +630,21 @@ async def test_shutting_down_is_503() -> None:
     assert r.status_code == 503
     assert r.headers["Retry-After"] == "30"
     assert r.json() == {"detail": SHUTTING_DOWN_DETAIL}
+    assert stub.requests == []
+    assert stm.active_count == 0
+
+
+async def test_shutdown_during_dedupe_lookup_is_503_and_not_remembered() -> None:
+    stm, stub, tasks, dedup = ShortTermMemory(), _Stub(), IncidentTasks(), CorrelationDeduplicator()
+    body = _payload()
+    app = _app(stm, _ShutdownDuringLookup(tasks), stub, tasks, dedup)  # type: ignore[arg-type]
+    async with _client(app) as client:
+        r = await client.post("/webhooks/incident", json=body)
+
+    assert r.status_code == 503
+    assert r.headers["Retry-After"] == "30"
+    assert r.json() == {"detail": SHUTTING_DOWN_DETAIL}
+    assert dedup.check(body["correlation_id"]) is None
     assert stub.requests == []
     assert stm.active_count == 0
 
