@@ -33,7 +33,7 @@ from sentinel.infra import database, workload_identity
 from sentinel.infra.workload_identity import POSTGRES_ENTRA_SCOPE
 
 TENANT = "11111111-2222-3333-4444-555555555555"
-AUDIENCE = f"api://{TENANT}/sentinel-backend-d1-dev"
+CLIENT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 ISSUER = f"https://login.microsoftonline.com/{TENANT}/v2.0"
 
 _WEBHOOK_BODY = {"signal_type": "runtime_error", "correlation_id": str(uuid4()), "title": "t"}
@@ -99,7 +99,7 @@ class _FakeJWKS(jwt.PyJWKClient):
 def _token(key: RSAPrivateKey, **overrides: Any) -> str:
     now = int(time.time())
     claims: dict[str, Any] = {
-        "aud": AUDIENCE,
+        "aud": CLIENT_ID,
         "iss": ISSUER,
         "iat": now,
         "nbf": now,
@@ -148,7 +148,7 @@ def boot_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[dict[s
 @pytest.fixture
 def auth_env(monkeypatch: pytest.MonkeyPatch, rsa_key: RSAPrivateKey) -> RSAPrivateKey:
     monkeypatch.setenv("SENTINEL_API_TENANT_ID", TENANT)
-    monkeypatch.setenv("SENTINEL_API_AUDIENCE", AUDIENCE)
+    monkeypatch.setenv("SENTINEL_API_AUDIENCE", CLIENT_ID)
     jwk = jwt.algorithms.RSAAlgorithm.to_jwk(rsa_key.public_key(), as_dict=True) | {
         "kid": "k1",
         "use": "sig",

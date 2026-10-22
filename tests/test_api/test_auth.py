@@ -25,7 +25,8 @@ from sentinel.api.auth import EntraBearerValidator, require_incident_write
 from sentinel.config import Settings
 
 TENANT = "11111111-2222-3333-4444-555555555555"
-AUDIENCE = f"api://{TENANT}/sentinel-backend-d1-dev"
+CLIENT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+IDENTIFIER_URI = f"api://{TENANT}/sentinel-backend-d1-dev"
 ISSUER = f"https://login.microsoftonline.com/{TENANT}/v2.0"
 JWKS_URL = f"https://login.microsoftonline.com/{TENANT}/discovery/v2.0/keys"
 
@@ -67,7 +68,7 @@ class _FakeJWKS(jwt.PyJWKClient):
 def _token(key: Any, kid: str = "k1", alg: str = "RS256", **overrides: Any) -> str:
     now = int(time.time())
     claims: dict[str, Any] = {
-        "aud": AUDIENCE,
+        "aud": CLIENT_ID,
         "iss": ISSUER,
         "iat": now,
         "nbf": now,
@@ -83,7 +84,7 @@ def _token(key: Any, kid: str = "k1", alg: str = "RS256", **overrides: Any) -> s
 
 def _settings(**kw: Any) -> Settings:
     kw.setdefault("sentinel_api_tenant_id", TENANT)
-    kw.setdefault("sentinel_api_audience", AUDIENCE)
+    kw.setdefault("sentinel_api_audience", CLIENT_ID)
     return Settings(_env_file=None, **kw)  # type: ignore[call-arg]
 
 
@@ -173,12 +174,43 @@ def test_token_without_exp_is_401(client: TestClient, rsa_keys: dict[str, RSAPri
 
 @pytest.mark.parametrize(
     "aud",
-    ["api://sentinel-backend", f"api://{TENANT}/sentinel-backend-d2-dev", None],
+    [
+        "api://sentinel-backend",
+        f"api://{TENANT}/sentinel-backend-d2-dev",
+        "99999999-9999-4999-8999-999999999999",
+        None,
+    ],
 )
 def test_wrong_audience_is_401(
     client: TestClient, rsa_keys: dict[str, RSAPrivateKey], aud: str | None
 ) -> None:
     assert _get(client, _token(rsa_keys["k1"], aud=aud)).status_code == 401
+
+
+def test_client_id_in_upper_case_config_matches(
+    client: TestClient, rsa_keys: dict[str, RSAPrivateKey]
+) -> None:
+    auth.configure_auth(
+        _settings(sentinel_api_audience=CLIENT_ID.upper()), _FakeJWKS([_jwk(rsa_keys["k1"], "k1")])
+    )
+    assert _get(client, _token(rsa_keys["k1"], aud=CLIENT_ID)).status_code == 200
+
+
+def test_identifier_uri_passes_when_listed(
+    client: TestClient, rsa_keys: dict[str, RSAPrivateKey]
+) -> None:
+    auth.configure_auth(
+        _settings(sentinel_api_audience=f"{CLIENT_ID}, {IDENTIFIER_URI}"),
+        _FakeJWKS([_jwk(rsa_keys["k1"], "k1")]),
+    )
+    assert _get(client, _token(rsa_keys["k1"], aud=IDENTIFIER_URI)).status_code == 200
+    assert _get(client, _token(rsa_keys["k1"], aud=CLIENT_ID)).status_code == 200
+
+
+def test_identifier_uri_is_401_when_not_listed(
+    client: TestClient, rsa_keys: dict[str, RSAPrivateKey]
+) -> None:
+    assert _get(client, _token(rsa_keys["k1"], aud=IDENTIFIER_URI)).status_code == 401
 
 
 @pytest.mark.parametrize(
@@ -299,6 +331,30 @@ def test_not_configured_logs_and_401s(
     assert _get(client, _token(rsa_keys["k1"])).status_code == 401
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, ()),
+        ("", ()),
+        (" , ", ()),
+        (f" {CLIENT_ID.upper()} , ,{IDENTIFIER_URI}", (CLIENT_ID, IDENTIFIER_URI)),
+        (f"{CLIENT_ID},{CLIENT_ID}", (CLIENT_ID,)),
+    ],
+)
+def test_parse_audiences(raw: str | None, expected: tuple[str, ...]) -> None:
+    assert auth.parse_audiences(raw) == expected
+
+
+def test_audience_without_client_id_is_not_configured(
+    client: TestClient, rsa_keys: dict[str, RSAPrivateKey]
+) -> None:
+    settings = _settings(sentinel_api_audience=IDENTIFIER_URI)
+
+    assert auth.configure_auth(settings) is False
+    assert auth.auth_config_problems(settings) == [auth.NO_CLIENT_ID]
+    assert _get(client, _token(rsa_keys["k1"], aud=IDENTIFIER_URI)).status_code == 401
+
+
 def test_tenant_not_a_guid_is_not_configured() -> None:
     settings = _settings(sentinel_api_tenant_id="contoso.onmicrosoft.com")
 
@@ -315,14 +371,19 @@ def test_configure_logs_v2_issuer_and_normalises_tenant(
     assert auth.configure_auth(_settings(sentinel_api_tenant_id=TENANT.upper()), jwks) is True
 
     logger.info.assert_called_once_with(
-        "auth_configured", tenant_id=TENANT, audience=AUDIENCE, issuer=ISSUER
+        "auth_configured", tenant_id=TENANT, audiences=[CLIENT_ID], issuer=ISSUER
     )
 
 
 def test_default_jwks_client_uses_v2_keys_url() -> None:
-    validator = EntraBearerValidator(TENANT, AUDIENCE)  # builds the client; no request is made
+    validator = EntraBearerValidator(TENANT, [CLIENT_ID])  # builds the client; no request is made
     assert validator.jwks_client.uri == JWKS_URL
     assert validator.issuer == ISSUER
+
+
+def test_validator_requires_an_audience() -> None:
+    with pytest.raises(ValueError, match="audience"):
+        EntraBearerValidator(TENANT, [], MagicMock())
 
 
 def test_lazy_config_from_env(
@@ -330,7 +391,7 @@ def test_lazy_config_from_env(
 ) -> None:
     auth.reset_auth()
     monkeypatch.setenv("SENTINEL_API_TENANT_ID", TENANT)
-    monkeypatch.setenv("SENTINEL_API_AUDIENCE", AUDIENCE)
+    monkeypatch.setenv("SENTINEL_API_AUDIENCE", CLIENT_ID)
     monkeypatch.setattr(
         auth, "_build_jwks_client", lambda tid: _FakeJWKS([_jwk(rsa_keys["k1"], "k1")])
     )

@@ -115,8 +115,10 @@ class Settings(BaseSettings):
     # The IDENTITY tenant (R4) holding the backend app registration — NOT AZURE_TENANT_ID,
     # which stays the workload-identity/resource tenant read by azure-identity.
     sentinel_api_tenant_id: str | None = None
-    # The app registration's identifier URI, infra's naming:
-    # api://<identity_tenant_id>/sentinel-backend-<deployment>-<env>
+    # Comma-separated accepted audiences: the API app registration's client-id GUID (required:
+    # Entra v2 access tokens carry aud = the client ID) and optionally its identifier URI
+    # api://<identity_tenant_id>/sentinel-backend-<deployment>-<env>.
+    # Required config, no default (phase 7 sets it from infra's app-registration outputs).
     sentinel_api_audience: str | None = None
 
     # ── Azure runtime access (§8.2; decision 2026-10-19) ─────────────────────

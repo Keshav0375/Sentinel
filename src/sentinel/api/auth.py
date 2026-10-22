@@ -1,9 +1,12 @@
 """Inbound auth (§3.6): stateless Entra bearer validation against the identity tenant's v2 JWKS.
 
 ``require_incident_write`` is a FastAPI dependency. It checks the access token's RS256
-signature (keys from the tenant's v2 JWKS), ``exp``, ``aud`` (``SENTINEL_API_AUDIENCE``)
-and ``iss`` (v2 only: ``https://login.microsoftonline.com/{tenant}/v2.0``; the v1
-``sts.windows.net`` issuer is rejected), then the ``Incident.Write`` app role.
+signature (keys from the tenant's v2 JWKS), ``exp``, ``aud`` and ``iss`` (v2 only:
+``https://login.microsoftonline.com/{tenant}/v2.0``; the v1 ``sts.windows.net`` issuer is
+rejected), then the ``Incident.Write`` app role. ``aud`` is
+checked against ``SENTINEL_API_AUDIENCE``, a comma-separated list: the API app's client-id
+GUID (required; Entra v2 access tokens carry it) and optionally its identifier URI.
+Required, no default.
 
 - Any token problem, a missing or non-bearer header, an unreachable JWKS, or auth that is
   not configured → 401 ``invalid token`` with ``WWW-Authenticate: Bearer``.
@@ -22,7 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, cast
+from collections.abc import Sequence
+from typing import Any, Final, cast
 
 import jwt
 from fastapi import HTTPException, Security
@@ -38,6 +42,9 @@ JWKS_CACHE_LIFESPAN_S = 3600.0
 JWKS_FETCH_TIMEOUT_S = 10.0
 INVALID_TOKEN = "invalid token"
 MISSING_ROLE = "missing Incident.Write role"
+NO_CLIENT_ID: Final = (
+    "SENTINEL_API_AUDIENCE lists no client-id GUID (v2 tokens carry aud = the API app's client ID)"
+)
 
 logger = get_logger("sentinel.api.auth")
 
@@ -47,9 +54,37 @@ _BEARER = HTTPBearer(
     auto_error=False,
     bearerFormat="JWT",
     description=(
-        "Entra access token for SENTINEL_API_AUDIENCE carrying the Incident.Write app role."
+        "Entra v2 access token for the API app (aud = its client ID) carrying the "
+        "Incident.Write app role."
     ),
 )
+
+
+def _is_guid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def parse_audiences(raw: str | None) -> tuple[str, ...]:
+    """Split the comma-separated ``SENTINEL_API_AUDIENCE``.
+
+    Entries are stripped, blanks dropped, a GUID entry is normalised to the lowercase
+    hyphenated form Entra puts in ``aud``, and duplicates are dropped (first kept).
+    """
+    if raw is None:
+        return ()
+    seen: dict[str, None] = {}
+    for part in raw.split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        if _is_guid(entry):
+            entry = str(uuid.UUID(entry))
+        seen.setdefault(entry)
+    return tuple(seen)
 
 
 def _build_jwks_client(tenant_id: str) -> jwt.PyJWKClient:
@@ -64,13 +99,18 @@ def _build_jwks_client(tenant_id: str) -> jwt.PyJWKClient:
 
 
 class EntraBearerValidator:
-    """Validates one tenant's v2 access tokens for one audience."""
+    """Validates one tenant's v2 access tokens for a set of accepted audiences."""
 
     def __init__(
-        self, tenant_id: str, audience: str, jwks_client: jwt.PyJWKClient | None = None
+        self,
+        tenant_id: str,
+        audiences: Sequence[str],
+        jwks_client: jwt.PyJWKClient | None = None,
     ) -> None:
         self.tenant_id = tenant_id
-        self.audience = audience
+        self.audiences: tuple[str, ...] = tuple(audiences)
+        if not self.audiences:
+            raise ValueError("at least one audience is required")
         self.issuer = ISSUER_TEMPLATE.format(tenant_id=tenant_id)
         self.jwks_client = jwks_client if jwks_client is not None else _build_jwks_client(tenant_id)
 
@@ -87,7 +127,7 @@ class EntraBearerValidator:
             token,
             signing_key.key,
             algorithms=["RS256"],
-            audience=self.audience,
+            audience=list(self.audiences),
             issuer=self.issuer,
             options={"require": ["exp", "aud", "iss"]},
         )
@@ -104,8 +144,11 @@ def auth_config_problems(settings: Settings) -> list[str]:
             uuid.UUID(tenant)
         except ValueError:
             problems.append("SENTINEL_API_TENANT_ID is not a GUID")
-    if settings.sentinel_api_audience is None:
+    audiences = parse_audiences(settings.sentinel_api_audience)
+    if not audiences:
         problems.append("SENTINEL_API_AUDIENCE is not set")
+    elif not any(_is_guid(a) for a in audiences):
+        problems.append(NO_CLIENT_ID)
     return problems
 
 
@@ -122,8 +165,8 @@ def configure_auth(settings: Settings, jwks_client: jwt.PyJWKClient | None = Non
     global _validator, _configured
     problems = auth_config_problems(settings)
     tenant_raw = settings.sentinel_api_tenant_id
-    audience = settings.sentinel_api_audience
-    if problems or tenant_raw is None or audience is None:
+    audiences = parse_audiences(settings.sentinel_api_audience)
+    if problems or tenant_raw is None:
         _validator = None
         logger.error(
             "auth_not_configured",
@@ -132,11 +175,11 @@ def configure_auth(settings: Settings, jwks_client: jwt.PyJWKClient | None = Non
         )
     else:
         tenant = str(uuid.UUID(tenant_raw))  # Entra's iss uses the lowercase hyphenated form
-        _validator = EntraBearerValidator(tenant, audience, jwks_client)
+        _validator = EntraBearerValidator(tenant, audiences, jwks_client)
         logger.info(
             "auth_configured",
             tenant_id=tenant,
-            audience=_validator.audience,
+            audiences=list(_validator.audiences),
             issuer=_validator.issuer,
         )
     _configured = True
