@@ -22,6 +22,9 @@ AGENT_RUN_TIMEOUT_MAX_S = 1800.0
 
 # POST /webhooks/incident body cap in bytes; over it the request is 413 before parsing or auth.
 WEBHOOK_MAX_BODY_BYTES = 256 * 1024
+# One incident's whole plan-execute loop, in seconds; past it the incident escalates (and is
+# still stored). A run is several agent calls of up to AGENT_RUN_TIMEOUT_S each.
+PIPELINE_TIMEOUT_S = 900.0
 # In-flight incident pipelines accepted at once; beyond it POST /webhooks/incident is 429.
 PIPELINE_MAX_CONCURRENT = 5
 # SIGTERM: how long shutdown waits for in-flight incidents before logging and cancelling them.
@@ -146,6 +149,8 @@ class Settings(BaseSettings):
     # ── Incident concurrency and shutdown (backend 5 review) ──────────────────
     sentinel_webhook_max_body_bytes: int = WEBHOOK_MAX_BODY_BYTES
     sentinel_max_concurrent_pipelines: int = PIPELINE_MAX_CONCURRENT
+    # The whole plan-execute loop of one incident; past it the incident escalates (and is stored).
+    sentinel_pipeline_timeout_s: float = PIPELINE_TIMEOUT_S
     # The grace sits inside K8s' default 30 s terminationGracePeriodSeconds: after the drain,
     # teardown needs up to ~2 s of cancel unwind plus the trace flush and close_pool (<= 10 s).
     # Raise it only together with the pod's terminationGracePeriodSeconds (deployment manifest).
@@ -185,6 +190,13 @@ class Settings(BaseSettings):
     def max_concurrent_pipelines_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError("sentinel_max_concurrent_pipelines must be >= 1")
+        return v
+
+    @field_validator("sentinel_pipeline_timeout_s")
+    @classmethod
+    def pipeline_timeout_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("sentinel_pipeline_timeout_s must be > 0")
         return v
 
     @field_validator("sentinel_shutdown_grace_s")

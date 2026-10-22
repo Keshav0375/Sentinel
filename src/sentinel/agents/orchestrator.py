@@ -34,6 +34,8 @@ Every cap is enforced here, in code (decision 2026-10-15):
   re-runs and parallel calls in one turn included — counts against
   ``settings.sentinel_max_tool_calls``. Past it a call is refused, the run is stopped before
   its next model call, and the incident escalates with the context gathered so far.
+- **Wall-clock bound.** The run is bounded by ``settings.sentinel_pipeline_timeout_s``
+  (900 s); past it the incident escalates with :data:`PIPELINE_TIMEOUT` and is still stored.
 
 A ``rollback_proposed`` incident also backfills the ``deployments`` row the target was
 verified against: after the incident row is stored, its ``incident_id`` is set to this
@@ -126,6 +128,7 @@ from sentinel.tools.remediation_tools import escalation_context
 __all__ = [
     "ORCHESTRATOR",
     "PIPELINE_ERROR",
+    "PIPELINE_TIMEOUT",
     "PIPELINE_TRACE",
     "REFLEXION_MAX_LOOPS",
     "REFLEXION_UNPARSEABLE",
@@ -146,6 +149,8 @@ REVERIFICATION_MAX_RETRIES: Final = 1
 ORCHESTRATOR: Final = "orchestrator"
 # How the escalation reason of an exception starts (always ``escalation.missing[0]``).
 PIPELINE_ERROR: Final = "pipeline error"
+# How the escalation reason of a wall-clock timeout starts (always ``escalation.missing[0]``).
+PIPELINE_TIMEOUT: Final = "pipeline timeout"
 # The openai-agents trace every Runner.run of an incident nests in (SentinelTracer reads
 # its incident_id metadata; the dashboard emitter follows it).
 PIPELINE_TRACE: Final = "incident_pipeline"
@@ -327,7 +332,24 @@ class _IncidentRun:
     # ── Driver ────────────────────────────────────────────────────────────────
 
     async def outcome(self) -> RollbackSpec | EscalationContext:
-        """The rollback spec or the escalation; every failure becomes an escalation."""
+        """The rollback spec or the escalation; every failure, a timeout included, escalates."""
+        timeout_s = self.settings.sentinel_pipeline_timeout_s
+        deadline = asyncio.timeout(timeout_s)
+        try:
+            async with deadline:
+                return await self._bounded_outcome()
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            logger.error(
+                "pipeline_timeout",
+                incident_id=self.request.incident_id,
+                stage=self.stage,
+                timeout_s=timeout_s,
+            )
+            return self._escalate(f"{PIPELINE_TIMEOUT} ({timeout_s:g}s) during {self.stage}")
+
+    async def _bounded_outcome(self) -> RollbackSpec | EscalationContext:
         try:
             linked = await self._load_prompts()
             with use_agent_prompts(linked):

@@ -45,7 +45,7 @@ from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.alert import IncidentAlert, IncidentContext, PRDetails
 from sentinel.models.analysis import AnalysisResult
 from sentinel.models.deploy import CorrelatedDeploy
-from sentinel.models.incident import Severity, TriageResult
+from sentinel.models.incident import IncidentStatus, Severity, TriageResult
 from sentinel.models.pipeline import PipelineInput, PipelineResult, SignalType
 from sentinel.models.reflexion import FetchLogsCall, SuspectDeploy
 from sentinel.models.tools import DeployRecord, LogFetchInput, TargetDeploy
@@ -1338,6 +1338,27 @@ async def test_the_stored_outcome_mirrors_the_result(target_ok: list[TargetDeplo
     assert outcome.root_cause_confidence == result.confidence
     assert outcome.reflexion_loops == result.reflexion_loops
     assert outcome.pipeline_result == result.model_dump(mode="json")
+
+
+async def test_wall_clock_timeout_escalates_and_is_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def hang(self: Any) -> Any:
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(orchestrator._IncidentRun, "_plan_and_execute", hang)  # type: ignore[reportPrivateUsage]
+    episodic = MagicMock()
+    episodic.store_incident = AsyncMock()
+    deps = dataclasses.replace(_deps(sentinel_pipeline_timeout_s=0.05), episodic_memory=episodic)
+
+    result = await run_pipeline(_request(), deps)
+
+    assert result.status == "escalated"
+    assert result.escalation is not None
+    assert result.escalation.missing[0] == "pipeline timeout (0.05s) during plan"
+    episodic.store_incident.assert_awaited_once()
+    (incident,), _ = episodic.store_incident.call_args
+    assert incident.status is IncidentStatus.ESCALATED
 
 
 async def _deployment_links(pool: asyncpg.Pool) -> list[Any]:
