@@ -46,27 +46,33 @@ def _without_password(dsn: str) -> tuple[str, str]:
     return urlunsplit(parts._replace(netloc=netloc)), parts.password or ""
 
 
-async def _backend_count(dsn: str) -> int:
-    """Server-side connections to this database, excluding the counting one."""
+def _tagged(dsn: str, app_name: str) -> str:
+    """*dsn* with ``application_name=<app_name>``: asyncpg passes it to the server."""
+    parts = urlsplit(dsn)
+    query = "&".join(q for q in (parts.query, f"application_name={app_name}") if q)
+    return urlunsplit(parts._replace(query=query))
+
+
+async def _backend_count(dsn: str, app_name: str) -> int:
+    """Server-side connections tagged *app_name* (other tests' pools do not count)."""
     conn = await asyncpg.connect(dsn)
     try:
         count = await conn.fetchval(
-            "SELECT count(*) FROM pg_stat_activity "
-            "WHERE datname = current_database() AND pid <> pg_backend_pid()"
+            "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", app_name
         )
     finally:
         await conn.close()
     return int(count)
 
 
-async def _wait_for_backend_count(dsn: str, expected: int) -> int:
+async def _wait_for_backend_count(dsn: str, app_name: str, expected: int) -> int:
     """pg_stat_activity lags a closed socket slightly — poll briefly."""
-    count = await _backend_count(dsn)
+    count = await _backend_count(dsn, app_name)
     for _ in range(50):
         if count == expected:
             break
         await asyncio.sleep(0.05)
-        count = await _backend_count(dsn)
+        count = await _backend_count(dsn, app_name)
     return count
 
 
@@ -223,18 +229,19 @@ async def test_init_pool_twice_raises(pg_dsn: str) -> None:
 
 
 async def test_module_pool_acquire_and_close_leaks_nothing(pg_dsn: str) -> None:
-    baseline = await _backend_count(pg_dsn)
-    await init_pool(pg_dsn, min_size=2, max_size=3)
+    app_name = f"sentinel-test-{uuid.uuid4().hex[:12]}"
+    await init_pool(_tagged(pg_dsn, app_name), min_size=2, max_size=3)
     async with acquire() as conn:
         assert await conn.fetchval("SELECT 1") == 1
-    assert await _backend_count(pg_dsn) >= baseline + 2
+        assert await conn.fetchval("SHOW application_name") == app_name
+    assert await _backend_count(pg_dsn, app_name) == 2
 
     await close_pool()
 
     assert database._pool is None  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(SentinelMemoryError):
         get_pool()
-    assert await _wait_for_backend_count(pg_dsn, baseline) == baseline
+    assert await _wait_for_backend_count(pg_dsn, app_name, 0) == 0
 
 
 async def test_password_callable_is_used(pg_dsn: str) -> None:
