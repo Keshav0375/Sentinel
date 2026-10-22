@@ -20,6 +20,11 @@ AGENT_RUN_TIMEOUT_S = 600.0
 AGENT_RUN_TIMEOUT_MIN_S = 240.0
 AGENT_RUN_TIMEOUT_MAX_S = 1800.0
 
+# In-flight incident pipelines accepted at once; beyond it POST /webhooks/incident is 429.
+PIPELINE_MAX_CONCURRENT = 5
+# SIGTERM: how long shutdown waits for in-flight incidents before logging and cancelling them.
+SHUTDOWN_GRACE_S = 20.0
+
 # Every credential field. All optional: no secret is required to boot, and a feature whose
 # key is missing fails at use (backend.md §8.2; decision 2026-10-14). A blank value counts
 # as missing.
@@ -136,6 +141,13 @@ class Settings(BaseSettings):
     # The webhook, incidents and generate routes stay protected.
     sentinel_dev_open_dashboard: bool = False
 
+    # ── Incident concurrency and shutdown (backend 5 review) ──────────────────
+    sentinel_max_concurrent_pipelines: int = PIPELINE_MAX_CONCURRENT
+    # The grace sits inside K8s' default 30 s terminationGracePeriodSeconds: after the drain,
+    # teardown needs up to ~2 s of cancel unwind plus the trace flush and close_pool (<= 10 s).
+    # Raise it only together with the pod's terminationGracePeriodSeconds (deployment manifest).
+    sentinel_shutdown_grace_s: float = SHUTDOWN_GRACE_S
+
     # ── Validators ────────────────────────────────────────────────────────────
     @field_validator("sentinel_max_tool_calls")
     @classmethod
@@ -156,6 +168,20 @@ class Settings(BaseSettings):
                 f"sentinel_agent_run_timeout_s must be between {AGENT_RUN_TIMEOUT_MIN_S:g} "
                 f"and {AGENT_RUN_TIMEOUT_MAX_S:g} seconds (above one model call's worst case)"
             )
+        return v
+
+    @field_validator("sentinel_max_concurrent_pipelines")
+    @classmethod
+    def max_concurrent_pipelines_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("sentinel_max_concurrent_pipelines must be >= 1")
+        return v
+
+    @field_validator("sentinel_shutdown_grace_s")
+    @classmethod
+    def shutdown_grace_not_negative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("sentinel_shutdown_grace_s must be >= 0")
         return v
 
     @model_validator(mode="after")

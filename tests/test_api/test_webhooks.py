@@ -30,12 +30,16 @@ from sentinel.agents.orchestrator import REFLEXION_MAX_LOOPS
 from sentinel.api.webhooks import (
     ACCEPTED_MESSAGE,
     DUPLICATE_MESSAGE,
+    SHUTTING_DOWN_DETAIL,
     CorrelationDeduplicator,
     PipelineFn,
     make_incident_router,
 )
 from sentinel.config import Settings
+from sentinel.infra import incident_tasks as tasks_module
 from sentinel.infra.database import create_pool
+from sentinel.infra.incident_tasks import IncidentTasks
+from sentinel.infra.logging import get_logger
 from sentinel.main import make_pipeline_fn
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
@@ -141,7 +145,7 @@ def _app(
     stm: ShortTermMemory,
     episodic: EpisodicMemory,
     pipeline_fn: PipelineFn | None,
-    tasks: set[asyncio.Task[None]],
+    tasks: IncidentTasks,
     dedup: CorrelationDeduplicator | None = None,
 ) -> FastAPI:
     app = FastAPI()
@@ -176,7 +180,7 @@ def _payload(**overrides: Any) -> dict[str, Any]:
     return body | overrides
 
 
-async def _drain(tasks: set[asyncio.Task[None]]) -> None:
+async def _drain(tasks: IncidentTasks) -> None:
     pending = list(tasks)
     if pending:
         await asyncio.gather(*pending)
@@ -273,7 +277,7 @@ def _timeline(row: asyncpg.Record) -> list[dict[str, Any]]:
 
 
 async def test_accepted_echoes_ids_and_header() -> None:
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     body = _payload()
     async with _client(_app(stm, _no_db(), stub, tasks)) as client:
         r = await client.post("/webhooks/incident", json=body)
@@ -294,7 +298,7 @@ async def test_accepted_echoes_ids_and_header() -> None:
 
 @pytest.mark.parametrize("field", ["signal_type", "correlation_id", "title"])
 async def test_missing_required_field_is_422(field: str) -> None:
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     body = _payload()
     del body[field]
     async with _client(_app(stm, _no_db(), stub, tasks)) as client:
@@ -314,7 +318,7 @@ async def test_missing_required_field_is_422(field: str) -> None:
     ],
 )
 async def test_invalid_fields_are_422(override: dict[str, Any]) -> None:
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     async with _client(_app(stm, _no_db(), stub, tasks)) as client:
         r = await client.post("/webhooks/incident", json=_payload(**override))
 
@@ -323,7 +327,7 @@ async def test_invalid_fields_are_422(override: dict[str, Any]) -> None:
 
 
 async def test_optional_fields_default() -> None:
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     body = {
         "signal_type": "runtime_error",
         "correlation_id": str(uuid.uuid4()),
@@ -339,7 +343,7 @@ async def test_optional_fields_default() -> None:
 
 
 async def test_tags_as_datadog_string() -> None:
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     tags = (
         "service:sentinel-watchtower, deploy_status:failed,failed_stage:verify,"
         "version:pr-5-a3f9c2,env:dev,novalue"
@@ -357,7 +361,7 @@ async def test_tags_as_datadog_string() -> None:
 
 
 async def test_tags_as_object() -> None:
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     tags = {"service": SERVICE, "version": "pr-5-a3f9c2", "env": "dev"}
     async with _client(_app(stm, _no_db(), stub, tasks)) as client:
         r = await client.post("/webhooks/incident", json=_payload(tags=tags))
@@ -370,7 +374,7 @@ async def test_tags_as_object() -> None:
 
 
 async def test_mismatched_header_is_logged_not_rejected() -> None:
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     body = _payload()
     async with _client(_app(stm, _no_db(), stub, tasks)) as client:
         with capture_logs() as logs:
@@ -391,7 +395,7 @@ async def test_mismatched_header_is_logged_not_rejected() -> None:
 
 
 async def test_matching_header_is_not_logged() -> None:
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     body = _payload()
     async with _client(_app(stm, _no_db(), stub, tasks)) as client:
         with capture_logs() as logs:
@@ -407,7 +411,7 @@ async def test_matching_header_is_not_logged() -> None:
 
 
 async def test_no_pipeline_wired_still_accepts() -> None:
-    stm, tasks = ShortTermMemory(), set[asyncio.Task[None]]()
+    stm, tasks = ShortTermMemory(), IncidentTasks()
     async with _client(_app(stm, _no_db(), None, tasks)) as client:
         with capture_logs() as logs:
             r = await client.post("/webhooks/incident", json=_payload())
@@ -421,7 +425,7 @@ async def test_no_pipeline_wired_still_accepts() -> None:
 
 
 async def test_duplicate_in_memory_returns_original() -> None:
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     body = _payload()
     async with _client(_app(stm, _no_db(), stub, tasks)) as client:
         first = await client.post("/webhooks/incident", json=body)
@@ -447,7 +451,7 @@ async def test_duplicate_from_db_returns_stored_id(
         stored_id,
         uuid.UUID(correlation_id),
     )
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     # A fresh router: nothing in its cache, so the stored incident is what dedupes.
     async with _client(_app(stm, episodic, stub, tasks)) as client:
         r = await client.post("/webhooks/incident", json=_payload(correlation_id=correlation_id))
@@ -462,7 +466,7 @@ async def test_duplicate_from_db_returns_stored_id(
 
 
 async def test_db_unavailable_dedupe_still_accepts() -> None:
-    stm, stub, tasks = ShortTermMemory(), _Stub(), set[asyncio.Task[None]]()
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
     async with _client(_app(stm, _no_db(), stub, tasks)) as client:
         with capture_logs() as logs:
             r = await client.post("/webhooks/incident", json=_payload())
@@ -508,7 +512,7 @@ async def test_two_concurrent_posts_run_concurrently() -> None:
         async with asyncio.timeout(2):
             await barrier.wait()  # only returns when both incidents run at once
 
-    stm, tasks = ShortTermMemory(), set[asyncio.Task[None]]()
+    stm, tasks = ShortTermMemory(), IncidentTasks()
     async with _client(_app(stm, _no_db(), pipeline, tasks)) as client:
         first, second = await asyncio.gather(
             client.post("/webhooks/incident", json=_payload()),
@@ -531,7 +535,7 @@ async def test_task_is_named_for_its_incident() -> None:
         assert task is not None
         seen.append(task.get_name())
 
-    stm, tasks = ShortTermMemory(), set[asyncio.Task[None]]()
+    stm, tasks = ShortTermMemory(), IncidentTasks()
     async with _client(_app(stm, _no_db(), pipeline, tasks)) as client:
         r = await client.post("/webhooks/incident", json=_payload())
         await _drain(tasks)
@@ -539,10 +543,104 @@ async def test_task_is_named_for_its_incident() -> None:
     assert seen == [f"incident-{r.json()['incident_id']}"]
 
 
+class _SlowLookup:
+    """An episodic stand-in whose correlation lookup yields to the loop and finds nothing."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def find_incident_by_correlation_id(self, correlation_id: str) -> str | None:
+        self.calls += 1
+        await asyncio.sleep(0.01)
+        return None
+
+
+@pytest.mark.parametrize("n", [2, 5])
+async def test_concurrent_duplicate_posts_start_one_pipeline(n: int) -> None:
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
+    lookup = _SlowLookup()
+    body = _payload()
+    app = _app(stm, lookup, stub, tasks)  # type: ignore[arg-type]
+    async with _client(app) as client:
+        responses = await asyncio.gather(
+            *(client.post("/webhooks/incident", json=body) for _ in range(n))
+        )
+        await _drain(tasks)
+
+    acks = [r.json() for r in responses]
+    assert sorted(a["status"] for a in acks) == ["accepted"] + ["duplicate"] * (n - 1)
+    assert len({a["incident_id"] for a in acks}) == 1
+    assert len(stub.requests) == 1
+    assert stm.active_count == 1
+    assert lookup.calls == n  # every request yielded in the lookup
+
+
+async def test_at_capacity_is_429_with_retry_after() -> None:
+    release = asyncio.Event()
+
+    async def pipeline(request: PipelineInput) -> None:
+        await release.wait()
+
+    stm, tasks = ShortTermMemory(), IncidentTasks(1)
+    body_a, body_b = _payload(), _payload()
+    async with _client(_app(stm, _no_db(), pipeline, tasks)) as client:
+        first = await client.post("/webhooks/incident", json=body_a)
+        rejected = await client.post("/webhooks/incident", json=body_b)
+        duplicate = await client.post("/webhooks/incident", json=body_a)
+        release.set()
+        await _drain(tasks)
+        await asyncio.sleep(0)
+        retried = await client.post("/webhooks/incident", json=body_b)
+        await _drain(tasks)
+
+    assert first.status_code == 202
+    assert rejected.status_code == 429
+    assert rejected.headers["Retry-After"] == "30"
+    assert rejected.json() == {"detail": "too many incidents in flight (max 1); retry later"}
+    assert duplicate.status_code == 202 and duplicate.json()["status"] == "duplicate"
+    assert retried.status_code == 202 and retried.json()["status"] == "accepted"
+    assert stm.active_count == 2  # the rejected attempt created nothing
+
+
+async def test_shutting_down_is_503() -> None:
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
+    await tasks.shutdown(0)
+    async with _client(_app(stm, _no_db(), stub, tasks)) as client:
+        r = await client.post("/webhooks/incident", json=_payload())
+
+    assert r.status_code == 503
+    assert r.headers["Retry-After"] == "30"
+    assert r.json() == {"detail": SHUTTING_DOWN_DETAIL}
+    assert stub.requests == []
+    assert stm.active_count == 0
+
+
+async def test_pipeline_failure_is_logged_with_incident_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fresh logger: the module's may have been used (and cached) before capture_logs.
+    monkeypatch.setattr(tasks_module, "logger", get_logger("sentinel.infra.incident_tasks"))
+
+    async def pipeline(request: PipelineInput) -> None:
+        raise RuntimeError("boom")
+
+    stm, tasks = ShortTermMemory(), IncidentTasks()
+    async with _client(_app(stm, _no_db(), pipeline, tasks)) as client:
+        with capture_logs() as logs:
+            r = await client.post("/webhooks/incident", json=_payload())
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(0)
+
+    failed = [e for e in logs if e["event"] == "incident_task_failed"]
+    assert len(failed) == 1
+    assert failed[0]["incident_id"] == r.json()["incident_id"]
+    assert failed[0]["error"] == "boom"
+
+
 async def test_two_concurrent_incidents_are_isolated(
     pool: asyncpg.Pool, episodic: EpisodicMemory
 ) -> None:
-    stm, tasks = ShortTermMemory(), set[asyncio.Task[None]]()
+    stm, tasks = ShortTermMemory(), IncidentTasks()
     app = _app(stm, episodic, _real_pipeline(pool, episodic, stm), tasks)
     payloads = [
         _payload(tags={"service": "svc-a"}),
@@ -574,7 +672,7 @@ async def test_two_concurrent_incidents_are_isolated(
 
 
 async def test_runtime_error_takes_full_loop(pool: asyncpg.Pool, episodic: EpisodicMemory) -> None:
-    stm, tasks = ShortTermMemory(), set[asyncio.Task[None]]()
+    stm, tasks = ShortTermMemory(), IncidentTasks()
     app = _app(stm, episodic, _real_pipeline(pool, episodic, stm), tasks)
     async with _client(app) as client:
         with fake_script():
@@ -590,7 +688,7 @@ async def test_runtime_error_takes_full_loop(pool: asyncpg.Pool, episodic: Episo
 
 
 async def test_deploy_failure_takes_fast_path(pool: asyncpg.Pool, episodic: EpisodicMemory) -> None:
-    stm, tasks = ShortTermMemory(), set[asyncio.Task[None]]()
+    stm, tasks = ShortTermMemory(), IncidentTasks()
     app = _app(stm, episodic, _real_pipeline(pool, episodic, stm), tasks)
     async with _client(app) as client:
         with fake_script():
@@ -606,7 +704,7 @@ async def test_deploy_failure_takes_fast_path(pool: asyncpg.Pool, episodic: Epis
 
 
 async def test_terminal_incident_stored(pool: asyncpg.Pool, episodic: EpisodicMemory) -> None:
-    stm, tasks = ShortTermMemory(), set[asyncio.Task[None]]()
+    stm, tasks = ShortTermMemory(), IncidentTasks()
     app = _app(stm, episodic, _real_pipeline(pool, episodic, stm), tasks)
     body = _payload()
     async with _client(app) as client:
@@ -632,7 +730,7 @@ async def test_rollback_proposed_backfills_deployment(
     pool: asyncpg.Pool, episodic: EpisodicMemory
 ) -> None:
     await _deploy_row(pool)
-    stm, tasks = ShortTermMemory(), set[asyncio.Task[None]]()
+    stm, tasks = ShortTermMemory(), IncidentTasks()
     app = _app(stm, episodic, _real_pipeline(pool, episodic, stm), tasks)
     body = _payload(signal_type="deploy_failure", context={"pr_details": {"sha": FULL_SHA}})
     async with _client(app) as client:
@@ -652,7 +750,7 @@ async def test_rollback_proposed_backfills_deployment(
 
 async def test_escalation_does_not_backfill(pool: asyncpg.Pool, episodic: EpisodicMemory) -> None:
     await _deploy_row(pool)
-    stm, tasks = ShortTermMemory(), set[asyncio.Task[None]]()
+    stm, tasks = ShortTermMemory(), IncidentTasks()
     app = _app(stm, episodic, _real_pipeline(pool, episodic, stm), tasks)
     async with _client(app) as client:
         with fake_script():
@@ -667,7 +765,7 @@ async def test_fast_path_pin_mismatch_escalates(
     pool: asyncpg.Pool, episodic: EpisodicMemory
 ) -> None:
     await _deploy_row(pool)
-    stm, tasks = ShortTermMemory(), set[asyncio.Task[None]]()
+    stm, tasks = ShortTermMemory(), IncidentTasks()
     app = _app(stm, episodic, _real_pipeline(pool, episodic, stm), tasks)
     body = _payload(signal_type="deploy_failure", context={"pr_details": {"sha": "ffffffffffff"}})
     async with _client(app) as client:

@@ -7,6 +7,7 @@ are replaced, and tokens are signed with a throwaway RSA key.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from collections.abc import Iterator
@@ -30,6 +31,7 @@ from sentinel.api import auth
 from sentinel.api.auth import require_incident_write
 from sentinel.config import Settings
 from sentinel.infra import database, workload_identity
+from sentinel.infra import incident_tasks as tasks_module
 from sentinel.infra.workload_identity import POSTGRES_ENTRA_SCOPE
 
 TENANT = "11111111-2222-3333-4444-555555555555"
@@ -322,7 +324,7 @@ async def test_key_vault_loads_before_langfuse_and_wiring(monkeypatch: pytest.Mo
     async def init_pool(_settings: Settings, **_kwargs: Any) -> None:
         order.append("pool")
 
-    def wire(_app: FastAPI, settings: Settings, _pool: object) -> None:
+    def wire(_app: FastAPI, settings: Settings, _pool: object, _tasks: object) -> None:
         order.append("wire")
         captured.append(settings)
 
@@ -415,3 +417,63 @@ async def test_failed_startup_still_tears_down(monkeypatch: pytest.MonkeyPatch) 
         async with main.lifespan(FastAPI()):
             pass  # pragma: no cover — startup raised before yield
     assert events == ["traces", "pool", "credential"]
+
+
+async def test_shutdown_waits_for_an_in_flight_incident_before_closing_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lifespan exit is what uvicorn runs on SIGTERM: a finishing incident still has its pool."""
+    events = _teardown_harness(monkeypatch)
+    monkeypatch.setenv("SENTINEL_SHUTDOWN_GRACE_S", "5")
+    started = asyncio.Event()
+
+    async def pipeline() -> None:
+        started.set()
+        await asyncio.sleep(0.05)
+        events.append("stored")
+
+    monkeypatch.setattr(
+        main, "_wire_app", lambda _a, _s, _p, tasks: tasks.start("inc-1", pipeline())
+    )
+
+    async with main.lifespan(FastAPI()):
+        await started.wait()
+        events.append("sigterm")
+
+    assert events == ["sigterm", "stored", "traces", "pool", "credential"]
+
+
+async def test_shutdown_logs_cancelled_incident_before_closing_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _teardown_harness(monkeypatch)
+    monkeypatch.setenv("SENTINEL_SHUTDOWN_GRACE_S", "0.05")
+    started = asyncio.Event()
+    log = MagicMock()
+    log.error.side_effect = lambda event, **kw: events.append(f"{event}:{kw['incident_id']}")
+    monkeypatch.setattr(tasks_module, "logger", log)
+
+    async def pipeline() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            events.append("cancelled")
+            raise
+
+    monkeypatch.setattr(
+        main, "_wire_app", lambda _a, _s, _p, tasks: tasks.start("inc-1", pipeline())
+    )
+
+    async with main.lifespan(FastAPI()):
+        await started.wait()
+        events.append("sigterm")
+
+    assert events == [
+        "sigterm",
+        "incident_cancelled_on_shutdown:inc-1",
+        "cancelled",
+        "traces",
+        "pool",
+        "credential",
+    ]

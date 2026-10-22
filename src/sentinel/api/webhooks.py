@@ -12,23 +12,26 @@ behind ``require_incident_write`` (backend 5.5).
   logged and treated as a miss). A duplicate answers 202 with the original ``incident_id``
   and ``status: "duplicate"`` and starts nothing.
 - **One task per incident.** Created in the handler, outside any span (§4.5), with its own
-  entry in the shared short-term memory. The router keeps a strong reference to each task
-  until it finishes. The pipeline persists its own outcome (``run_pipeline``).
+  entry in the shared short-term memory. The shared :class:`IncidentTasks` keeps each task
+  until it ends, logs a task failure with its incident_id, caps concurrency (429 +
+  ``Retry-After``; a duplicate still answers 202 and a 429'd correlation_id is not
+  remembered) and, at shutdown, answers 503 + ``Retry-After``. The pipeline persists its
+  own outcome (``run_pipeline``).
 """
 
 from __future__ import annotations
 
-import asyncio
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Final, Literal
 
-from fastapi import APIRouter, Header, Response
+from fastapi import APIRouter, Header, HTTPException, Response
 from pydantic import BaseModel
 
 from sentinel.exceptions import SentinelMemoryError
+from sentinel.infra.incident_tasks import IncidentTasks
 from sentinel.infra.logging import get_logger
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.short_term import ShortTermMemory
@@ -44,6 +47,8 @@ DEDUP_TTL_SECONDS: Final = 24 * 60 * 60.0
 CORRELATION_HEADER: Final = "X-Correlation-ID"
 ACCEPTED_MESSAGE: Final = "Agent pipeline triggered"
 DUPLICATE_MESSAGE: Final = "Duplicate correlation_id: pipeline already triggered"
+RETRY_AFTER_S: Final = 30
+SHUTTING_DOWN_DETAIL: Final = "shutting down; retry later"
 
 
 class IncidentAck(BaseModel):
@@ -128,7 +133,7 @@ def make_incident_router(
     pipeline_fn: PipelineFn | None = None,
     *,
     deduplicator: CorrelationDeduplicator | None = None,
-    tasks: set[asyncio.Task[None]] | None = None,
+    tasks: IncidentTasks | None = None,
 ) -> APIRouter:
     """Create the incident webhook router.
 
@@ -138,15 +143,15 @@ def make_incident_router(
         pipeline_fn: Async callback ``(PipelineInput) → None`` that runs the orchestrator.
             When ``None`` the endpoint logs ``pipeline_not_wired`` and starts nothing.
         deduplicator: The in-memory cache (default: a fresh 24 h one).
-        tasks: Where the running pipeline tasks are kept alive until they finish
-            (default: a fresh set).
+        tasks: The shared in-flight registry (main passes the lifespan's; it caps
+            concurrency and is drained at shutdown). Default: a fresh one.
 
     Returns:
         ``APIRouter`` with ``POST /webhooks/incident`` registered.
     """
     router = APIRouter()
     dedup = deduplicator if deduplicator is not None else CorrelationDeduplicator()
-    running: set[asyncio.Task[None]] = tasks if tasks is not None else set()
+    running = tasks if tasks is not None else IncidentTasks()
 
     async def _stored_original(correlation_id: str) -> str | None:
         try:
@@ -190,6 +195,13 @@ def make_incident_router(
                 correlation_id=correlation_id,
             )
         response.headers[CORRELATION_HEADER] = correlation_id
+        if running.closing:
+            logger.warning("incident_rejected_shutting_down", correlation_id=correlation_id)
+            raise HTTPException(
+                status_code=503,
+                detail=SHUTTING_DOWN_DETAIL,
+                headers={"Retry-After": str(RETRY_AFTER_S)},
+            )
 
         # ── Deduplication: cache, then the stored incidents, then the cache again ──
         existing = dedup.check(correlation_id)
@@ -205,6 +217,18 @@ def make_incident_router(
             return _duplicate(correlation_id, existing, "memory")
 
         # ── New incident (no await from the re-check to the record) ────────────
+        if pipeline_fn is not None and running.at_capacity:
+            logger.warning(
+                "incident_rejected_at_capacity",
+                correlation_id=correlation_id,
+                in_flight=len(running),
+                max_concurrent=running.max_concurrent,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=f"too many incidents in flight (max {running.max_concurrent}); retry later",
+                headers={"Retry-After": str(RETRY_AFTER_S)},
+            )
         incident_id = str(uuid.uuid4())
         request = PipelineInput.from_payload(incident_id, payload)
         dedup.record(correlation_id, incident_id)
@@ -220,9 +244,7 @@ def make_incident_router(
         )
 
         if pipeline_fn is not None:
-            task = asyncio.create_task(_await(pipeline_fn(request)), name=f"incident-{incident_id}")
-            running.add(task)
-            task.add_done_callback(running.discard)
+            running.start(incident_id, _await(pipeline_fn(request)))
         else:
             logger.warning("pipeline_not_wired", incident_id=incident_id)
 

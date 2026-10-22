@@ -36,6 +36,7 @@ from sentinel.config import Settings, get_settings
 from sentinel.infra.dashboard_emitter import DashboardEventEmitter
 from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.event_bus import EventBus, EventType, PipelineEvent
+from sentinel.infra.incident_tasks import IncidentTasks
 from sentinel.infra.logging import configure_logging, get_logger
 from sentinel.infra.tracing import (
     SentinelTracer,
@@ -130,16 +131,32 @@ def make_pipeline_fn(
         except KeyError:
             pass  # the incident was cleared mid-pipeline
         if event_bus is not None:
-            await event_bus.publish(
-                incident_id,
-                PipelineEvent(
-                    type=EventType.INCIDENT_COMPLETED,
-                    agent_name=ORCHESTRATOR,
+            try:
+                await event_bus.publish(
+                    incident_id,
+                    PipelineEvent(
+                        type=EventType.INCIDENT_COMPLETED,
+                        agent_name=ORCHESTRATOR,
+                        incident_id=incident_id,
+                        data={"status": status.value},
+                    ),
+                )
+            except Exception as exc:
+                logger.error(
+                    "incident_completed_event_failed",
                     incident_id=incident_id,
-                    data={"status": status.value},
-                ),
-            )
-            await event_bus.close_incident(incident_id)
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            try:
+                await event_bus.close_incident(incident_id)
+            except Exception as exc:
+                logger.error(
+                    "incident_stream_close_failed",
+                    incident_id=incident_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
 
     return run_incident
 
@@ -158,14 +175,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
        token as the password for every new connection.
     6. Wire memory clients, the SDK defaults, the pipeline callback and the routers.
 
-    Teardown (each step runs even if the one before it raised or was cancelled): the
-    LangFuse client is shut down (flushing pending spans), the pool is closed, then the
-    Azure credential (the pool's password callable uses it) is closed.
+    Teardown (each step runs even if the one before it raised or was cancelled): in-flight
+    incidents are drained (up to SENTINEL_SHUTDOWN_GRACE_S; the rest are logged, then
+    cancelled) BEFORE the traces flush and the pool closes, so a finishing incident can
+    still store itself; then the LangFuse client is shut down (flushing pending spans), the
+    pool is closed, then the Azure credential (the pool's password callable uses it) is
+    closed.
     """
     settings = get_settings()
     configure_logging(settings.sentinel_log_level)
     auth_configured = configure_auth(settings)
     credential = LazyAzureCredential()
+    incident_tasks = IncidentTasks(settings.sentinel_max_concurrent_pipelines)
+    grace_s = settings.sentinel_shutdown_grace_s
     try:
         settings = await load_key_vault_secrets(settings, credential)
         logger.info(
@@ -180,29 +202,39 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         pool = await init_pool_from_settings(
             settings, password_factory=lambda: entra_token_password(credential.get())
         )
-        _wire_app(app, settings, pool)
+        _wire_app(app, settings, pool, incident_tasks)
         logger.info("sentinel_ready")
         yield
     finally:
-        # Flushing can block on network I/O, so it runs off the loop. shutdown_traces
-        # never raises, but the await can still be cancelled (e.g. a second SIGTERM):
-        # the nested finally blocks close the pool and the credential regardless.
+        # Each step can raise or be cancelled (e.g. a second SIGTERM); the nested finally
+        # blocks run the later ones regardless. The drain comes first: a finishing incident
+        # still needs the pool and its traces. Flushing can block on network I/O, so it runs
+        # off the loop.
         try:
-            await asyncio.to_thread(shutdown_traces)
+            await incident_tasks.shutdown(grace_s)
         finally:
             try:
-                await close_pool()
+                await asyncio.to_thread(shutdown_traces)
             finally:
-                credential.close()
-                logger.info("sentinel_shutdown")
+                try:
+                    await close_pool()
+                finally:
+                    credential.close()
+                    logger.info("sentinel_shutdown")
 
 
-def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> None:
+def _wire_app(
+    app: FastAPI,
+    settings: Settings,
+    pool: asyncpg.Pool | None,
+    incident_tasks: IncidentTasks,
+) -> None:
     """Build the memory clients, SDK defaults, tracing and routers, and mount them.
 
     *pool* is None when no ``DATABASE_URL`` is configured: semantic and episodic memory
     are still built, and every call to them raises ``SentinelMemoryError`` ("memory
-    unavailable").
+    unavailable"). *incident_tasks* is the lifespan's in-flight registry: the webhook
+    router caps and tracks incidents with it, and the lifespan drains it at shutdown.
 
     Only ``/health`` and ``/ready`` are open. Every other route requires an Entra bearer
     token with the ``Incident.Write`` role. With ``SENTINEL_DEV_OPEN_DASHBOARD`` the
@@ -256,7 +288,7 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
         make_health_router(db_readiness(pool, db_configured=database_configured(settings)))
     )  # open (§3.5)
     app.include_router(
-        make_incident_router(short_term_memory, episodic_memory, pipeline_fn),
+        make_incident_router(short_term_memory, episodic_memory, pipeline_fn, tasks=incident_tasks),
         dependencies=protected,
     )
     app.include_router(
