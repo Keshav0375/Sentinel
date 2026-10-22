@@ -178,9 +178,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Teardown (each step runs even if the one before it raised or was cancelled): in-flight
     incidents are drained (up to SENTINEL_SHUTDOWN_GRACE_S; the rest are logged, then
     cancelled) BEFORE the traces flush and the pool closes, so a finishing incident can
-    still store itself; then the LangFuse client is shut down (flushing pending spans), the
-    pool is closed, then the Azure credential (the pool's password callable uses it) is
-    closed.
+    still store itself; then the LangFuse client is shut down (flushing pending spans, for at
+    most ``TRACE_SHUTDOWN_TIMEOUT_S``, after which it is abandoned so a failed startup still
+    exits and the pod restarts), the pool is closed, then the Azure credential (the pool's
+    password callable uses it) is closed.
     """
     settings = get_settings()
     configure_logging(settings.sentinel_log_level)
@@ -208,8 +209,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     finally:
         # Each step can raise or be cancelled (e.g. a second SIGTERM); the nested finally
         # blocks run the later ones regardless. The drain comes first: a finishing incident
-        # still needs the pool and its traces. Flushing can block on network I/O, so it runs
-        # off the loop.
+        # still needs the pool and its traces. Flushing can block on network I/O: it runs
+        # off the loop and shutdown_traces bounds it (TRACE_SHUTDOWN_TIMEOUT_S).
         try:
             await incident_tasks.shutdown(grace_s)
         finally:

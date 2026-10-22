@@ -10,6 +10,8 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -647,6 +649,55 @@ def test_flush_and_shutdown_never_raise(mock_client: MagicMock) -> None:
     shutdown_traces()
 
 
+def test_shutdown_traces_is_bounded_when_the_client_hangs(
+    mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = threading.Event()
+    mock_client.shutdown.side_effect = lambda: release.wait()
+    log = MagicMock()
+    monkeypatch.setattr(tracing, "logger", log)
+
+    try:
+        started = time.monotonic()
+        ok = shutdown_traces(timeout_s=0.2)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert ok is False
+    assert 0.2 <= elapsed < 1.0
+    log.warning.assert_called_once_with("langfuse_shutdown_timeout", timeout_s=0.2)
+
+
+def test_shutdown_traces_runs_in_a_daemon_thread(mock_client: MagicMock) -> None:
+    seen: list[tuple[str, bool]] = []
+    mock_client.shutdown.side_effect = lambda: seen.append(
+        (threading.current_thread().name, threading.current_thread().daemon)
+    )
+
+    assert shutdown_traces() is True
+    assert seen == [("langfuse-shutdown", True)]
+
+
+def test_shutdown_traces_default_bound_is_read_at_call_time(
+    mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert tracing.TRACE_SHUTDOWN_TIMEOUT_S == 5.0
+    release = threading.Event()
+    mock_client.shutdown.side_effect = lambda: release.wait()
+    monkeypatch.setattr(tracing, "TRACE_SHUTDOWN_TIMEOUT_S", 0.1)
+
+    try:
+        started = time.monotonic()
+        ok = shutdown_traces()
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert ok is False
+    assert elapsed < 1.0
+
+
 def test_incident_trace_id_is_uuid_hex() -> None:
     incident_id = uuid.uuid4()
 
@@ -865,3 +916,70 @@ async def test_lifespan_shuts_down_langfuse_after_failed_startup(
             pytest.fail("startup should not have completed")
 
     mock_client.shutdown.assert_called_once_with()
+
+
+@pytest.mark.parametrize("pool_fails", [True, False])
+async def test_lifespan_teardown_is_bounded_when_langfuse_hangs(
+    light_lifespan: MagicMock,
+    mock_client: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    pool_fails: bool,
+) -> None:
+    """Keys set, no network: a hung LangFuse flush must not hold the pod. Teardown ends within the
+    bound, and a failed startup still raises, so uvicorn exits and K8s restarts the pod."""
+    release = threading.Event()
+    mock_client.shutdown.side_effect = lambda: release.wait()
+    monkeypatch.setattr(tracing, "TRACE_SHUTDOWN_TIMEOUT_S", 0.2)
+    close_pool = AsyncMock()
+    monkeypatch.setattr(main, "close_pool", close_pool)
+    if pool_fails:
+        monkeypatch.setattr(
+            main, "init_pool_from_settings", AsyncMock(side_effect=OSError("pool unreachable"))
+        )
+
+    try:
+        started = time.monotonic()
+        if pool_fails:
+            with pytest.raises(OSError, match="pool unreachable"):
+                async with main.lifespan(FastAPI()):
+                    pytest.fail("startup should not have completed")
+        else:
+            async with main.lifespan(FastAPI()):
+                pass
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert elapsed < 2.0  # well under the 5.0 default, so the bound is the one applied
+    mock_client.shutdown.assert_called_once_with()
+    close_pool.assert_awaited_once_with()
+
+
+_HUNG_SHUTDOWN_SCRIPT = """
+import sys
+import threading
+
+from sentinel.infra import tracing
+
+
+class _Hung:
+    def shutdown(self) -> None:
+        threading.Event().wait()
+
+
+tracing.get_client = lambda: _Hung()
+sys.exit(3 if tracing.shutdown_traces(timeout_s=0.2) is False else 4)
+"""
+
+
+def test_hung_langfuse_shutdown_does_not_block_interpreter_exit() -> None:
+    proc = subprocess.run(
+        [sys.executable, "-c", _HUNG_SHUTDOWN_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=Path(__file__).resolve().parents[2],
+    )
+
+    assert proc.returncode == 3, proc.stderr
