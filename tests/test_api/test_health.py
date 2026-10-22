@@ -128,18 +128,28 @@ def test_ready_database_configured_without_pool_is_503() -> None:
 
 
 @pytest.mark.parametrize(
-    ("database_url", "environ", "expected"),
+    ("fields", "expected"),
     [
-        ("", {}, False),
-        ("  ", {}, False),
-        ("postgresql://u:p@h/db", {}, True),
-        ("", {"PGHOST": "h"}, True),
-        ("", {"PGUSER": " "}, False),
+        ({}, False),
+        ({"database_url": "  "}, False),
+        ({"database_url": "postgresql://u:p@h/db"}, True),
+        ({"pghost": "h"}, True),
+        ({"pgdatabase": "sentinel"}, True),
+        ({"pguser": "u"}, True),
+        ({"pguser": " "}, False),
     ],
 )
-def test_database_configured(database_url: str, environ: dict[str, str], expected: bool) -> None:
-    settings = Settings(database_url=database_url, _env_file=None)
-    assert database_configured(settings, environ) is expected
+def test_database_configured(fields: dict[str, str], expected: bool) -> None:
+    settings = Settings(_env_file=None, **fields)  # type: ignore[arg-type]
+    assert database_configured(settings) is expected
+
+
+def test_database_configured_ignores_the_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PGHOST", "h")
+    settings = Settings(_env_file=None, pghost=None)  # type: ignore[call-arg]
+    assert database_configured(settings) is False
 
 
 # ── /ready with a pool ────────────────────────────────────────────────────────
@@ -217,3 +227,14 @@ def test_lifespan_ready_with_database(
         resp = client.get("/ready")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ready"}
+
+
+def test_lifespan_pg_env_without_pool_is_not_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _lifespan_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("PGHOST", "h")  # incomplete libpq config: no pool opens
+    with TestClient(main.create_app()) as client:
+        resp = client.get("/ready")
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "not_ready"}

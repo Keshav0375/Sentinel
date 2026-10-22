@@ -6,15 +6,14 @@ The only unauthenticated routes (decision 2026-10-19); K8s probes carry no token
 from __future__ import annotations
 
 import asyncio
-import os
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 
-from sentinel.config import Settings, get_settings
+from sentinel.config import Settings
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra.database import acquire
 from sentinel.infra.logging import get_logger
@@ -22,9 +21,6 @@ from sentinel.infra.logging import get_logger
 logger = get_logger("sentinel.api.health")
 
 READY_PING_TIMEOUT_S: float = 2.0
-
-# libpq environment variables that configure a database without DATABASE_URL (§8.2).
-_PG_ENV_VARS: tuple[str, ...] = ("PGHOST", "PGDATABASE", "PGUSER")
 
 ReadinessCheck = Callable[[], Awaitable[bool]]
 
@@ -41,19 +37,21 @@ class ReadyResponse(BaseModel):
     status: Literal["ready", "not_ready"]
 
 
-def database_configured(settings: Settings, environ: Mapping[str, str] | None = None) -> bool:
+def database_configured(settings: Settings) -> bool:
     """Say whether a Postgres database is configured for this process.
 
+    Read from the loaded Settings only; never reads the process environment.
+
     Args:
-        settings: Loaded settings; a non-blank ``database_url`` counts as configured.
-        environ: Environment to inspect for ``PGHOST``/``PGDATABASE``/``PGUSER``;
-            defaults to ``os.environ``.
+        settings: Loaded settings; a non-blank ``database_url`` or any set libpq field
+            (``pghost``, ``pgdatabase``, ``pguser``; Settings maps blank to None) counts.
 
     Returns:
-        True when ``database_url`` or any libpq variable is non-blank.
+        True when ``database_url`` or any of those fields is set.
     """
-    env = os.environ if environ is None else environ
-    return bool(settings.database_url.strip()) or any(env.get(v, "").strip() for v in _PG_ENV_VARS)
+    return bool(settings.database_url.strip()) or any(
+        v is not None for v in (settings.pghost, settings.pgdatabase, settings.pguser)
+    )
 
 
 async def ping_database(pool: asyncpg.Pool, *, timeout_s: float = READY_PING_TIMEOUT_S) -> bool:
@@ -79,28 +77,26 @@ async def ping_database(pool: asyncpg.Pool, *, timeout_s: float = READY_PING_TIM
 def db_readiness(
     pool: asyncpg.Pool | None,
     *,
-    db_configured: bool | None = None,
+    db_configured: bool,
     timeout_s: float = READY_PING_TIMEOUT_S,
 ) -> ReadinessCheck:
     """Build the readiness check for a (possibly absent) database pool.
 
     Args:
         pool: The asyncpg pool, or None when none was opened.
-        db_configured: Whether a database is configured; resolved once, now, from
-            settings and the environment when None.
+        db_configured: Whether a database is configured (see :func:`database_configured`).
         timeout_s: Bound for the ping.
 
     Returns:
         A coroutine function: True when ready. With a pool it pings the database;
         without one it is ready only when no database is configured.
     """
-    configured = database_configured(get_settings()) if db_configured is None else db_configured
 
     async def check() -> bool:
         if pool is None:
-            if configured:
+            if db_configured:
                 logger.warning("ready_db_pool_missing")
-            return not configured
+            return not db_configured
         return await ping_database(pool, timeout_s=timeout_s)
 
     return check

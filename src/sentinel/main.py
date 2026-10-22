@@ -27,7 +27,7 @@ from sentinel.api.config_view import make_config_router
 from sentinel.api.eval_report import make_eval_report_router
 from sentinel.api.events import make_events_router
 from sentinel.api.generate import make_generate_router
-from sentinel.api.health import db_readiness, make_health_router
+from sentinel.api.health import database_configured, db_readiness, make_health_router
 from sentinel.api.incidents import make_incidents_router
 from sentinel.api.scenarios import make_scenarios_router
 from sentinel.api.trajectories import make_trajectories_router
@@ -252,7 +252,9 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
             effect="the dashboard pages and their read APIs serve WITHOUT auth: "
             "local use only, never in the pod",
         )
-    app.include_router(make_health_router(db_readiness(pool)))  # open (§3.5)
+    app.include_router(
+        make_health_router(db_readiness(pool, db_configured=database_configured(settings)))
+    )  # open (§3.5)
     app.include_router(
         make_incident_router(short_term_memory, episodic_memory, pipeline_fn),
         dependencies=protected,
