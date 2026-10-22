@@ -133,7 +133,8 @@ class Settings(BaseSettings):
 
     # ── Azure runtime access (§8.2; decision 2026-10-19) ─────────────────────
     # Key Vault with datadog-api-key, datadog-app-key, langfuse-public-key/-secret-key/-base-url,
-    # read once at startup (infra/workload_identity). Unset → env only. LLM keys never come from it.
+    # read once at startup (restart to rotate; infra/workload_identity). Unset → env only.
+    # LLM keys never come from it.
     key_vault_url: str | None = None
     # Entra-only Azure PostgreSQL, used only when DATABASE_URL is blank: all three or none. The
     # password is an Entra token fetched per new connection

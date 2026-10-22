@@ -3,7 +3,9 @@
 backend.md §8.2 and the decision of 2026-10-19 ("Runtime config"). One
 ``DefaultAzureCredential`` per process (workload identity in the pod) is built lazily on
 first use, so nothing here calls Azure at import or at a boot without ``KEY_VAULT_URL`` /
-``PGHOST``. The vault is read once at startup; secret values are never logged.
+``PGHOST``. The vault is read once at startup (§8.2 implies re-reads; not implemented): a
+rotated secret takes effect after a pod restart (``kubectl rollout restart``). Secret values
+are never logged.
 """
 
 from __future__ import annotations
