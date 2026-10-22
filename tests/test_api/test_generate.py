@@ -21,6 +21,7 @@ import asyncpg
 import httpx
 import litellm
 import pytest
+from agents import MaxTurnsExceeded, ModelBehaviorError
 from alembic import command
 from alembic.config import Config
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
@@ -361,6 +362,20 @@ async def test_a_provider_failure_after_fallback_is_502(monkeypatch: pytest.Monk
     assert response.status_code == 502
     assert response.json()["detail"] == "the LLM provider failed to generate the PR content"
     assert [m for _, m in script.calls] == [HAIKU] * 3 + [GPT_MINI] * 3
+
+
+@pytest.mark.parametrize(
+    "exc", [ModelBehaviorError("bad output"), MaxTurnsExceeded("too many turns")]
+)
+async def test_an_agents_sdk_error_is_502(exc: Exception, monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = _StubEpisodic(_incident())
+    _stub_check(monkeypatch)
+    monkeypatch.setattr(generate_module, "generate_pr_content", AsyncMock(side_effect=exc))
+
+    response = await _post(_app(_stub_router(stub, pool=MagicMock())), _body())
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "the LLM provider failed to generate the PR content"
 
 
 async def test_a_database_failure_during_the_cross_check_is_503() -> None:

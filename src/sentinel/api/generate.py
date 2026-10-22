@@ -9,7 +9,8 @@ verified row before the text is written.
 Failures: 404 the incident does not exist; 409 no matching ``deployments`` row or the
 row disagrees with the target; 503 the incident or the target cannot be checked (no
 database, database error) or no LLM provider is configured; 502 the provider failed
-after its fallback. Authentication is applied by the caller at ``include_router``.
+after its fallback, or the agents SDK rejected the run (``AgentsException``: model
+behaviour, max turns, ...). Authentication is applied by the caller at ``include_router``.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Final
 
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 import openai
+from agents import AgentsException
 from fastapi import APIRouter, HTTPException
 
 from sentinel.agents.pr_content_generator import generate_pr_content
@@ -114,7 +116,7 @@ def make_generate_router(
                 "pr_content_provider_unavailable", incident_id=spec.incident_id, error=str(exc)
             )
             raise HTTPException(status_code=503, detail="no LLM provider is configured") from exc
-        except (openai.APIError, TimeoutError) as exc:
+        except (openai.APIError, TimeoutError, AgentsException) as exc:
             logger.error(
                 "pr_content_provider_failed",
                 incident_id=spec.incident_id,
