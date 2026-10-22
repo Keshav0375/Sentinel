@@ -26,6 +26,7 @@ from sentinel.models.memory import DeploymentRow, IncidentRow
 
 IN_PROGRESS: Final = "in_progress"
 _DEFAULT_LIMIT: Final = 50  # EpisodicMemory.list_incidents' default
+_MAX_LIMIT: Final = 200
 
 
 class IncidentListResponse(BaseModel):
@@ -120,12 +121,13 @@ def make_incidents_router(
     async def list_incidents(  # pyright: ignore[reportUnusedFunction]
         status: str | None = None,
         service: str | None = None,
-        limit: Annotated[int, Query(ge=1)] = _DEFAULT_LIMIT,
+        limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
     ) -> IncidentListResponse:
         """List incidents: in-flight first, then stored newest first.
 
         ``status=in_progress`` lists only the in-flight ones; any other status only the
-        stored ones; none lists both. ``service`` filters both.
+        stored ones; none lists both. ``service`` filters both. ``limit`` is 1-200
+        (default 50).
         """
         try:
             in_flight = await _in_flight(service) if status in (None, IN_PROGRESS) else []

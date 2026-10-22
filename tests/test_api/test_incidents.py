@@ -279,6 +279,19 @@ async def test_list_rejects_a_limit_below_one() -> None:
     assert (await _get(app, "/incidents", limit=0)).status_code == 422
 
 
+async def test_list_rejects_a_limit_above_200() -> None:
+    app = _app(ShortTermMemory(), EpisodicMemory(None, EmbeddingClient(MagicMock())))
+    assert (await _get(app, "/incidents", limit=201)).status_code == 422
+
+
+async def test_list_accepts_limit_200() -> None:
+    # A placeholder pool: with no in-flight incident the in-progress listing never queries it.
+    app = _app(ShortTermMemory(), EpisodicMemory(MagicMock(), EmbeddingClient(MagicMock())))
+    response = await _get(app, "/incidents", status="in_progress", limit=200)
+    assert response.status_code == 200
+    assert response.json() == {"incidents": []}
+
+
 # ── GET /incidents ────────────────────────────────────────────────────────────
 
 
