@@ -288,7 +288,13 @@ def _wire_app(
         make_health_router(db_readiness(pool, db_configured=database_configured(settings)))
     )  # open (§3.5)
     app.include_router(
-        make_incident_router(short_term_memory, episodic_memory, pipeline_fn, tasks=incident_tasks),
+        make_incident_router(
+            short_term_memory,
+            episodic_memory,
+            pipeline_fn,
+            tasks=incident_tasks,
+            max_body_bytes=settings.sentinel_webhook_max_body_bytes,
+        ),
         dependencies=protected,
     )
     app.include_router(

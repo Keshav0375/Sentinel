@@ -35,7 +35,7 @@ from sentinel.api.webhooks import (
     PipelineFn,
     make_incident_router,
 )
-from sentinel.config import Settings
+from sentinel.config import WEBHOOK_MAX_BODY_BYTES, Settings
 from sentinel.infra import incident_tasks as tasks_module
 from sentinel.infra.database import create_pool
 from sentinel.infra.incident_tasks import IncidentTasks
@@ -147,10 +147,18 @@ def _app(
     pipeline_fn: PipelineFn | None,
     tasks: IncidentTasks,
     dedup: CorrelationDeduplicator | None = None,
+    max_body_bytes: int = WEBHOOK_MAX_BODY_BYTES,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(
-        make_incident_router(stm, episodic, pipeline_fn, deduplicator=dedup, tasks=tasks)
+        make_incident_router(
+            stm,
+            episodic,
+            pipeline_fn,
+            deduplicator=dedup,
+            tasks=tasks,
+            max_body_bytes=max_body_bytes,
+        )
     )
     return app
 
@@ -635,6 +643,44 @@ async def test_pipeline_failure_is_logged_with_incident_id(
     assert len(failed) == 1
     assert failed[0]["incident_id"] == r.json()["incident_id"]
     assert failed[0]["error"] == "boom"
+
+
+async def test_oversized_body_is_413() -> None:
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
+    app = _app(stm, _no_db(), stub, tasks, max_body_bytes=1024)
+    async with _client(app) as client:
+        r = await client.post("/webhooks/incident", json=_payload(title="x" * 2048))
+
+    assert r.status_code == 413
+    assert r.json() == {"detail": "request body exceeds 1024 bytes"}
+    assert stub.requests == [] and stm.active_count == 0
+
+
+async def test_oversized_chunked_body_is_413() -> None:
+    async def chunks() -> AsyncIterator[bytes]:
+        for _ in range(3):
+            yield b" " * 600  # no Content-Length: the cap trips while streaming
+
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
+    app = _app(stm, _no_db(), stub, tasks, max_body_bytes=1024)
+    async with _client(app) as client:
+        r = await client.post(
+            "/webhooks/incident", content=chunks(), headers={"content-type": "application/json"}
+        )
+
+    assert r.status_code == 413
+    assert stub.requests == []
+
+
+async def test_body_under_the_cap_is_accepted() -> None:
+    stm, stub, tasks = ShortTermMemory(), _Stub(), IncidentTasks()
+    app = _app(stm, _no_db(), stub, tasks, max_body_bytes=4096)
+    async with _client(app) as client:
+        r = await client.post("/webhooks/incident", json=_payload())
+        await _drain(tasks)
+
+    assert r.status_code == 202
+    assert len(stub.requests) == 1  # the replayed body reached FastAPI's parser
 
 
 async def test_two_concurrent_incidents_are_isolated(

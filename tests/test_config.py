@@ -133,21 +133,28 @@ def test_new_fields_read_their_env_vars(
 
 def test_safety_limit_defaults(no_settings_env: None) -> None:
     s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_webhook_max_body_bytes == 262144
     assert s.sentinel_max_concurrent_pipelines == 5
     assert s.sentinel_shutdown_grace_s == 20.0
 
 
 def test_safety_limits_read_env(no_settings_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTINEL_WEBHOOK_MAX_BODY_BYTES", "1024")
     monkeypatch.setenv("SENTINEL_MAX_CONCURRENT_PIPELINES", "2")
     monkeypatch.setenv("SENTINEL_SHUTDOWN_GRACE_S", "0")
     s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_webhook_max_body_bytes == 1024
     assert s.sentinel_max_concurrent_pipelines == 2
     assert s.sentinel_shutdown_grace_s == 0.0
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("sentinel_max_concurrent_pipelines", 0), ("sentinel_shutdown_grace_s", -1)],
+    [
+        ("sentinel_webhook_max_body_bytes", 0),
+        ("sentinel_max_concurrent_pipelines", 0),
+        ("sentinel_shutdown_grace_s", -1),
+    ],
 )
 def test_safety_limits_reject_bad_values(field: str, value: float) -> None:
     with pytest.raises(ValidationError, match=field):
@@ -171,6 +178,7 @@ def test_sample_env_loads(no_settings_env: None) -> None:
     assert s.sentinel_log_level == "INFO"
     assert s.sentinel_embedding_model == "all-MiniLM-L6-v2"
     assert (s.sentinel_db_pool_min, s.sentinel_db_pool_max) == (2, 10)
+    assert s.sentinel_webhook_max_body_bytes == 262144
     assert s.sentinel_max_concurrent_pipelines == 5
     assert s.sentinel_shutdown_grace_s == 20.0
     assert s.database_url == ""

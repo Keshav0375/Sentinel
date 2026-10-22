@@ -11,6 +11,7 @@ behind ``require_incident_write`` (backend 5.5).
   incidents (``EpisodicMemory.find_incident_by_correlation_id``; an unavailable database is
   logged and treated as a miss). A duplicate answers 202 with the original ``incident_id``
   and ``status: "duplicate"`` and starts nothing.
+- **Body cap.** Over ``SENTINEL_WEBHOOK_MAX_BODY_BYTES`` (256 KB) → 413 before parsing or auth.
 - **One task per incident.** Created in the handler, outside any span (§4.5), with its own
   entry in the shared short-term memory. The shared :class:`IncidentTasks` keeps each task
   until it ends, logs a task failure with its incident_id, caps concurrency (429 +
@@ -23,13 +24,16 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from typing import Annotated, Final, Literal
+from typing import Annotated, Any, Final, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Response
+from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
+from starlette.types import Message, Receive
 
+from sentinel.config import WEBHOOK_MAX_BODY_BYTES
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra.incident_tasks import IncidentTasks
 from sentinel.infra.logging import get_logger
@@ -122,6 +126,63 @@ def _same_uuid(a: str, b: str) -> bool:
         return False
 
 
+def _too_large(limit: int) -> HTTPException:
+    logger.warning("webhook_body_too_large", limit_bytes=limit)
+    return HTTPException(status_code=413, detail=f"request body exceeds {limit} bytes")
+
+
+async def read_capped_body(request: Request, limit: int) -> bytes:
+    """The request body, read without ever holding more than *limit* bytes (+ one chunk).
+
+    Raises:
+        HTTPException: 413 when ``Content-Length`` exceeds *limit* (nothing is read) or the
+            streamed body grows past it.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        raise _too_large(limit)
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise _too_large(limit)
+    return bytes(body)
+
+
+def _replay(body: bytes, receive: Receive) -> Receive:
+    """An ASGI ``receive`` that yields *body* once, then defers to the real one."""
+    sent = False
+
+    async def replay() -> Message:
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    return replay
+
+
+def capped_body_route(limit: int) -> type[APIRoute]:
+    """An ``APIRoute`` class that answers 413 to a body over *limit* before FastAPI parses it.
+
+    It reads the body itself, so it also runs ahead of the auth dependency: an
+    unauthenticated oversized body is cut off too. The body is replayed to the real handler.
+    """
+
+    class CappedBodyRoute(APIRoute):
+        def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+            handler = super().get_route_handler()
+
+            async def capped(request: Request) -> Response:
+                body = await read_capped_body(request, limit)
+                return await handler(Request(request.scope, _replay(body, request.receive)))
+
+            return capped
+
+    return CappedBodyRoute
+
+
 async def _await(awaitable: Awaitable[None]) -> None:
     """Wrap an awaitable as the coroutine ``asyncio.create_task`` takes."""
     await awaitable
@@ -134,6 +195,7 @@ def make_incident_router(
     *,
     deduplicator: CorrelationDeduplicator | None = None,
     tasks: IncidentTasks | None = None,
+    max_body_bytes: int = WEBHOOK_MAX_BODY_BYTES,
 ) -> APIRouter:
     """Create the incident webhook router.
 
@@ -145,11 +207,12 @@ def make_incident_router(
         deduplicator: The in-memory cache (default: a fresh 24 h one).
         tasks: The shared in-flight registry (main passes the lifespan's; it caps
             concurrency and is drained at shutdown). Default: a fresh one.
+        max_body_bytes: Body cap; a larger request is 413 before parsing or auth.
 
     Returns:
         ``APIRouter`` with ``POST /webhooks/incident`` registered.
     """
-    router = APIRouter()
+    router = APIRouter(route_class=capped_body_route(max_body_bytes))
     dedup = deduplicator if deduplicator is not None else CorrelationDeduplicator()
     running = tasks if tasks is not None else IncidentTasks()
 

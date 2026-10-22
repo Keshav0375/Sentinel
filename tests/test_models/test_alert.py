@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from sentinel.models.alert import (
     SIGNAL_TYPES,
+    TRUNCATED,
     AlertPayload,
     AlertSeverity,
     AlertSource,
@@ -226,6 +227,44 @@ def test_incident_alert_from_payload_copies_fields() -> None:
     assert (alert.alert_id, alert.dd_event_id, alert.source) == ("a-1", "evt", "datadog")
     assert (alert.severity, alert.service, alert.timestamp) == ("critical", "svc", ts)
     assert alert.tags.service == "svc"
+
+
+def test_from_payload_bounds_recent_logs() -> None:
+    logs = [f"log {i}" for i in range(60)]
+    alert = IncidentAlert.from_payload(_incident(context={"recent_logs": logs}))
+    assert len(alert.context.recent_logs) == 51
+    assert alert.context.recent_logs[:50] == logs[:50]
+    assert alert.context.recent_logs[-1] == "[10 more log entries truncated]"
+
+
+def test_from_payload_bounds_service_metadata() -> None:
+    metadata = {f"k{i}": i for i in range(55)}
+    alert = IncidentAlert.from_payload(_incident(context={"service_metadata": metadata}))
+    bounded = alert.context.service_metadata
+    assert bounded is not None
+    assert len(bounded) == 51
+    assert bounded["_truncated"] == "5 more keys truncated"
+    assert bounded["k0"] == 0 and "k54" not in bounded
+
+
+def test_from_payload_truncates_a_long_item() -> None:
+    alert = IncidentAlert.from_payload(_incident(context={"recent_logs": [{"msg": "y" * 5000}]}))
+    (item,) = alert.context.recent_logs
+    assert isinstance(item, str)
+    assert len(item) == 2000 + len(TRUNCATED)
+    assert item.endswith(TRUNCATED)
+
+
+def test_from_payload_small_context_unchanged() -> None:
+    context = {
+        "recent_logs": ["a", {"b": 1}],
+        "service_metadata": {"x": 1, "y": "two"},
+        "pr_details": {"number": 7, "sha": "abc1234", "files_changed": ["f.py"]},
+    }
+    payload = _incident(context=context)
+    alert = IncidentAlert.from_payload(payload)
+    assert alert.context == payload.context
+    assert alert.pr_sha == "abc1234"
 
 
 def test_pr_sha() -> None:

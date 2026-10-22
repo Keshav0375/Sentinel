@@ -9,6 +9,7 @@ for the scenario generator and the eval runner until backend 9.1 deletes them;
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -22,6 +23,11 @@ SIGNAL_TYPES: Final[tuple[SignalType, ...]] = get_args(SignalType)
 # Stand-in for a NOT NULL column whose source field is absent (never a guessed value).
 UNKNOWN: Final = "unknown"
 _TAG_KEYS: Final = ("service", "deploy_status", "failed_stage", "version")
+# Bounds on the sender-controlled context that prompts embed (see ``bounded_context``).
+MAX_RECENT_LOGS: Final = 50
+MAX_METADATA_KEYS: Final = 50
+MAX_CONTEXT_ITEM_CHARS: Final = 2000
+TRUNCATED: Final = "…[truncated]"
 
 
 class AlertSource(StrEnum):
@@ -159,6 +165,35 @@ class IncidentPayload(BaseModel):
         return {} if value is None else value
 
 
+def _bounded_value(value: JsonValue) -> JsonValue:
+    """*value*, or its JSON cut to ``MAX_CONTEXT_ITEM_CHARS`` plus ``TRUNCATED`` when longer."""
+    encoded = json.dumps(value, default=str)
+    if len(encoded) <= MAX_CONTEXT_ITEM_CHARS:
+        return value
+    return encoded[:MAX_CONTEXT_ITEM_CHARS] + TRUNCATED
+
+
+def bounded_context(context: IncidentContext) -> IncidentContext:
+    """*context* with ``recent_logs`` and ``service_metadata`` bounded; the rest untouched.
+
+    Keeps the first ``MAX_RECENT_LOGS`` logs and ``MAX_METADATA_KEYS`` metadata keys (a
+    marker records how many were dropped), and cuts any single item or value over
+    ``MAX_CONTEXT_ITEM_CHARS``. ``pr_details`` is left alone: the SHA pin reads it.
+    """
+    logs = [_bounded_value(v) for v in context.recent_logs[:MAX_RECENT_LOGS]]
+    dropped_logs = len(context.recent_logs) - len(logs)
+    if dropped_logs > 0:
+        logs.append(f"[{dropped_logs} more log entries truncated]")
+    metadata = context.service_metadata
+    if metadata is not None:
+        kept = {k: _bounded_value(v) for k, v in list(metadata.items())[:MAX_METADATA_KEYS]}
+        dropped_keys = len(metadata) - len(kept)
+        if dropped_keys > 0:
+            kept["_truncated"] = f"{dropped_keys} more keys truncated"
+        metadata = kept
+    return context.model_copy(update={"recent_logs": logs, "service_metadata": metadata})
+
+
 class IncidentAlert(BaseModel):
     """What the pipeline sees of an incident's alert (observed facts only)."""
 
@@ -181,7 +216,10 @@ class IncidentAlert(BaseModel):
 
     @classmethod
     def from_payload(cls, payload: IncidentPayload) -> IncidentAlert:
-        """The alert for *payload*; NOT NULL columns with no source get ``"unknown"``."""
+        """The alert for *payload*, its context bounded before it reaches a prompt.
+
+        NOT NULL columns with no source get ``"unknown"``.
+        """
         return cls(
             alert_id=payload.alert_id or UNKNOWN,
             source=payload.source,
@@ -190,7 +228,7 @@ class IncidentAlert(BaseModel):
             severity=payload.severity,
             service=payload.tags.service or UNKNOWN,
             tags=payload.tags,
-            context=payload.context,
+            context=bounded_context(payload.context),
             timestamp=payload.timestamp,
         )
 
