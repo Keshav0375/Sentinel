@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -99,6 +100,10 @@ class TestScenariosEndpoint:
 
 
 class TestDashboardRoute:
+    @pytest.fixture(autouse=True)
+    def _open_dashboard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")
+
     def test_get_root_returns_html(self) -> None:
         from sentinel.main import create_app
 

@@ -11,6 +11,7 @@ import traceback
 import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -24,6 +25,7 @@ from sentinel.infra.database import (
     acquire,
     close_pool,
     create_pool,
+    entra_dsn,
     get_pool,
     init_pool,
     init_pool_from_settings,
@@ -403,3 +405,74 @@ async def test_unparseable_dsn_never_leaks_from_lazy_acquire(
 async def test_invalid_bounds_wrapped(pg_dsn: str) -> None:
     with pytest.raises(SentinelMemoryError):
         await create_pool(pg_dsn, min_size=5, max_size=2)
+
+
+# ── Entra-only Azure server (PG* variables; no database needed) ───────────────
+
+_PG_HOST = "sentinel-pg-0375.postgres.database.azure.com"
+
+
+def test_entra_dsn_quotes_user_and_database() -> None:
+    assert (
+        entra_dsn("h.postgres.database.azure.com", "sentinel", "sentinel-backend-wi")
+        == "postgresql://sentinel-backend-wi@h.postgres.database.azure.com:5432/sentinel"
+        "?sslmode=require"
+    )
+    assert "a%20b%40c@" in entra_dsn("h", "sentinel", "a b@c")
+
+
+async def test_init_from_settings_pg_env_uses_entra_password_callable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = object()
+    init = AsyncMock(return_value=pool)
+    monkeypatch.setattr(database, "init_pool", init)
+    password = AsyncMock(return_value="tok")
+    factory = MagicMock(return_value=password)
+    settings = _settings(pghost=_PG_HOST, pgdatabase="sentinel", pguser="sentinel-backend-wi")
+    assert await init_pool_from_settings(settings, password_factory=factory) is pool
+    init.assert_awaited_once_with(
+        entra_dsn(_PG_HOST, "sentinel", "sentinel-backend-wi"),
+        min_size=2,
+        max_size=10,
+        password=password,
+    )
+    factory.assert_called_once_with()
+
+
+async def test_init_from_settings_database_url_wins_over_pg_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    init = AsyncMock(return_value=object())
+    monkeypatch.setattr(database, "init_pool", init)
+    factory = MagicMock()
+    url = "postgresql://u:p@localhost:5432/db"
+    settings = _settings(
+        database_url=url, pghost=_PG_HOST, pgdatabase="sentinel", pguser="sentinel-backend-wi"
+    )
+    await init_pool_from_settings(settings, password_factory=factory)
+    init.assert_awaited_once_with(url, min_size=2, max_size=10)
+    factory.assert_not_called()
+
+
+async def test_init_from_settings_partial_pg_env_creates_no_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    init = AsyncMock()
+    monkeypatch.setattr(database, "init_pool", init)
+    factory = MagicMock()
+    assert (
+        await init_pool_from_settings(_settings(pghost=_PG_HOST), password_factory=factory) is None
+    )
+    init.assert_not_awaited()
+    factory.assert_not_called()
+
+
+async def test_init_from_settings_pg_env_without_token_provider_creates_no_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    init = AsyncMock()
+    monkeypatch.setattr(database, "init_pool", init)
+    settings = _settings(pghost=_PG_HOST, pgdatabase="sentinel", pguser="sentinel-backend-wi")
+    assert await init_pool_from_settings(settings) is None
+    init.assert_not_awaited()

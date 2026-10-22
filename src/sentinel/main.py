@@ -5,7 +5,7 @@ Run with::
     uvicorn sentinel.main:app --reload
 
 The app must be launched from the project root so that the ``data`` package
-(seed script, scenario files) is importable.
+(scenario files) is importable.
 """
 
 from __future__ import annotations
@@ -14,16 +14,19 @@ import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Final
 
 # asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
-from fastapi import FastAPI
+from fastapi import APIRouter, Depends, FastAPI, params
 from fastapi.responses import HTMLResponse
 
 from sentinel.agents.orchestrator import ORCHESTRATOR, PipelineDeps, run_pipeline
+from sentinel.api.auth import configure_auth, require_incident_write
 from sentinel.api.config_view import make_config_router
 from sentinel.api.eval_report import make_eval_report_router
 from sentinel.api.events import make_events_router
+from sentinel.api.generate import make_generate_router
 from sentinel.api.health import db_readiness, make_health_router
 from sentinel.api.incidents import make_incidents_router
 from sentinel.api.scenarios import make_scenarios_router
@@ -32,7 +35,6 @@ from sentinel.api.webhooks import PipelineFn, make_incident_router
 from sentinel.config import Settings, get_settings
 from sentinel.infra.dashboard_emitter import DashboardEventEmitter
 from sentinel.infra.database import close_pool, init_pool_from_settings
-from sentinel.infra.db import create_tables
 from sentinel.infra.event_bus import EventBus, EventType, PipelineEvent
 from sentinel.infra.logging import configure_logging, get_logger
 from sentinel.infra.tracing import (
@@ -40,6 +42,11 @@ from sentinel.infra.tracing import (
     configure_langfuse,
     install_trace_processors,
     shutdown_traces,
+)
+from sentinel.infra.workload_identity import (
+    LazyAzureCredential,
+    entra_token_password,
+    load_key_vault_secrets,
 )
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
@@ -53,6 +60,17 @@ _DASHBOARD_HTML = Path(__file__).resolve().parent / "dashboard" / "index.html"
 _EVAL_HTML = Path(__file__).resolve().parent / "dashboard" / "eval.html"
 
 logger = get_logger("sentinel.main")
+
+# Routes served without a token under SENTINEL_DEV_OPEN_DASHBOARD (used only in the warning log).
+DEV_OPEN_ROUTES: Final[tuple[str, ...]] = (
+    "GET /",
+    "GET /eval",
+    "GET /api/scenarios",
+    "GET /api/config",
+    "GET /api/trajectories",
+    "GET /api/eval-report",
+    "GET /events/{incident_id}",
+)
 
 
 def make_pipeline_fn(
@@ -132,52 +150,51 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     Startup order:
     1. Load config and configure structured logging.
-    2. Create SQLite tables (idempotent); open the asyncpg pool if DATABASE_URL
-       is a Postgres DSN (closed again at shutdown).
-    3. Seed service map and runbooks (idempotent INSERT OR REPLACE).
-    4. Build memory clients (SemanticMemory, EpisodicMemory, ShortTermMemory).
-    5. Apply the SDK defaults (chat-completions API, trace export key).
-    6. Wire the pipeline callback (agents are built per incident).
-    7. Mount all API routers.
+    2. Configure the Entra bearer validator (never raises; unconfigured → 401 everywhere).
+    3. Read the Key Vault secrets (when KEY_VAULT_URL is set) BEFORE LangFuse, whose
+       client reads LANGFUSE_* from the environment at configure time.
+    4. Configure LangFuse.
+    5. Open the asyncpg pool: DATABASE_URL, else PGHOST/PGDATABASE/PGUSER with an Entra
+       token as the password for every new connection.
+    6. Wire memory clients, the SDK defaults, the pipeline callback and the routers.
 
-    On exit (or a failed startup) the LangFuse client is shut down (flushing pending
-    spans) and the asyncpg pool is closed.
+    Teardown (each step runs even if the one before it raised or was cancelled): the
+    LangFuse client is shut down (flushing pending spans), the pool is closed, then the
+    Azure credential (the pool's password callable uses it) is closed.
     """
     settings = get_settings()
     configure_logging(settings.sentinel_log_level)
-    logger.info(
-        "sentinel_startup",
-        db_path=str(settings.sentinel_db_path),
-        langfuse_enabled=configure_langfuse(),
-    )
-
-    # ── Database ──────────────────────────────────────────────────────────────
-    await create_tables(settings.sentinel_db_path)
-
+    auth_configured = configure_auth(settings)
+    credential = LazyAzureCredential()
     try:
-        from data.seed import seed  # noqa: PLC0415 — lazy import, data/ must be on path
-
-        await seed(settings.sentinel_db_path, verbose=False)
-    except ImportError:
-        logger.warning("seed_skipped", reason="data package not on Python path")
-
-    # Phase-2 Postgres pool — runs beside SQLite until db.py is retired (§13.5).
-    # Opened inside the try: a failure anywhere later in startup still closes it, so a
-    # failed startup leaves no open connections and no stale module-level pool.
-    try:
-        pool = await init_pool_from_settings(settings)
+        settings = await load_key_vault_secrets(settings, credential)
+        logger.info(
+            "sentinel_startup",
+            langfuse_enabled=configure_langfuse(),
+            auth_configured=auth_configured,
+            key_vault=settings.key_vault_url is not None,
+            dev_open_dashboard=settings.sentinel_dev_open_dashboard,
+        )
+        # Opened inside the try: a failure anywhere later in startup still closes it, so a
+        # failed startup leaves no open connections and no stale module-level pool.
+        pool = await init_pool_from_settings(
+            settings, password_factory=lambda: entra_token_password(credential.get())
+        )
         _wire_app(app, settings, pool)
         logger.info("sentinel_ready")
         yield
     finally:
         # Flushing can block on network I/O, so it runs off the loop. shutdown_traces
         # never raises, but the await can still be cancelled (e.g. a second SIGTERM):
-        # the nested finally closes the pool regardless.
+        # the nested finally blocks close the pool and the credential regardless.
         try:
             await asyncio.to_thread(shutdown_traces)
         finally:
-            await close_pool()
-            logger.info("sentinel_shutdown")
+            try:
+                await close_pool()
+            finally:
+                credential.close()
+                logger.info("sentinel_shutdown")
 
 
 def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> None:
@@ -186,6 +203,11 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
     *pool* is None when no ``DATABASE_URL`` is configured: semantic and episodic memory
     are still built, and every call to them raises ``SentinelMemoryError`` ("memory
     unavailable").
+
+    Only ``/health`` and ``/ready`` are open. Every other route requires an Entra bearer
+    token with the ``Incident.Write`` role. With ``SENTINEL_DEV_OPEN_DASHBOARD`` the
+    dashboard pages and their read APIs (``DEV_OPEN_ROUTES``) are open as well; the
+    webhook, incidents and generate routes stay protected.
     """
     # ── Memory clients ────────────────────────────────────────────────────────
     embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
@@ -221,14 +243,50 @@ def _wire_app(app: FastAPI, settings: Settings, pool: asyncpg.Pool | None) -> No
         pool=pool,
     )
 
-    app.include_router(make_incident_router(short_term_memory, episodic_memory, pipeline_fn))
-    app.include_router(make_incidents_router(short_term_memory, episodic_memory))
-    app.include_router(make_health_router(db_readiness(pool)))
-    app.include_router(make_events_router(event_bus))
-    app.include_router(make_scenarios_router())
-    app.include_router(make_eval_report_router())
-    app.include_router(make_config_router(settings))
-    app.include_router(make_trajectories_router(trajectories_dir))
+    protected: list[params.Depends] = [Depends(require_incident_write)]
+    dashboard: list[params.Depends] = [] if settings.sentinel_dev_open_dashboard else protected
+    if settings.sentinel_dev_open_dashboard:
+        logger.warning(
+            "dev_open_dashboard",
+            open_routes=list(DEV_OPEN_ROUTES),
+            effect="the dashboard pages and their read APIs serve WITHOUT auth: "
+            "local use only, never in the pod",
+        )
+    app.include_router(make_health_router(db_readiness(pool)))  # open (§3.5)
+    app.include_router(
+        make_incident_router(short_term_memory, episodic_memory, pipeline_fn),
+        dependencies=protected,
+    )
+    app.include_router(
+        make_incidents_router(short_term_memory, episodic_memory), dependencies=protected
+    )
+    app.include_router(
+        make_generate_router(episodic_memory=episodic_memory, pool=pool, settings=settings),
+        dependencies=protected,
+    )
+    app.include_router(make_dashboard_router(), dependencies=dashboard)
+    app.include_router(make_events_router(event_bus), dependencies=dashboard)
+    app.include_router(make_scenarios_router(), dependencies=dashboard)
+    app.include_router(make_eval_report_router(), dependencies=dashboard)
+    app.include_router(make_config_router(settings), dependencies=dashboard)
+    app.include_router(make_trajectories_router(trajectories_dir), dependencies=dashboard)
+
+
+def make_dashboard_router() -> APIRouter:
+    """Router for the dashboard pages: ``GET /`` (live incidents) and ``GET /eval``."""
+    router = APIRouter()
+
+    @router.get("/", response_class=HTMLResponse, include_in_schema=False)
+    async def dashboard() -> str:  # pyright: ignore[reportUnusedFunction]
+        """Serve the live incident dashboard."""
+        return _DASHBOARD_HTML.read_text(encoding="utf-8")
+
+    @router.get("/eval", response_class=HTMLResponse, include_in_schema=False)
+    async def eval_page() -> str:  # pyright: ignore[reportUnusedFunction]
+        """Serve the eval results page."""
+        return _EVAL_HTML.read_text(encoding="utf-8")
+
+    return router
 
 
 def create_app() -> FastAPI:
@@ -243,17 +301,6 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
-
-    @application.get("/", response_class=HTMLResponse, include_in_schema=False)
-    async def dashboard() -> str:  # pyright: ignore[reportUnusedFunction]
-        """Serve the live incident dashboard."""
-        return _DASHBOARD_HTML.read_text(encoding="utf-8")
-
-    @application.get("/eval", response_class=HTMLResponse, include_in_schema=False)
-    async def eval_page() -> str:  # pyright: ignore[reportUnusedFunction]
-        """Serve the eval results page."""
-        return _EVAL_HTML.read_text(encoding="utf-8")
-
     return application
 
 

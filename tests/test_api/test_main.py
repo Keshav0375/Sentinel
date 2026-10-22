@@ -114,8 +114,8 @@ async def test_lifespan_startup_failure_closes_pool(
     opened: list[asyncpg.Pool | None] = []
     real_init = main.init_pool_from_settings
 
-    async def _spy_init(settings: Settings) -> asyncpg.Pool | None:
-        pool = await real_init(settings)
+    async def _spy_init(settings: Settings, **kwargs: Any) -> asyncpg.Pool | None:
+        pool = await real_init(settings, **kwargs)
         opened.append(pool)
         return pool
 

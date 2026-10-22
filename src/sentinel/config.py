@@ -119,6 +119,21 @@ class Settings(BaseSettings):
     # api://<identity_tenant_id>/sentinel-backend-<deployment>-<env>
     sentinel_api_audience: str | None = None
 
+    # ── Azure runtime access (§8.2; decision 2026-10-19) ─────────────────────
+    # Key Vault with datadog-api-key, datadog-app-key, langfuse-public-key/-secret-key/-base-url,
+    # read once at startup (infra/workload_identity). Unset → env only. LLM keys never come from it.
+    key_vault_url: str | None = None
+    # Entra-only Azure PostgreSQL, used only when DATABASE_URL is blank: all three or none. The
+    # password is an Entra token fetched per new connection
+    # (infra/database.init_pool_from_settings).
+    pghost: str | None = None
+    pgdatabase: str | None = None
+    pguser: str | None = None
+    # Local only, never in the pod: serve GET /, /eval and the dashboard's read APIs without a
+    # token.
+    # The webhook, incidents and generate routes stay protected.
+    sentinel_dev_open_dashboard: bool = False
+
     # ── Validators ────────────────────────────────────────────────────────────
     @field_validator("sentinel_max_tool_calls")
     @classmethod
@@ -156,6 +171,10 @@ class Settings(BaseSettings):
         "langfuse_base_url",
         "sentinel_api_tenant_id",
         "sentinel_api_audience",
+        "key_vault_url",
+        "pghost",
+        "pgdatabase",
+        "pguser",
         mode="before",
     )
     @classmethod
