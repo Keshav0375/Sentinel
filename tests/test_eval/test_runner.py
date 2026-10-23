@@ -1,524 +1,506 @@
-"""Tests for eval/runner.py — batch eval runner."""
+"""Tests for eval/runner.py — the read-only scorer of scenario runs held in a dataset."""
 
 from __future__ import annotations
 
+import ast
 import json
-import sys
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-from agents.tracing import get_trace_provider
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from sentinel.agents.orchestrator import PIPELINE_ERROR
+from sentinel.api.eval_report import make_eval_report_router
+from sentinel.config import Settings
+from sentinel.eval import runner
+from sentinel.eval.judge import make_judge_client
 from sentinel.eval.runner import (
-    EvalRunResult,
+    DATASET_NAME,
+    BranchTruth,
+    ScenarioRun,
+    bind_culprit,
+    fetch_dataset_items,
+    ground_truth_checks,
+    load_branches,
     run_eval,
-    run_scenario_eval,
-    scores_from_results,
-    summary_stats,
+    same_deploy,
 )
-from sentinel.infra.tracing import SentinelTracer, install_trace_processors
-from sentinel.memory.episodic import EpisodicMemory
-from sentinel.memory.semantic import SemanticMemory
-from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
-from sentinel.models.eval_result import DimensionScore, EvalDimension, TrajectoryScore
-from sentinel.models.incident import IncidentStatus
+from sentinel.exceptions import EvalError
+from sentinel.models.eval_result import GroundTruthCheck
 from sentinel.models.pipeline import PipelineResult
-from sentinel.models.tools import EscalationContext
+from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
+
+FIXTURE = Path(__file__).parent / "fixtures" / "branches.yaml"
+_DEPLOYED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _make_trajectory_score(total: float = 0.8, *, judge_conflict: bool = False) -> TrajectoryScore:
-    return TrajectoryScore(
-        incident_id="inc-001",
-        scenario_id="bad_deploy_01",
-        dimension_scores=[
-            DimensionScore(dimension=d, score=total, reasoning="ok") for d in EvalDimension
-        ],
-        total_score=total,
-        judge_model="test-model",
-        judge_conflict=judge_conflict,
-    )
+def _settings() -> Settings:
+    return Settings(_env_file=None, sentinel_fake_llm=True)  # type: ignore[call-arg]
 
 
-def _make_eval_result(
-    scenario_id: str = "bad_deploy_01",
-    total: float = 0.8,
-    pipeline_error: str | None = None,
-    trajectory_missing: bool = False,
-    judge_conflict: bool = False,
-) -> EvalRunResult:
-    return EvalRunResult(
-        scenario_id=scenario_id,
-        incident_id=f"eval-{scenario_id}-abc12345",
-        score=_make_trajectory_score(total, judge_conflict=judge_conflict),
-        pipeline_error=pipeline_error,
-        trajectory_missing=trajectory_missing,
-    )
+def _judge_model() -> str:
+    return make_judge_client(_settings())[0]
 
 
-def _make_scenario_mock(scenario_id: str = "bad_deploy_01") -> MagicMock:
-    """Build a minimal Scenario mock with ground_truth."""
-    gt = MagicMock()
-    gt.model_dump.return_value = {
-        "severity": "P1",
-        "affected_service": "api-gateway",
-        "root_cause_summary": "Missing config",
-        "recommended_action": "rollback",
-        "deploy_id": "deploy-abc123",
-    }
-    scenario = MagicMock()
-    scenario.scenario_id = scenario_id
-    scenario.ground_truth = gt
-    return scenario
+@dataclass
+class FakeSpan:
+    trace_id: str
 
 
-def _make_alert_mock() -> MagicMock:
-    alert = MagicMock()
-    alert.alert_id = "alert-abcdef12"
-    alert.model_dump_json.return_value = '{"service": "api-gateway"}'
-    return alert
+@dataclass
+class FakeItem:
+    id: str
+    input: Any
+    runs: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+
+    @contextmanager
+    def run(
+        self,
+        *,
+        run_name: str,
+        run_metadata: Any | None = None,
+        run_description: str | None = None,
+    ) -> Iterator[FakeSpan]:
+        self.runs.append({"run_name": run_name, "run_metadata": run_metadata})
+        yield FakeSpan(f"trace-{self.id}")
 
 
-def _make_stm_mock() -> MagicMock:
-    stm = MagicMock()
-    stm.get_context.return_value = {
-        "status": "resolved",
-        "alert": MagicMock(service="api-gateway"),
-        "timeline": [],
-    }
-    return stm
+class BrokenItem(FakeItem):
+    @contextmanager
+    def run(
+        self,
+        *,
+        run_name: str,
+        run_metadata: Any | None = None,
+        run_description: str | None = None,
+    ) -> Iterator[FakeSpan]:
+        raise RuntimeError("down")
+        yield FakeSpan("never")
 
 
-def _judge() -> tuple[str, MagicMock]:
-    """What make_judge_client returns: the judge model and a mock JudgeClient."""
-    client = MagicMock()
-    client.complete = AsyncMock()
-    return "openai/gpt-4.1", client
-
-
-# ── scores_from_results ───────────────────────────────────────────────────────
-
-
-class TestScoresFromResults:
-    def test_extracts_scores(self) -> None:
-        results = [_make_eval_result("s1", 0.6), _make_eval_result("s2", 0.8)]
-        scores = scores_from_results(results)
-        assert len(scores) == 2
-        assert all(isinstance(s, TrajectoryScore) for s in scores)
-
-    def test_empty_list(self) -> None:
-        assert scores_from_results([]) == []
-
-    def test_order_preserved(self) -> None:
-        results = [_make_eval_result("a", 0.2), _make_eval_result("b", 1.0)]
-        scores = scores_from_results(results)
-        assert scores[0].total_score == pytest.approx(0.2)
-        assert scores[1].total_score == pytest.approx(1.0)
-
-
-# ── summary_stats ─────────────────────────────────────────────────────────────
-
-
-class TestSummaryStats:
-    def test_empty_returns_zeros(self) -> None:
-        stats = summary_stats([])
-        assert stats["avg_total"] == pytest.approx(0.0)
-        assert stats["pass_rate"] == pytest.approx(0.0)
-
-    def test_avg_total_is_mean(self) -> None:
-        results = [_make_eval_result("a", 0.4), _make_eval_result("b", 0.8)]
-        stats = summary_stats(results)
-        assert stats["avg_total"] == pytest.approx(0.6)
-
-    def test_pass_rate_with_threshold_3(self) -> None:
-        # 0.4 fails, 0.6 passes, 0.8 passes → 2/3 pass
-        results = [
-            _make_eval_result("a", 0.4),
-            _make_eval_result("b", 0.6),
-            _make_eval_result("c", 0.8),
-        ]
-        stats = summary_stats(results)
-        assert stats["pass_rate"] == pytest.approx(2 / 3, abs=0.01)
-
-    def test_failure_rate_counts_pipeline_errors(self) -> None:
-        results = [
-            _make_eval_result("a", 0.0, pipeline_error="timeout"),
-            _make_eval_result("b", 0.8),
-        ]
-        stats = summary_stats(results)
-        assert stats["failure_rate"] == pytest.approx(0.5)
-
-    def test_generated_at_present(self) -> None:
-        stats = summary_stats([_make_eval_result()])
-        assert "generated_at" in stats
-        assert isinstance(stats["generated_at"], str)
-        assert len(stats["generated_at"]) > 10
-
-    def test_all_pass(self) -> None:
-        results = [_make_eval_result("a", 0.8), _make_eval_result("b", 1.0)]
-        assert summary_stats(results)["pass_rate"] == pytest.approx(1.0)
-
-    def test_all_fail(self) -> None:
-        results = [_make_eval_result("a", 0.0), _make_eval_result("b", 0.2)]
-        assert summary_stats(results)["pass_rate"] == pytest.approx(0.0)
-
-    def test_judge_conflicts_are_counted_and_excluded(self) -> None:
-        """Decision 2026-10-18: a judge_conflict score is invalid — not in any figure."""
-        results = [
-            _make_eval_result("a", 0.8),
-            _make_eval_result("b", 0.0, pipeline_error="x", judge_conflict=True),
-        ]
-        stats = summary_stats(results)
-        assert stats["avg_total"] == pytest.approx(0.8)
-        assert stats["pass_rate"] == pytest.approx(1.0)
-        assert stats["failure_rate"] == pytest.approx(0.0)
-        assert stats["judge_conflicts"] == 1
-
-    def test_only_conflicts_gives_zeros(self) -> None:
-        stats = summary_stats([_make_eval_result("a", 1.0, judge_conflict=True)])
-        assert stats["avg_total"] == pytest.approx(0.0)
-        assert stats["judge_conflicts"] == 1
-
-
-# ── run_scenario_eval ─────────────────────────────────────────────────────────
-
-
-def _fake_settings(tmp_path: Path) -> Any:
-    """Real Settings instance with test values — for run_scenario_eval tests."""
-    from sentinel.config import Settings  # noqa: PLC0415
-
-    return Settings(
-        anthropic_api_key="sk-ant-test",
-        openai_api_key="sk-test",
-        sentinel_db_path=tmp_path / "test.db",
-    )
-
-
-_INCIDENT = uuid.UUID("0b7e6f3a-4c2d-4e8f-9a1b-5d6c7e8f9a0b")
-
-
-def _alert() -> AlertPayload:
-    return AlertPayload(
-        alert_id="alert-abcdef12",
-        source=AlertSource.DATADOG,
-        service="api-gateway",
-        metric="error_rate",
-        threshold=0.05,
-        current_value=0.34,
-        severity=AlertSeverity.CRITICAL,
-    )
-
-
-def _escalated(reason: str = "decision gate: confidence 0.40 is below 0.7") -> PipelineResult:
+def _rollback(pr: int, sha: str, models_used: list[str] | None = None) -> dict[str, Any]:
+    incident_id = str(uuid.uuid4())
     return PipelineResult(
-        incident_id=str(_INCIDENT),
+        incident_id=incident_id,
+        status="rollback_proposed",
+        resolution_type="rollback",
+        rollback_spec=RollbackSpec(
+            incident_id=incident_id,
+            root_cause="x",
+            evidence_summary="e",
+            confidence=0.9,
+            justification="j",
+            target_deploy=TargetDeploy(pr_number=pr, commit_sha=sha, deployed_at=_DEPLOYED_AT),
+        ),
+        confidence=0.9,
+        root_cause="x",
+        reflexion_loops=0,
+        tool_calls_used=2,
+        tokens_used=100,
+        models_used=models_used or ["anthropic/claude-haiku-4-5"],
+    ).model_dump(mode="json")
+
+
+def _escalated(models_used: list[str] | None = None) -> dict[str, Any]:
+    return PipelineResult(
+        incident_id=str(uuid.uuid4()),
         status="escalated",
         resolution_type="escalated",
-        root_cause="unclear",
+        escalation=EscalationContext(hypothesis="h", evidence=["e"], confidence=0.4, missing=["m"]),
         confidence=0.4,
-        escalation=EscalationContext(
-            hypothesis="unclear", evidence=[], confidence=0.4, missing=[reason]
-        ),
-        reflexion_loops=2,
+        root_cause="h",
+        reflexion_loops=1,
         tool_calls_used=3,
-        tokens_used=900,
+        tokens_used=120,
+        models_used=models_used or ["anthropic/claude-haiku-4-5"],
+    ).model_dump(mode="json")
+
+
+def _incident(
+    signal_type: str, result: dict[str, Any] | None, correlated: str | None
+) -> dict[str, Any]:
+    return {
+        "incident_id": str(uuid.uuid4()),
+        "signal_type": signal_type,
+        "correlated_deploy": correlated,
+        "pipeline_result": result,
+        "trajectory": {"spans": []},
+    }
+
+
+def _catalog() -> dict[str, BranchTruth]:
+    return load_branches(FIXTURE)
+
+
+def _run(
+    branch: str, pr: int | None, sha: str | None, incidents: list[dict[str, Any]]
+) -> ScenarioRun:
+    return ScenarioRun.model_validate(
+        {"branch": branch, "pr_number": pr, "merge_sha": sha, "incidents": incidents}
     )
 
 
-async def _run(
-    tmp_path: Path,
-    *,
-    result: PipelineResult | None = None,
-    score: TrajectoryScore | None = None,
-    capture: dict[str, Any] | None = None,
-    stm: Any = None,
-) -> EvalRunResult:
-    async def judge(traj: dict[str, Any], *args: Any, **kwargs: Any) -> TrajectoryScore:
-        if capture is not None:
-            capture.update(traj)
-        return score or _make_trajectory_score(0.7)
+def _checks(run: ScenarioRun) -> dict[str, float]:
+    truth = _catalog()[run.branch]
+    out = ground_truth_checks(truth, run, bind_culprit(truth, run))
+    return {str(k): v for k, v in out.items()}
 
-    with (
-        patch("sentinel.eval.runner.generate_alert", return_value=_alert()),
-        patch("sentinel.eval.runner.uuid.uuid4", return_value=_INCIDENT),
-        patch("sentinel.eval.runner.make_judge_client", return_value=_judge()),
-        patch(
-            "sentinel.eval.runner.run_pipeline",
-            new_callable=AsyncMock,
-            return_value=result or _escalated(),
+
+def _item(
+    item_id: str, branch: str, pr: int | None, sha: str | None, incidents: list[Any]
+) -> FakeItem:
+    return FakeItem(
+        item_id, {"branch": branch, "pr_number": pr, "merge_sha": sha, "incidents": incidents}
+    )
+
+
+def _dataset() -> list[FakeItem]:
+    return [
+        _item("pass-01", "pass/01", None, None, []),
+        _item(
+            "df-05",
+            "deployfail/05",
+            41,
+            "abc1234",
+            [
+                _incident("deploy_failure", _rollback(41, "abc1234def"), "pr-41-abc1234"),
+                _incident("runtime_error", _escalated(), "pr-41-abc1234"),
+            ],
         ),
-        patch("sentinel.eval.runner.evaluate_trajectory", side_effect=judge),
-    ):
-        return await run_scenario_eval(
-            _make_scenario_mock(),
-            short_term_memory=stm if stm is not None else _make_stm_mock(),
-            trajectories_dir=tmp_path,
-            settings=_fake_settings(tmp_path),
-            semantic_memory=MagicMock(),
-            episodic_memory=MagicMock(),
-        )
+        _item(
+            "rt-01",
+            "runtime/01",
+            42,
+            "bbb2222",
+            [_incident("runtime_error", _escalated(), "pr-42-bbb2222")],
+        ),
+        _item(
+            "df-01",
+            "deployfail/01",
+            43,
+            "ccc3333",
+            [_incident("deploy_failure", _rollback(40, "0000000"), "pr-40-0000000")],
+        ),
+    ]
 
 
-class TestRunScenarioEval:
-    @pytest.mark.parametrize("ran_judge_model", [True, False])
-    async def test_the_judge_conflict_guard_runs_on_models_used(
-        self, tmp_path: Path, ran_judge_model: bool
-    ) -> None:
-        """The real evaluate_trajectory: a run whose models_used holds the judge's model is
-        never sent to the judge and comes back marked judge_conflict."""
-        judge_model, client = _judge()
-        client.complete = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "dimension_scores": [
-                        {"dimension": str(d), "score": 0.8, "reasoning": "ok"}
-                        for d in EvalDimension
-                    ]
-                }
-            )
-        )
-        result = _escalated()
-        result.models_used = ["anthropic/claude-haiku-4-5"] + (
-            [judge_model] if ran_judge_model else []
-        )
-        with (
-            patch("sentinel.eval.runner.generate_alert", return_value=_alert()),
-            patch("sentinel.eval.runner.uuid.uuid4", return_value=_INCIDENT),
-            patch("sentinel.eval.runner.make_judge_client", return_value=(judge_model, client)),
-            patch("sentinel.eval.runner.run_pipeline", new_callable=AsyncMock, return_value=result),
-        ):
-            run = await run_scenario_eval(
-                _make_scenario_mock(),
-                short_term_memory=_make_stm_mock(),
-                trajectories_dir=tmp_path,
-                settings=_fake_settings(tmp_path),
-                semantic_memory=MagicMock(),
-                episodic_memory=MagicMock(),
-            )
-        assert run.score.judge_conflict is ran_judge_model
-        if ran_judge_model:
-            client.complete.assert_not_awaited()
-            assert run.score.total_score == 0.0
-        else:
-            client.complete.assert_awaited_once()
-            assert run.score.total_score == pytest.approx(0.8)
+# ── Static guarantees ─────────────────────────────────────────────────────────
 
-    async def test_returns_eval_run_result(self, tmp_path: Path) -> None:
-        result = await _run(tmp_path)
-        assert isinstance(result, EvalRunResult)
-        assert result.scenario_id == "bad_deploy_01"
-        assert result.incident_id == str(_INCIDENT)  # a UUID, like every incident id
-        assert result.pipeline_error is None
 
-    async def test_pipeline_error_captured(self, tmp_path: Path) -> None:
-        reason = f"{PIPELINE_ERROR} during analysis: TimeoutError"
-        result = await _run(tmp_path, result=_escalated(reason))
-        assert result.pipeline_error == reason
+def test_runner_never_imports_phase1_or_actors() -> None:
+    src = Path(runner.__file__).read_text(encoding="utf-8")
+    assert "sentinel.generator" not in src
+    assert "data/" not in src
+    banned = ("data", "sentinel.generator", "sentinel.agents", "sentinel.tools")
+    banned += ("sentinel.memory", "httpx", "asyncpg")
+    for node in ast.walk(ast.parse(src)):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names = [node.module]
+        for name in names:
+            assert not any(name == b or name.startswith(f"{b}.") for b in banned), name
 
-    async def test_trajectory_loaded_from_disk(self, tmp_path: Path) -> None:
-        traj_data: dict[str, Any] = {"incident_id": str(_INCIDENT), "spans": []}
-        (tmp_path / f"{_INCIDENT}.json").write_text(json.dumps(traj_data), encoding="utf-8")
-        captured: dict[str, Any] = {}
-        await _run(tmp_path, capture=captured)
-        assert captured.get("incident_id") == str(_INCIDENT)
-        # The judge also gets the outcome: status, loops, budget, tokens.
-        assert captured["pipeline_result"]["status"] == "escalated"
-        assert captured["pipeline_result"]["reflexion_loops"] == 2
 
-    async def test_trajectory_missing_flagged(self, tmp_path: Path) -> None:
-        result = await _run(tmp_path)  # no file written
-        assert result.trajectory_missing is True
+# ── Catalog ───────────────────────────────────────────────────────────────────
 
-    async def test_the_result_status_reaches_short_term_memory(self, tmp_path: Path) -> None:
-        stm = ShortTermMemory()
-        await _run(tmp_path, stm=stm)
-        context = stm.get_context(str(_INCIDENT))
-        assert context["status"] == IncidentStatus.ESCALATED
-        assert context["result"]["resolution_type"] == "escalated"
 
-    async def test_the_pipeline_runs_for_real_in_fake_mode(self, tmp_path: Path) -> None:
-        """SENTINEL_FAKE_LLM=1: the real orchestrator and agents run; only the judge is
-        stubbed (it is phase 6's, and needs the other provider's key)."""
-        from sentinel.config import Settings  # noqa: PLC0415
+def test_fixture_is_the_vendored_catalog() -> None:
+    catalog = _catalog()
+    assert len(catalog) == 30
+    cases = [t.case for t in catalog.values()]
+    assert {c: cases.count(c) for c in ("i", "ii", "iii")} == {"i": 10, "ii": 10, "iii": 10}
+    assert catalog["deployfail/05"].also_expected == ("runtime_error",)
+    assert catalog["pass/01"].expected_culprit == "none"
 
-        stm = ShortTermMemory()
-        tracer = SentinelTracer(stm, trajectories_dir=tmp_path)
-        multi: Any = get_trace_provider()._multi_processor  # type: ignore[attr-defined]
-        before = list(multi._processors)
-        captured: dict[str, Any] = {}
 
-        async def judge(traj: dict[str, Any], *args: Any, **kwargs: Any) -> TrajectoryScore:
-            captured.update(traj)
-            return _make_trajectory_score(0.2)
+def test_load_branches_rejects_bad_files(tmp_path: Path) -> None:
+    entry = (
+        "- branch: a/01\n  case: i\n  fault: f\n  expected_signal_type: {sig}\n"
+        "  expected_resolution: none\n  also_expected: []\n  expected_culprit: none\n"
+    )
+    files = {
+        "invalid.yaml": "branches: [unclosed",
+        "nokey.yaml": "other: 1\n",
+        "badtype.yaml": "branches:\n" + entry.format(sig="maybe"),
+        "dup.yaml": "branches:\n" + entry.format(sig="none") + entry.format(sig="none"),
+    }
+    for name, text in files.items():
+        path = tmp_path / name
+        path.write_text(text, encoding="utf-8")
+        with pytest.raises(EvalError):
+            load_branches(path)
 
-        try:
-            install_trace_processors(tracer)
-            with (
-                patch("sentinel.eval.runner.generate_alert", return_value=_alert()),
-                patch("sentinel.eval.runner.make_judge_client", return_value=_judge()),
-                patch("sentinel.eval.runner.evaluate_trajectory", side_effect=judge),
-            ):
-                result = await run_scenario_eval(
-                    _make_scenario_mock(),
-                    short_term_memory=stm,
-                    trajectories_dir=tmp_path,
-                    settings=Settings(_env_file=None, sentinel_fake_llm=True),  # type: ignore[call-arg]
-                    semantic_memory=SemanticMemory(None),
-                    episodic_memory=EpisodicMemory(None, MagicMock()),
-                )
-        finally:
-            multi.set_processors(before)
 
-        assert result.pipeline_error is None
-        assert result.trajectory_missing is False  # SentinelTracer wrote the trace file
-        assert captured["pipeline_result"]["status"] == "escalated"
-        assert stm.get_context(result.incident_id)["status"] == IncidentStatus.ESCALATED
+def test_bind_culprit() -> None:
+    catalog = _catalog()
+    assert bind_culprit(catalog["deployfail/05"], _run("deployfail/05", 41, "abc1234", [])) == (
+        "pr-41-abc1234"
+    )
+    assert bind_culprit(catalog["pass/01"], _run("pass/01", None, None, [])) is None
+    with pytest.raises(EvalError):
+        bind_culprit(catalog["deployfail/05"], _run("deployfail/05", 41, None, []))
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("pr-41-abc1234def", True),
+        ("pr-41-ABC1234", True),
+        ("pr-42-abc1234", False),
+        ("pr-41-abc9999", False),
+        (None, False),
+        ("v1", False),
+    ],
+)
+def test_same_deploy(version: str | None, expected: bool) -> None:
+    assert same_deploy(version, "pr-41-abc1234") is expected
+
+
+# ── Checks ────────────────────────────────────────────────────────────────────
+
+ALL_PASS = {"fired": 1.0, "classified": 1.0, "correlated": 1.0, "revert_target": 1.0}
+
+
+def test_checks_clean_pass_true_negative() -> None:
+    assert _checks(_run("pass/01", None, None, [])) == ALL_PASS
+
+
+def test_checks_clean_pass_false_positive() -> None:
+    run = _run("pass/01", None, None, [_incident("runtime_error", _escalated(), None)])
+    assert _checks(run) == {
+        "fired": 0.0,
+        "classified": 0.0,
+        "correlated": 0.0,
+        "revert_target": 1.0,
+    }
+
+
+def test_checks_deploy_failure_with_second_alert() -> None:
+    run = _run(
+        "deployfail/05",
+        41,
+        "abc1234",
+        [
+            _incident("deploy_failure", _rollback(41, "abc1234def"), "pr-41-abc1234"),
+            _incident("runtime_error", _escalated(), "pr-41-abc1234"),
+        ],
+    )
+    assert _checks(run) == ALL_PASS
+
+
+def test_checks_unexpected_signal_type_fails_classified() -> None:
+    run = _run(
+        "deployfail/01",
+        43,
+        "ccc3333",
+        [_incident("runtime_error", _escalated(), "pr-43-ccc3333")],
+    )
+    assert _checks(run)["classified"] == 0.0
+
+
+def test_checks_wrong_revert_target() -> None:
+    run = _run(
+        "deployfail/01",
+        43,
+        "ccc3333",
+        [_incident("deploy_failure", _rollback(40, "0000000"), "pr-40-0000000")],
+    )
+    assert _checks(run) == {
+        "fired": 1.0,
+        "classified": 1.0,
+        "correlated": 0.0,
+        "revert_target": 0.0,
+    }
+
+
+def test_checks_runtime_escalation_passes_revert_target() -> None:
+    incidents = [_incident("runtime_error", _escalated(), "pr-42-bbb2222")]
+    assert _checks(_run("runtime/01", 42, "bbb2222", incidents)) == ALL_PASS
+    unfinished = [_incident("runtime_error", None, "pr-42-bbb2222")]
+    assert _checks(_run("runtime/01", 42, "bbb2222", unfinished))["revert_target"] == 0.0
+
+
+def test_checks_uncorrelated_incident() -> None:
+    run = _run(
+        "deployfail/05",
+        41,
+        "abc1234",
+        [
+            _incident("deploy_failure", _rollback(41, "abc1234def"), "pr-41-abc1234"),
+            _incident("runtime_error", _escalated(), None),
+        ],
+    )
+    assert _checks(run)["correlated"] == 0.0
 
 
 # ── run_eval ──────────────────────────────────────────────────────────────────
 
 
-def _settings_mock(tmp_path: Path) -> MagicMock:
-    """Return a configured settings mock for run_eval tests."""
-    s = MagicMock()
-    s.sentinel_db_path = tmp_path / "test.db"
-    s.sentinel_embedding_model = "all-MiniLM-L6-v2"
-    s.sentinel_primary_provider = "anthropic"
-    s.sentinel_max_tool_calls = 20
-    s.sentinel_log_level = "INFO"
-    s.database_url = ""  # no Postgres: run_eval builds episodic memory with pool=None
-    return s
+async def _fixture_run(
+    tmp_path: Path,
+) -> tuple[Any, list[FakeItem], MagicMock, MagicMock, MagicMock]:
+    items = _dataset()
+    with (
+        patch("sentinel.eval.runner.flush_traces") as flush,
+        patch("sentinel.eval.runner.push_score") as ps,
+        patch("sentinel.eval.judge.push_score") as pj,
+    ):
+        run = await run_eval(
+            branches_path=FIXTURE,
+            items=items,
+            settings=_settings(),
+            reports_dir=tmp_path,
+            run_name="r1",
+        )
+    return run, items, flush, ps, pj
 
 
-# Fake data.seed module to satisfy the lazy import in run_eval.
-_FAKE_SEED_MOD = MagicMock()
-_FAKE_SEED_MOD.seed = AsyncMock()
+async def test_run_eval_fixture_dataset_fake_llm(tmp_path: Path) -> None:
+    run, items, flush, ps, pj = await _fixture_run(tmp_path)
+
+    assert len(run.results) == 4
+    report = run.report
+    assert report.items_scored == 4
+    rates = {str(cs.check): cs.pass_rate for cs in report.check_stats}
+    assert rates == {"fired": 1.0, "classified": 1.0, "correlated": 0.75, "revert_target": 0.75}
+    assert report.scenarios_run == 3  # pass/01 has no incident, so no judge score
+    assert report.avg_total_score == pytest.approx(0.5)
+    for item in items:
+        branch = item.input["branch"]
+        assert item.runs == [{"run_name": "r1", "run_metadata": {"branch": branch}}]
+
+    assert ps.call_count == 16
+    for call in ps.call_args_list:
+        trace_id, name, value = call.args
+        assert trace_id.startswith("trace-")
+        assert name in {str(c) for c in GroundTruthCheck}
+        assert value in (0.0, 1.0)
+    assert {c.args[0] for c in ps.call_args_list} == {f"trace-{i.id}" for i in items}
+    assert pj.call_count == 15
+    assert "trace-pass-01" not in {c.args[0] for c in pj.call_args_list}
+    flush.assert_called_once()
 
 
-class TestRunEval:
-    async def test_returns_list_of_results(self, tmp_path: Path) -> None:
-        with (
-            patch("sentinel.eval.runner.get_settings", return_value=_settings_mock(tmp_path)),
-            patch("sentinel.eval.runner.configure_logging"),
-            patch("sentinel.eval.runner.create_tables", new_callable=AsyncMock),
-            patch("sentinel.eval.runner.EmbeddingClient"),
-            patch("sentinel.eval.runner.SemanticMemory"),
-            patch("sentinel.eval.runner.EpisodicMemory"),
-            patch("sentinel.eval.runner.ShortTermMemory"),
-            patch("sentinel.eval.runner.apply_sdk_defaults"),
-            patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.install_trace_processors"),
-            patch("sentinel.eval.runner.list_scenarios", return_value=["bad_deploy_01"]),
-            patch("sentinel.eval.runner.load_scenario", return_value=_make_scenario_mock()),
-            patch(
-                "sentinel.eval.runner.run_scenario_eval",
-                new_callable=AsyncMock,
-                return_value=_make_eval_result("bad_deploy_01", 0.7),
-            ),
-            patch.dict(sys.modules, {"data": MagicMock(), "data.seed": _FAKE_SEED_MOD}),
-        ):
-            results = await run_eval(
-                scenario_ids=["bad_deploy_01"],
-                db_path=tmp_path / "test.db",
-                trajectories_dir=tmp_path / "traj",
-            )
+async def test_run_eval_writes_the_report_the_api_serves(tmp_path: Path) -> None:
+    await _fixture_run(tmp_path)
+    report_path = tmp_path / "eval_report.json"
+    data = json.loads(report_path.read_text(encoding="utf-8"))
+    assert data["summary"]["dataset"] == DATASET_NAME == "sentinel-scenario-runs"
+    assert data["summary"]["run_name"] == "r1"
+    assert len(data["ground_truth"]["checks"]) == 4
+    assert len(data["ground_truth"]["items"]) == 4
+    assert len(data["results"]) == 3
+    assert (tmp_path / "eval_report.md").exists()
 
-        assert len(results) == 1
-        assert results[0].scenario_id == "bad_deploy_01"
+    app = FastAPI()
+    app.include_router(make_eval_report_router(report_path))
+    response = TestClient(app).get("/api/eval-report")
+    assert response.status_code == 200
+    assert response.json()["summary"] == data["summary"]
 
-    async def test_memory_gets_the_pool_and_pool_is_closed(self, tmp_path: Path) -> None:
-        """run_eval opens the Postgres pool, hands it to both memories, closes it after."""
-        pool = MagicMock(name="pool")
-        with (
-            patch("sentinel.eval.runner.get_settings", return_value=_settings_mock(tmp_path)),
-            patch("sentinel.eval.runner.configure_logging"),
-            patch("sentinel.eval.runner.create_tables", new_callable=AsyncMock),
-            patch(
-                "sentinel.eval.runner.init_pool_from_settings",
-                new_callable=AsyncMock,
-                return_value=pool,
-            ),
-            patch("sentinel.eval.runner.close_pool", new_callable=AsyncMock) as close_pool,
-            patch("sentinel.eval.runner.EmbeddingClient") as embedding_cls,
-            patch("sentinel.eval.runner.SemanticMemory") as semantic_cls,
-            patch("sentinel.eval.runner.EpisodicMemory") as episodic_cls,
-            patch("sentinel.eval.runner.ShortTermMemory"),
-            patch("sentinel.eval.runner.apply_sdk_defaults"),
-            patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.install_trace_processors"),
-            patch("sentinel.eval.runner.load_scenario", side_effect=FileNotFoundError("x")),
-            patch.dict(sys.modules, {"data": MagicMock(), "data.seed": _FAKE_SEED_MOD}),
-        ):
-            await run_eval(scenario_ids=["missing"], db_path=tmp_path / "test.db")
 
-        semantic_cls.assert_called_once_with(pool)
-        episodic_cls.assert_called_once_with(pool, embedding_cls.from_model_name.return_value)
-        close_pool.assert_awaited_once()
+async def test_judge_conflict_item_excluded_and_not_pushed(tmp_path: Path) -> None:
+    ok = _dataset()[1]
+    conflict = _item(
+        "rt-conflict",
+        "runtime/01",
+        42,
+        "bbb2222",
+        [_incident("runtime_error", _escalated([_judge_model()]), "pr-42-bbb2222")],
+    )
+    with (
+        patch("sentinel.eval.runner.flush_traces"),
+        patch("sentinel.eval.runner.push_score"),
+        patch("sentinel.eval.judge.push_score"),
+    ):
+        run = await run_eval(
+            branches_path=FIXTURE,
+            items=[ok, conflict],
+            settings=_settings(),
+            reports_dir=tmp_path,
+        )
+    assert run.report.items_scored == 1
+    assert run.report.judge_conflicts == 1
+    assert run.report.scenarios_run == 1
+    assert conflict.runs == []
+    assert all(cs.item_count == 1 for cs in run.report.check_stats)
 
-    async def test_unknown_scenario_skipped(self, tmp_path: Path) -> None:
-        """Scenarios that don't exist are skipped, not crash the batch."""
-        with (
-            patch("sentinel.eval.runner.get_settings", return_value=_settings_mock(tmp_path)),
-            patch("sentinel.eval.runner.configure_logging"),
-            patch("sentinel.eval.runner.create_tables", new_callable=AsyncMock),
-            patch("sentinel.eval.runner.EmbeddingClient"),
-            patch("sentinel.eval.runner.SemanticMemory"),
-            patch("sentinel.eval.runner.EpisodicMemory"),
-            patch("sentinel.eval.runner.ShortTermMemory"),
-            patch("sentinel.eval.runner.apply_sdk_defaults"),
-            patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.install_trace_processors"),
-            patch(
-                "sentinel.eval.runner.load_scenario",
-                side_effect=FileNotFoundError("not found"),
-            ),
-            patch.dict(sys.modules, {"data": MagicMock(), "data.seed": _FAKE_SEED_MOD}),
-        ):
-            results = await run_eval(
-                scenario_ids=["nonexistent_scenario"],
-                db_path=tmp_path / "test.db",
-                trajectories_dir=tmp_path / "traj",
-            )
 
-        assert results == []
+async def test_invalid_items_are_skipped(tmp_path: Path) -> None:
+    items = [
+        FakeItem("nope", {"branch": "nope/99", "incidents": []}),
+        FakeItem("str", "not a dict"),
+        _item("no-pr", "deployfail/01", None, None, []),
+    ]
+    with patch("sentinel.eval.runner.flush_traces"):
+        run = await run_eval(
+            branches_path=FIXTURE, items=items, settings=_settings(), reports_dir=tmp_path
+        )
+    assert set(run.invalid) == {"nope", "str", "no-pr"}
+    assert run.results == []
+    assert run.report.items_scored == 0
+    assert run.json_path.exists()
+    assert all(i.runs == [] for i in items)
 
-    async def test_uses_all_scenarios_when_none_specified(self, tmp_path: Path) -> None:
-        all_ids = ["bad_deploy_01", "db_pool_01"]
 
-        with (
-            patch("sentinel.eval.runner.get_settings", return_value=_settings_mock(tmp_path)),
-            patch("sentinel.eval.runner.configure_logging"),
-            patch("sentinel.eval.runner.create_tables", new_callable=AsyncMock),
-            patch("sentinel.eval.runner.EmbeddingClient"),
-            patch("sentinel.eval.runner.SemanticMemory"),
-            patch("sentinel.eval.runner.EpisodicMemory"),
-            patch("sentinel.eval.runner.ShortTermMemory"),
-            patch("sentinel.eval.runner.apply_sdk_defaults"),
-            patch("sentinel.eval.runner.SentinelTracer"),
-            patch("sentinel.eval.runner.install_trace_processors"),
-            patch("sentinel.eval.runner.list_scenarios", return_value=all_ids),
-            patch(
-                "sentinel.eval.runner.load_scenario",
-                side_effect=lambda sid: _make_scenario_mock(sid),
-            ),
-            patch(
-                "sentinel.eval.runner.run_scenario_eval",
-                new_callable=AsyncMock,
-                side_effect=lambda s, **kw: _make_eval_result(s.scenario_id),
-            ),
-            patch.dict(sys.modules, {"data": MagicMock(), "data.seed": _FAKE_SEED_MOD}),
-        ):
-            results = await run_eval(
-                db_path=tmp_path / "test.db",
-                trajectories_dir=tmp_path / "traj",
-            )
+async def test_push_failure_is_logged_not_raised(tmp_path: Path) -> None:
+    item = BrokenItem("broken", {"branch": "pass/01", "incidents": []})
+    with patch("sentinel.eval.runner.flush_traces"):
+        run = await run_eval(
+            branches_path=FIXTURE, items=[item], settings=_settings(), reports_dir=tmp_path
+        )
+    assert [r.pushed for r in run.results] == [False]
+    assert run.report.items_scored == 1
 
-        assert len(results) == 2
-        scenario_ids_returned = {r.scenario_id for r in results}
-        assert scenario_ids_returned == set(all_ids)
+
+async def test_flush_runs_even_when_the_catalog_is_missing(tmp_path: Path) -> None:
+    with patch("sentinel.eval.runner.flush_traces") as flush, pytest.raises(EvalError):
+        await run_eval(
+            branches_path=tmp_path / "missing.yaml",
+            items=[],
+            settings=_settings(),
+            reports_dir=tmp_path,
+        )
+    flush.assert_called_once()
+
+
+# ── Dataset fetch ─────────────────────────────────────────────────────────────
+
+
+def test_fetch_dataset_items_needs_langfuse() -> None:
+    with pytest.raises(EvalError):
+        fetch_dataset_items("x")
+
+    a, b = object(), object()
+    with (
+        patch("sentinel.eval.runner.langfuse_enabled", return_value=True),
+        patch("sentinel.eval.runner.get_client") as get_client,
+    ):
+        get_client.return_value.get_dataset.return_value.items = [a, b]
+        assert fetch_dataset_items("x") == [a, b]
+        get_client.return_value.get_dataset.assert_called_once_with("x")
+        get_client.return_value.get_dataset.side_effect = RuntimeError("boom")
+        with pytest.raises(EvalError):
+            fetch_dataset_items("x")
+
+
+async def test_run_eval_fetches_when_no_items_given(tmp_path: Path) -> None:
+    with (
+        patch("sentinel.eval.runner.fetch_dataset_items", return_value=_dataset()[:1]) as fetch,
+        patch("sentinel.eval.runner.flush_traces"),
+        patch("sentinel.eval.runner.push_score"),
+    ):
+        run = await run_eval(branches_path=FIXTURE, settings=_settings(), reports_dir=tmp_path)
+    fetch.assert_called_once_with(DATASET_NAME)
+    assert run.report.items_scored == 1

@@ -258,9 +258,9 @@ python scripts/run_scenario.py --list   # see all 10 scenarios
 ### 5. Run the eval suite
 
 ```bash
-python scripts/run_eval.py
-# or a subset:
-python scripts/run_eval.py --scenarios bad_deploy_01 db_pool_01
+python3 scripts/run_eval.py --branches ../Sentinel-deployment/scenarios/branches.yaml
+# dataset (default sentinel-scenario-runs) and dataset-run name:
+python3 scripts/run_eval.py --branches <path> --dataset sentinel-scenario-runs --run-name prompt-v2
 ```
 
 Results → `reports/eval_report.json` + `reports/eval_report.md`  

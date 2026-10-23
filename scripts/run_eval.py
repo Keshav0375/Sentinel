@@ -1,20 +1,22 @@
-"""Run the full eval suite across all (or selected) scenarios.
+"""Score finished scenario runs held in a LangFuse dataset against branches.yaml.
 
 Usage::
 
-    python scripts/run_eval.py
-    python scripts/run_eval.py --scenarios bad_deploy_01 db_pool_01
-    python scripts/run_eval.py --help
+    python3 scripts/run_eval.py --branches ../Sentinel-deployment/scenarios/branches.yaml
+    python3 scripts/run_eval.py --branches <path> --dataset sentinel-scenario-runs --run-name R
+
+This is a read-only scorer: run scenarios by merging their branch PRs; this only scores.
 
 Results are written to:
   reports/eval_report.json  — machine-readable (for CI gates and dashboard)
   reports/eval_report.md    — human-readable Markdown summary
 
-Run from the project root so that ``src/`` and ``data/`` are importable.
+Exit status: 0 on success, 1 when no item was scored, 2 on a configuration error.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 from pathlib import Path
@@ -25,14 +27,9 @@ _SRC = _PROJECT_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from sentinel.eval.report import PASS_THRESHOLD, build_report, write_reports  # noqa: E402
-from sentinel.eval.runner import (  # noqa: E402
-    EvalRunResult,
-    run_eval,
-    scores_from_results,
-    summary_stats,
-)
-from sentinel.infra.tracing import flush_traces  # noqa: E402
+from sentinel.eval.report import PASS_THRESHOLD  # noqa: E402
+from sentinel.eval.runner import DATASET_NAME, run_eval  # noqa: E402
+from sentinel.exceptions import EvalError, ProviderUnavailableError  # noqa: E402
 
 _REPORTS_DIR = _PROJECT_ROOT / "reports"
 
@@ -44,92 +41,52 @@ def _score_bar(score: float, width: int = 20) -> str:
     return f"[{bar}] {score:.2f}/1.00"
 
 
-def _print_summary(results: list[EvalRunResult]) -> None:
-    """Print a human-readable summary table to stdout."""
-    sep = "=" * 72
-
-    print(f"\n{sep}")
-    print("  Sentinel Eval Results")
-    print(sep)
-
-    stats = summary_stats(results)
-    print(f"  Scenarios run : {len(results)}")
-    print(f"  Average score : {_score_bar(stats['avg_total'])}")
-    print(f"  Pass rate     : {stats['pass_rate'] * 100:.0f}%  (≥{PASS_THRESHOLD})")
-    print(f"  Failures      : {stats['failure_rate'] * 100:.0f}%  (pipeline error)")
-    print()
-
-    # Per-scenario rows
-    print(f"  {'Scenario':<32} {'Total':>6}  {'Pass':>4}  Notes")
-    print(f"  {'-' * 30:<32} {'-' * 6:>6}  {'-' * 4:>4}  {'-' * 14}")
-    for r in results:
-        passed = "PASS" if r.score.total_score >= PASS_THRESHOLD else "FAIL"
-        note = ""
-        if r.pipeline_error:
-            note = "pipeline error"
-        elif r.trajectory_missing:
-            note = "no trajectory"
-        print(f"  {r.scenario_id:<32} {r.score.total_score:>6.2f}  {passed:>4}  {note}")
-
-    print(f"\n{sep}\n")
-
-
-def _parse_args() -> list[str] | None:
-    """Return the scenario ids from sys.argv (None: all).
-
-    The judge model is not an option: it is fixed by §4.7 to the provider the agents do
-    not run on (decision 2026-10-15).
-    """
-    args = sys.argv[1:]
-
-    if "-h" in args or "--help" in args:
-        print(
-            "Usage:\n"
-            "  python scripts/run_eval.py\n"
-            "  python scripts/run_eval.py --scenarios bad_deploy_01 db_pool_01\n"
-        )
-        sys.exit(0)
-
-    scenario_ids: list[str] | None = None
-
-    i = 0
-    while i < len(args):
-        if args[i] == "--scenarios":
-            scenario_ids = []
-            i += 1
-            while i < len(args) and not args[i].startswith("--"):
-                scenario_ids.append(args[i])
-                i += 1
-        else:
-            i += 1
-
-    return scenario_ids
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Score scenario runs from a LangFuse dataset.")
+    parser.add_argument(
+        "--branches",
+        type=Path,
+        required=True,
+        help="path to scenarios/branches.yaml (the ground-truth catalog)",
+    )
+    parser.add_argument("--dataset", default=DATASET_NAME, help="LangFuse dataset name")
+    parser.add_argument("--run-name", default=None, help="dataset-run name (default: timestamp)")
+    return parser.parse_args()
 
 
 async def main() -> None:
-    scenario_ids = _parse_args()
+    args = _parse_args()
 
     print("\nSentinel Eval Runner")
     print("=" * 40)
-    if scenario_ids:
-        print(f"  Scenarios : {', '.join(scenario_ids)}")
-    else:
-        print("  Scenarios : all")
-    print()
+    try:
+        run = await run_eval(
+            branches_path=args.branches,
+            dataset_name=args.dataset,
+            run_name=args.run_name,
+            reports_dir=_REPORTS_DIR,
+        )
+    except (EvalError, ProviderUnavailableError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
-    results = await run_eval(scenario_ids=scenario_ids)
-
-    if not results:
-        print("No scenarios were evaluated. Check logs for errors.")
-        sys.exit(1)
-
-    _print_summary(results)
-
-    report = build_report(scores_from_results(results))
-    json_path, md_path = write_reports(report, reports_dir=_REPORTS_DIR)
+    report = run.report
+    print(f"  Dataset         : {run.dataset_name}")
+    print(f"  Run name        : {run.run_name}")
+    print(f"  Items scored    : {report.items_scored}")
+    print(f"  Items invalid   : {len(run.invalid)}")
+    print(f"  Judge conflicts : {report.judge_conflicts}")
+    print(f"  Average score   : {_score_bar(report.avg_total_score)}")
+    print(f"  Judge pass rate : {report.pass_rate * 100:.0f}%  (≥{PASS_THRESHOLD})")
+    for cs in report.check_stats:
+        print(f"  {str(cs.check):<15} : {cs.pass_rate * 100:.0f}%  ({cs.passed}/{cs.item_count})")
     print("  Reports written to:")
-    print(f"    {json_path}")
-    print(f"    {md_path}")
+    print(f"    {run.json_path}")
+    print(f"    {run.md_path}")
+
+    if report.items_scored == 0:
+        print("No items were scored. Check logs for errors.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
@@ -138,5 +95,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nAborted.")
         sys.exit(0)
-    finally:
-        flush_traces()

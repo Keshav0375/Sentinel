@@ -1,11 +1,11 @@
-"""Eval models — EvalDimension, DimensionScore, TrajectoryScore."""
+"""Eval models — EvalDimension, DimensionScore, TrajectoryScore, GroundTruth*."""
 
 from __future__ import annotations
 
 from enum import StrEnum
 from typing import Final
 
-from pydantic import BaseModel, JsonValue, field_validator
+from pydantic import BaseModel, JsonValue, field_validator, model_validator
 
 # The eval score scale (decision 2026-10-22): every dimension and total is in [0, 1].
 SCORE_MIN: Final = 0.0
@@ -119,3 +119,37 @@ class TrajectoryScore(BaseModel):
             "scores": scores,
             "reasoning": reasoning,
         }
+
+
+class GroundTruthCheck(StrEnum):
+    """The four scenarios/branches.yaml checks (decision 2026-10-22): 1 = pass, 0 = fail."""
+
+    FIRED = "fired"
+    CLASSIFIED = "classified"
+    CORRELATED = "correlated"
+    REVERT_TARGET = "revert_target"
+
+
+class GroundTruthResult(BaseModel):
+    """One dataset item's ground-truth checks: every GroundTruthCheck, each 0.0 or 1.0.
+
+    judge_conflict items (decision 2026-10-18) are reported but excluded from aggregates.
+    """
+
+    item_id: str
+    branch: str
+    case: str
+    checks: dict[GroundTruthCheck, float]
+    judge_conflict: bool = False
+
+    @model_validator(mode="after")
+    def _all_checks_binary(self) -> GroundTruthResult:
+        if set(self.checks) != set(GroundTruthCheck):
+            raise ValueError("checks must hold every GroundTruthCheck")
+        if any(v not in (SCORE_MIN, SCORE_MAX) for v in self.checks.values()):
+            raise ValueError("a ground-truth check is 0.0 or 1.0")
+        return self
+
+    def score_for(self, check: GroundTruthCheck) -> float:
+        """The value of *check*."""
+        return self.checks[check]

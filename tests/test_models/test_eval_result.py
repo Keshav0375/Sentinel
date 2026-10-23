@@ -7,7 +7,13 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from sentinel.models.eval_result import DimensionScore, EvalDimension, TrajectoryScore
+from sentinel.models.eval_result import (
+    DimensionScore,
+    EvalDimension,
+    GroundTruthCheck,
+    GroundTruthResult,
+    TrajectoryScore,
+)
 
 # ── EvalDimension ─────────────────────────────────────────────────────────────
 
@@ -188,3 +194,27 @@ def test_to_eval_score_shape() -> None:
         incident_id="i", scenario_id="s", judge_model="m", judge_conflict=True
     )
     assert conflict.to_eval_score()["judge_conflict"] is True
+
+
+# ── GroundTruthResult ─────────────────────────────────────────────────────────
+
+
+def test_ground_truth_result_requires_every_check() -> None:
+    checks = dict.fromkeys(GroundTruthCheck, 1.0)
+    del checks[GroundTruthCheck.REVERT_TARGET]
+    with pytest.raises(ValidationError):
+        GroundTruthResult(item_id="i", branch="pass/01", case="i", checks=checks)
+
+
+def test_ground_truth_result_values_are_binary() -> None:
+    bad = dict.fromkeys(GroundTruthCheck, 1.0) | {GroundTruthCheck.FIRED: 0.5}
+    with pytest.raises(ValidationError):
+        GroundTruthResult(item_id="i", branch="pass/01", case="i", checks=bad)
+    ok = GroundTruthResult(
+        item_id="i",
+        branch="pass/01",
+        case="i",
+        checks=dict.fromkeys(GroundTruthCheck, 1.0) | {GroundTruthCheck.FIRED: 0.0},
+    )
+    assert ok.score_for(GroundTruthCheck.FIRED) == 0.0
+    assert ok.score_for(GroundTruthCheck.CLASSIFIED) == 1.0

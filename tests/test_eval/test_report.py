@@ -9,6 +9,7 @@ import pytest
 
 from sentinel.eval.report import (
     PASS_THRESHOLD,
+    CheckStats,
     DimensionStats,
     EvalReport,
     build_report,
@@ -18,7 +19,13 @@ from sentinel.eval.report import (
     write_markdown,
     write_reports,
 )
-from sentinel.models.eval_result import DimensionScore, EvalDimension, TrajectoryScore
+from sentinel.models.eval_result import (
+    DimensionScore,
+    EvalDimension,
+    GroundTruthCheck,
+    GroundTruthResult,
+    TrajectoryScore,
+)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -335,3 +342,52 @@ class TestJudgeConflictExcluded:
 class TestScaleDisplay:
     def test_markdown_shows_0_1_scale(self) -> None:
         assert "/ 1.00" in to_markdown(build_report(_two_scores()))
+
+
+# ── Ground-truth checks ───────────────────────────────────────────────────────
+
+
+def _gt(item_id: str, value: float, *, conflict: bool = False) -> GroundTruthResult:
+    return GroundTruthResult(
+        item_id=item_id,
+        branch="pass/01",
+        case="i",
+        checks=dict.fromkeys(GroundTruthCheck, value),
+        judge_conflict=conflict,
+    )
+
+
+class TestGroundTruth:
+    def test_check_stats_one_per_check_and_conflicts_excluded(self) -> None:
+        gt = [_gt("a", 1.0), _gt("b", 0.0, conflict=True), _gt("c", 0.0)]
+        report = build_report([], ground_truth=gt)
+        assert report.items_scored == 2
+        assert [cs.check for cs in report.check_stats] == list(GroundTruthCheck)
+        assert all(isinstance(cs, CheckStats) for cs in report.check_stats)
+        assert all(cs.pass_rate == 0.5 and cs.item_count == 2 for cs in report.check_stats)
+        assert len(report.ground_truth) == 3
+
+    def test_no_ground_truth_gives_zero_stats(self) -> None:
+        report = build_report([])
+        assert len(report.check_stats) == 4
+        assert all(cs.item_count == 0 and cs.pass_rate == 0.0 for cs in report.check_stats)
+        assert report.items_scored == 0
+        assert report.dataset_name is None
+
+    def test_json_has_ground_truth_and_run_fields(self) -> None:
+        report = build_report(
+            [_make_score()], ground_truth=[_gt("a", 1.0)], dataset_name="d", run_name="r"
+        )
+        data = to_json_dict(report)
+        assert data["summary"]["dataset"] == "d"
+        assert data["summary"]["run_name"] == "r"
+        assert data["summary"]["items_scored"] == 1
+        assert len(data["ground_truth"]["checks"]) == 4
+        assert data["ground_truth"]["items"][0]["item_id"] == "a"
+        json.dumps(data)
+
+    def test_markdown_has_ground_truth_section(self) -> None:
+        with_gt = to_markdown(build_report([], ground_truth=[_gt("a", 1.0)]))
+        assert "## Ground-Truth Checks" in with_gt
+        assert "| revert_target | 100% | 1 | 1 |" in with_gt
+        assert "## Ground-Truth Checks" not in to_markdown(build_report([]))
