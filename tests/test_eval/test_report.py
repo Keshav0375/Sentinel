@@ -36,6 +36,7 @@ def _make_score(
     dim_score: float | None = None,
     judge_model: str = "test-judge",
     judge_conflict: bool = False,
+    judge_failed: bool = False,
 ) -> TrajectoryScore:
     """Create a TrajectoryScore with uniform dimension scores."""
     s = dim_score if dim_score is not None else total
@@ -48,6 +49,7 @@ def _make_score(
         total_score=total,
         judge_model=judge_model,
         judge_conflict=judge_conflict,
+        judge_failed=judge_failed,
     )
 
 
@@ -337,6 +339,44 @@ class TestJudgeConflictExcluded:
         assert report.scenarios_run == 0
         assert report.avg_total_score == 0.0
         assert report.judge_conflicts == 1
+
+
+class TestJudgeFailedExcluded:
+    def test_failures_are_kept_but_not_aggregated(self) -> None:
+        scores = [
+            _make_score("a", 0.8),
+            _make_score("b", 0.0, judge_failed=True),
+        ]
+        report = build_report(scores)
+        assert report.scenarios_run == 1
+        assert report.judge_failures == 1
+        assert report.judge_conflicts == 0
+        assert report.avg_total_score == pytest.approx(0.8)
+        assert report.pass_rate == pytest.approx(1.0)
+        assert all(ds.scenario_count == 1 for ds in report.dimension_stats)
+        assert len(report.scores) == 2
+        assert to_json_dict(report)["summary"]["judge_failures"] == 1
+        markdown = to_markdown(report)
+        assert "JUDGE_FAILED" in markdown
+        assert "Judge failures (excluded) | 1" in markdown
+
+    def test_failed_ground_truth_item_still_counts(self) -> None:
+        gt = GroundTruthResult(
+            item_id="x",
+            branch="runtime/01",
+            case="iii",
+            checks=dict.fromkeys(GroundTruthCheck, 1.0),
+        )
+        report = build_report([_make_score(total=0.0, judge_failed=True)], ground_truth=[gt])
+        assert report.items_scored == 1
+        assert all(cs.item_count == 1 for cs in report.check_stats)
+        assert report.scenarios_run == 0
+
+    def test_only_failures_reports_zero_scenarios(self) -> None:
+        report = build_report([_make_score(total=1.0, judge_failed=True)])
+        assert report.scenarios_run == 0
+        assert report.avg_total_score == 0.0
+        assert report.judge_failures == 1
 
 
 class TestScaleDisplay:

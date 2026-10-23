@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -11,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -32,8 +33,8 @@ from sentinel.eval.runner import (
     run_eval,
     same_deploy,
 )
-from sentinel.exceptions import EvalError
-from sentinel.models.eval_result import GroundTruthCheck
+from sentinel.exceptions import EvalError, SentinelMemoryError
+from sentinel.models.eval_result import GroundTruthCheck, TrajectoryScore
 from sentinel.models.pipeline import PipelineResult
 from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
 
@@ -72,6 +73,46 @@ class FakeItem:
     ) -> Iterator[FakeSpan]:
         self.runs.append({"run_name": run_name, "run_metadata": run_metadata})
         yield FakeSpan(f"trace-{self.id}")
+
+
+@dataclass
+class FakeStore:
+    missing: set[str] = field(default_factory=set[str])
+    failing: set[str] = field(default_factory=set[str])
+    calls: list[tuple[str, TrajectoryScore]] = field(
+        default_factory=list[tuple[str, TrajectoryScore]]
+    )
+
+    async def store_eval_score(self, incident_id: str, score: TrajectoryScore) -> bool:
+        self.calls.append((incident_id, score))
+        if incident_id in self.failing:
+            raise SentinelMemoryError("down")
+        return incident_id not in self.missing
+
+
+def _primary_id(item: FakeItem) -> str:
+    """The first incident carries the pipeline result in every _dataset item."""
+    return str(item.input["incidents"][0]["incident_id"])
+
+
+class ThreadItem(FakeItem):
+    threads: list[int] = []
+
+    @contextmanager
+    def run(
+        self,
+        *,
+        run_name: str,
+        run_metadata: Any | None = None,
+        run_description: str | None = None,
+    ) -> Iterator[FakeSpan]:
+        self.threads.append(threading.get_ident())
+        yield FakeSpan(f"trace-{self.id}")
+
+
+class FailingClient:
+    async def complete(self, **kw: Any) -> str:
+        raise RuntimeError("down")
 
 
 class BrokenItem(FakeItem):
@@ -473,6 +514,181 @@ async def test_flush_runs_even_when_the_catalog_is_missing(tmp_path: Path) -> No
             reports_dir=tmp_path,
         )
     flush.assert_called_once()
+
+
+# ── Score storing ─────────────────────────────────────────────────────────────
+
+
+@contextmanager
+def _quiet_langfuse() -> Iterator[tuple[MagicMock, MagicMock]]:
+    with (
+        patch("sentinel.eval.runner.flush_traces"),
+        patch("sentinel.eval.runner.push_score") as ps,
+        patch("sentinel.eval.judge.push_score") as pj,
+    ):
+        yield ps, pj
+
+
+async def test_run_eval_stores_each_judged_score(tmp_path: Path) -> None:
+    items = _dataset()
+    store = FakeStore()
+    with _quiet_langfuse():
+        run = await run_eval(
+            branches_path=FIXTURE,
+            items=items,
+            settings=_settings(),
+            reports_dir=tmp_path,
+            score_store=store,
+        )
+    assert [c[0] for c in store.calls] == [_primary_id(i) for i in items[1:]]
+    assert [r.stored for r in run.results] == [False, True, True, True]
+    for (_, stored_score), result in zip(store.calls, run.results[1:], strict=True):
+        assert stored_score is result.judge_score
+
+
+async def test_store_failures_are_logged_not_fatal(tmp_path: Path) -> None:
+    items = _dataset()
+    store = FakeStore(failing={_primary_id(items[2])}, missing={_primary_id(items[3])})
+    with _quiet_langfuse(), patch("sentinel.eval.runner.logger") as log:
+        run = await run_eval(
+            branches_path=FIXTURE,
+            items=items,
+            settings=_settings(),
+            reports_dir=tmp_path,
+            score_store=store,
+        )
+    assert [r.stored for r in run.results] == [False, True, False, False]
+    events = [c.args[0] for c in log.warning.call_args_list]
+    assert "eval_score_store_failed" in events
+    assert "eval_score_no_incident_row" in events
+    assert run.json_path.exists()
+    assert run.report.items_scored == 4
+
+
+async def test_store_scores_false_skips_the_database(tmp_path: Path) -> None:
+    store = FakeStore()
+    with (
+        _quiet_langfuse(),
+        patch("sentinel.eval.runner.open_score_store", new_callable=AsyncMock) as open_store,
+    ):
+        run = await run_eval(
+            branches_path=FIXTURE,
+            items=_dataset(),
+            settings=_settings(),
+            reports_dir=tmp_path,
+            store_scores=False,
+            score_store=store,
+        )
+    open_store.assert_not_awaited()
+    assert store.calls == []
+    assert [r.stored for r in run.results] == [False] * 4
+
+
+async def test_runner_opens_and_closes_its_own_store(tmp_path: Path) -> None:
+    settings = _settings()
+    with (
+        _quiet_langfuse(),
+        patch(
+            "sentinel.eval.runner.open_score_store",
+            new_callable=AsyncMock,
+            return_value=FakeStore(),
+        ) as open_store,
+        patch("sentinel.eval.runner.close_score_store", new_callable=AsyncMock) as close_store,
+    ):
+        run = await run_eval(
+            branches_path=FIXTURE, items=_dataset(), settings=settings, reports_dir=tmp_path
+        )
+    open_store.assert_awaited_once_with(settings)
+    close_store.assert_awaited_once()
+    assert [r.stored for r in run.results] == [False, True, True, True]
+
+
+async def test_injected_store_is_never_closed(tmp_path: Path) -> None:
+    with (
+        _quiet_langfuse(),
+        patch("sentinel.eval.runner.close_score_store", new_callable=AsyncMock) as close_store,
+    ):
+        await run_eval(
+            branches_path=FIXTURE,
+            items=_dataset(),
+            settings=_settings(),
+            reports_dir=tmp_path,
+            score_store=FakeStore(),
+        )
+    close_store.assert_not_awaited()
+
+
+async def test_no_database_scores_without_storing(tmp_path: Path) -> None:
+    with (
+        _quiet_langfuse(),
+        patch("sentinel.eval.runner.close_score_store", new_callable=AsyncMock) as close_store,
+    ):
+        run = await run_eval(
+            branches_path=FIXTURE, items=_dataset(), settings=_settings(), reports_dir=tmp_path
+        )
+    assert [r.stored for r in run.results] == [False] * 4
+    close_store.assert_not_awaited()
+    assert run.report.items_scored == 4
+
+
+async def test_close_runs_even_when_scoring_raises(tmp_path: Path) -> None:
+    with (
+        _quiet_langfuse(),
+        patch(
+            "sentinel.eval.runner.open_score_store",
+            new_callable=AsyncMock,
+            return_value=FakeStore(),
+        ),
+        patch("sentinel.eval.runner.close_score_store", new_callable=AsyncMock) as close_store,
+        patch("sentinel.eval.runner.build_report", side_effect=RuntimeError("boom")),
+        pytest.raises(RuntimeError),
+    ):
+        await run_eval(
+            branches_path=FIXTURE, items=_dataset(), settings=_settings(), reports_dir=tmp_path
+        )
+    close_store.assert_awaited_once()
+
+
+async def test_judge_failed_item_is_stored_not_pushed_not_aggregated(tmp_path: Path) -> None:
+    item = _dataset()[2]
+    store = FakeStore()
+    with (
+        _quiet_langfuse() as (ps, pj),
+        patch(
+            "sentinel.eval.runner.make_judge_client",
+            return_value=(_judge_model(), FailingClient()),
+        ),
+        patch("sentinel.eval.judge.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        run = await run_eval(
+            branches_path=FIXTURE,
+            items=[item],
+            settings=_settings(),
+            reports_dir=tmp_path,
+            score_store=store,
+        )
+    assert run.report.judge_failures == 1
+    assert run.report.scenarios_run == 0
+    assert run.report.items_scored == 1
+    assert ps.call_count == 4
+    pj.assert_not_called()
+    judge_score = run.results[0].judge_score
+    assert judge_score is not None
+    assert judge_score.judge_failed is True
+    assert store.calls[0][1].to_eval_score()["judge_failed"] is True
+
+
+async def test_push_runs_off_the_event_loop(tmp_path: Path) -> None:
+    ThreadItem.threads = []
+    item = ThreadItem("pass-01", {"branch": "pass/01", "incidents": []})
+    loop_thread = threading.get_ident()
+    with _quiet_langfuse():
+        run = await run_eval(
+            branches_path=FIXTURE, items=[item], settings=_settings(), reports_dir=tmp_path
+        )
+    assert ThreadItem.threads
+    assert ThreadItem.threads[0] != loop_thread
+    assert run.results[0].pushed is True
 
 
 # ── Dataset fetch ─────────────────────────────────────────────────────────────

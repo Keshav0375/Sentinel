@@ -4,8 +4,10 @@ The runner never runs the pipeline and never acts on the world (HITL): it does n
 deploy or revert, and it never calls GitHub. A human merges a scenario branch's PR, GitHub
 Actions deploys it, Sentinel handles whatever fires; this module only scores what happened.
 It reads the dataset, scores each item against ``branches.yaml``, pushes LangFuse scores
-and writes the eval report. It writes nothing to the database (``incidents.eval_score`` is
-set by ``sentinel.eval.judge.score_incident``).
+and writes the eval report. It also stores each judged item's score on its incident row
+(``incidents.eval_score`` via ``EpisodicMemory.store_eval_score``) — a write to Sentinel's own
+database, best effort: no database, a failed write or a missing row is logged, never fatal;
+``store_scores=False`` (CLI ``--no-store``) skips it.
 
 Dataset: ``sentinel-scenario-runs`` (``DATASET_NAME``), read with the LangFuse v3 SDK. An
 item's ``input`` is one finished scenario run; ``expected_output`` and ``metadata`` are
@@ -41,12 +43,17 @@ Four checks per item, each 1.0 (pass) or 0.0 (fail):
 Judge: only the primary incident (the first with a pipeline result) is judged, by
 ``evaluate_trajectory`` against the branch's ground truth; no primary, no judge score. A
 ``judge_conflict`` item (the run used the judge's own model) is excluded from every
-aggregate and pushes nothing.
+aggregate and pushes nothing. A ``judge_failed`` item (the judge errored on every retry) is
+stored flagged; its judge scores are not pushed and are excluded from the judge aggregates,
+while its four checks still count.
+
+Store: the primary incident's score, flagged ones included, before the push.
 
 Push: each item opens a LangFuse dataset run (``item.run``); the four checks go to its
 trace as NUMERIC scores named after the check, next to the five judge dimensions. A push
-failure is logged, never raised. The report is written to ``reports/eval_report.json`` and
-``.md`` — the file ``GET /api/eval-report`` serves. Traces are flushed before returning.
+failure is logged, never raised. The push runs in a worker thread (the SDK calls block). The
+report is written to ``reports/eval_report.json`` and ``.md`` — the file
+``GET /api/eval-report`` serves. Traces are flushed before returning.
 
 Usage (library)::
 
@@ -55,7 +62,7 @@ Usage (library)::
 Usage (CLI)::
 
     python3 scripts/run_eval.py --branches ../Sentinel-deployment/scenarios/branches.yaml \
-        [--dataset N] [--run-name R]
+        [--dataset N] [--run-name R] [--no-store]
 """
 
 from __future__ import annotations
@@ -75,6 +82,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sentinel.config import Settings, get_settings
 from sentinel.eval.judge import JudgeClient, evaluate_trajectory, make_judge_client, push_scores
 from sentinel.eval.report import EvalReport, build_report, write_reports
+from sentinel.eval.score_store import close_score_store, open_score_store
 from sentinel.exceptions import EvalError
 from sentinel.infra.logging import configure_logging, get_logger
 from sentinel.infra.tracing import flush_traces, get_client, langfuse_enabled, push_score
@@ -148,6 +156,12 @@ class DatasetItem(Protocol):
     ) -> AbstractContextManager[RunSpan]: ...
 
 
+class EvalScoreStore(Protocol):
+    """Where judged scores are persisted (``EpisodicMemory`` satisfies it)."""
+
+    async def store_eval_score(self, incident_id: str, score: TrajectoryScore) -> bool: ...
+
+
 @dataclass(frozen=True)
 class ItemResult:
     """One scored dataset item."""
@@ -157,6 +171,7 @@ class ItemResult:
     ground_truth: GroundTruthResult
     judge_score: TrajectoryScore | None
     pushed: bool
+    stored: bool = False
 
     @property
     def judge_conflict(self) -> bool:
@@ -360,6 +375,7 @@ async def score_item(
         checks={str(c): v for c, v in checks.items()},
         judge_total=score.total_score if score else None,
         judge_conflict=result.judge_conflict,
+        judge_failed=bool(score and score.judge_failed),
     )
     return result, score
 
@@ -387,6 +403,18 @@ def push_item(
     return True
 
 
+async def store_item_score(store: EvalScoreStore, score: TrajectoryScore) -> bool:
+    """Persist *score* on its incident row; True when a row was written (never raises)."""
+    try:
+        stored = await store.store_eval_score(score.incident_id, score)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("eval_score_store_failed", incident_id=score.incident_id, error=str(exc))
+        return False
+    if not stored:
+        logger.warning("eval_score_no_incident_row", incident_id=score.incident_id)
+    return stored
+
+
 async def run_eval(
     *,
     branches_path: Path,
@@ -395,6 +423,8 @@ async def run_eval(
     items: Sequence[DatasetItem] | None = None,
     settings: Settings | None = None,
     reports_dir: Path = Path("reports"),
+    store_scores: bool = True,
+    score_store: EvalScoreStore | None = None,
 ) -> EvalRun:
     """Score every item of the dataset against the branch catalog and write the report.
 
@@ -405,6 +435,10 @@ async def run_eval(
         items: Items to score instead of fetching the dataset (tests, replays).
         settings: Defaults to ``get_settings()``.
         reports_dir: Where ``eval_report.json`` and ``.md`` are written.
+        store_scores: Store each judged score on its incident row (``incidents.eval_score``);
+            False skips the database entirely.
+        score_store: Where to store scores; default opens one from settings (DATABASE_URL) and
+            closes it after. A given store is never closed.
 
     Raises:
         EvalError: The catalog or the dataset cannot be read.
@@ -417,6 +451,8 @@ async def run_eval(
     results: list[ItemResult] = []
     invalid: dict[str, str] = {}
     items_read = 0
+    store: EvalScoreStore | None = None
+    owns_store = False
     try:
         catalog = load_branches(branches_path)
         judge_model, judge_client = make_judge_client(resolved)
@@ -426,6 +462,13 @@ async def run_eval(
             else await asyncio.to_thread(fetch_dataset_items, dataset_name)
         )
         items_read = len(dataset_items)
+        if not store_scores:
+            logger.info("eval_score_store_disabled")
+        elif score_store is not None:
+            store = score_store
+        else:
+            store = await open_score_store(resolved)
+            owns_store = store is not None
         for item in dataset_items:
             try:
                 ground_truth, judge_score = await score_item(
@@ -435,8 +478,13 @@ async def run_eval(
                 logger.warning("eval_item_invalid", item_id=item.id, error=str(exc))
                 invalid[item.id] = str(exc)
                 continue
-            pushed = push_item(
-                item, run_name=name, ground_truth=ground_truth, judge_score=judge_score
+            stored = (
+                await store_item_score(store, judge_score)
+                if store is not None and judge_score is not None
+                else False
+            )
+            pushed = await asyncio.to_thread(
+                push_item, item, run_name=name, ground_truth=ground_truth, judge_score=judge_score
             )
             results.append(
                 ItemResult(
@@ -445,6 +493,7 @@ async def run_eval(
                     ground_truth=ground_truth,
                     judge_score=judge_score,
                     pushed=pushed,
+                    stored=stored,
                 )
             )
         report = build_report(
@@ -456,13 +505,17 @@ async def run_eval(
         json_path, md_path = write_reports(report, reports_dir=reports_dir)
     finally:
         flush_traces()
+        if owns_store:
+            await close_score_store()
     logger.info(
         "eval_run_complete",
         items_read=items_read,
         items_scored=report.items_scored,
         invalid=len(invalid),
         judge_conflicts=report.judge_conflicts,
+        judge_failures=report.judge_failures,
         pushed=sum(1 for r in results if r.pushed),
+        stored=sum(1 for r in results if r.stored),
     )
     return EvalRun(
         dataset_name=dataset_name,

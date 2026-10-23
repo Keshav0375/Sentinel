@@ -59,6 +59,9 @@ class TrajectoryScore(BaseModel):
     judge_conflict marks a run the judge would have graded itself on — its model is in the
     run's ``models_used`` (decision 2026-10-18). Such a score is invalid: it is zeroed,
     never judged, and excluded from every aggregate.
+
+    judge_failed marks a score the judge could not produce (every retry failed). It is zeroed,
+    stored flagged, never pushed and excluded from every aggregate.
     """
 
     incident_id: str
@@ -67,6 +70,7 @@ class TrajectoryScore(BaseModel):
     total_score: float = 0.0
     judge_model: str
     judge_conflict: bool = False
+    judge_failed: bool = False
 
     @field_validator("total_score")
     @classmethod
@@ -108,7 +112,7 @@ class TrajectoryScore(BaseModel):
         return self.score_for(EvalDimension.REMEDIATION_SAFETY)
 
     def to_eval_score(self) -> dict[str, JsonValue]:
-        """The ``incidents.eval_score`` JSONB (decision 2026-10-22)."""
+        """The ``incidents.eval_score`` JSONB (decision 2026-10-22, amended)."""
         scores: dict[str, JsonValue] = {str(ds.dimension): ds.score for ds in self.dimension_scores}
         reasoning: dict[str, JsonValue] = {
             str(ds.dimension): ds.reasoning for ds in self.dimension_scores
@@ -116,6 +120,7 @@ class TrajectoryScore(BaseModel):
         return {
             "judge_model": self.judge_model,
             "judge_conflict": self.judge_conflict,
+            "judge_failed": self.judge_failed,
             "scores": scores,
             "reasoning": reasoning,
         }

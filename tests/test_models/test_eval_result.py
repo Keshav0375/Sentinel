@@ -121,6 +121,7 @@ def test_trajectory_score_defaults() -> None:
     )
     assert ts.dimension_scores == []
     assert ts.total_score == 0.0
+    assert ts.judge_failed is False
 
 
 def test_trajectory_score_total_out_of_range_raises() -> None:
@@ -184,9 +185,10 @@ def test_to_eval_score_shape() -> None:
         judge_model="openai/gpt-4.1",
     )
     out = ts.to_eval_score()
-    assert set(out) == {"judge_model", "judge_conflict", "scores", "reasoning"}
+    assert set(out) == {"judge_model", "judge_conflict", "judge_failed", "scores", "reasoning"}
     assert out["judge_model"] == "openai/gpt-4.1"
     assert out["judge_conflict"] is False
+    assert out["judge_failed"] is False
     assert out["scores"] == {str(ds.dimension): ds.score for ds in ts.dimension_scores}
     assert out["reasoning"] == {str(ds.dimension): ds.reasoning for ds in ts.dimension_scores}
     assert json.loads(json.dumps(out)) == out
@@ -194,6 +196,8 @@ def test_to_eval_score_shape() -> None:
         incident_id="i", scenario_id="s", judge_model="m", judge_conflict=True
     )
     assert conflict.to_eval_score()["judge_conflict"] is True
+    failed = TrajectoryScore(incident_id="i", scenario_id="s", judge_model="m", judge_failed=True)
+    assert failed.to_eval_score()["judge_failed"] is True
 
 
 # ── GroundTruthResult ─────────────────────────────────────────────────────────

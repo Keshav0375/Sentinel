@@ -74,11 +74,14 @@ def _sample_trajectory() -> dict[str, Any]:
 
 def _sample_ground_truth() -> dict[str, Any]:
     return {
-        "severity": "P1",
-        "affected_service": "api-gateway",
-        "root_cause_summary": "Missing config key",
-        "recommended_action": "rollback",
-        "deploy_id": "deploy-abc123",
+        "branch": "deployfail/01",
+        "case": "ii",
+        "fault": "requirements.txt pins a version that does not exist",
+        "expected_signal_type": "deploy_failure",
+        "expected_resolution": "rollback",
+        "expected_failed_stage": "build",
+        "also_expected": [],
+        "expected_culprit": "pr-41-abc1234",
     }
 
 
@@ -212,6 +215,15 @@ class TestZeroScore:
         dims = {ds.dimension for ds in result.dimension_scores}
         assert dims == set(EvalDimension)
 
+    def test_judge_failed_flag(self) -> None:
+        result = _zero_score("i", "s", "m", judge_failed=True)
+        assert result.judge_failed is True
+        assert result.judge_conflict is False
+        assert all(
+            ds.reasoning == "Judge failed after retries — score invalid."
+            for ds in result.dimension_scores
+        )
+
 
 # ── evaluate_trajectory ───────────────────────────────────────────────────────
 
@@ -332,6 +344,8 @@ class TestEvaluateTrajectory:
 
         assert result.total_score == pytest.approx(0.0)
         assert result.incident_id == "i"
+        assert result.judge_failed is True
+        assert result.judge_conflict is False
 
     async def test_api_exception_retries_then_returns_zero(self) -> None:
         client = MagicMock()
@@ -348,6 +362,26 @@ class TestEvaluateTrajectory:
             )
 
         assert result.total_score == 0.0
+        assert result.judge_failed is True
+
+    async def test_success_is_not_judge_failed(self) -> None:
+        result = await evaluate_trajectory(
+            _sample_trajectory(),
+            _sample_ground_truth(),
+            incident_id="i",
+            scenario_id="s",
+            client=_make_client(),
+            model="openai/gpt-4.1",
+        )
+        assert result.judge_failed is False
+
+    def test_evaluate_trajectory_docstring_has_no_stale_keys(self) -> None:
+        doc = (evaluate_trajectory.__doc__ or "").lower()
+        # Phase-1 ground-truth keys, spelled in parts so the stale-key grep stays clean.
+        for word in ("sever" + "ity", "affected" + "_service", "recommended" + "_action"):
+            assert word not in doc, word
+        for word in ("root_cause" + "_summary", "deploy" + "_id"):
+            assert word not in doc, word
 
     async def test_temperature_zero_in_api_call(self) -> None:
         client = _make_client()
@@ -540,6 +574,16 @@ class TestPushScores:
         assert pushed == 0
         push.assert_not_called()
 
+    def test_failed_pushes_nothing(self) -> None:
+        with (
+            patch("sentinel.eval.judge.push_score") as push,
+            patch("sentinel.eval.judge.logger") as log,
+        ):
+            pushed = push_scores(_zero_score("i", "s", "m", judge_failed=True), _TRACE)
+        assert pushed == 0
+        push.assert_not_called()
+        assert log.warning.call_args.args[0] == "judge_failed_scores_not_pushed"
+
     def test_only_score_values_reach_langfuse(self) -> None:
         """R14: no reasoning or trajectory text leaves the process."""
         score = _score_with([0.5] * 5, reasoning="SECRET-REASONING")
@@ -660,6 +704,28 @@ class TestScoreIncident:
         assert stored.judge_conflict is True
         assert stored.to_eval_score()["judge_conflict"] is True
         assert score.judge_conflict is True
+
+    async def test_judge_failure_is_stored_flagged_not_pushed(self) -> None:
+        client = MagicMock()
+        client.complete = AsyncMock(side_effect=RuntimeError("down"))
+        episodic = _episodic()
+        with (
+            patch("sentinel.eval.judge.asyncio.sleep", new_callable=AsyncMock),
+            patch("sentinel.eval.judge.push_score") as push,
+        ):
+            await score_incident(
+                _trajectory("escalated"),
+                _sample_ground_truth(),
+                incident_id=_INC,
+                scenario_id="s",
+                client=client,
+                model="openai/gpt-4.1",
+                episodic=episodic,
+            )
+        push.assert_not_called()
+        stored = episodic.store_eval_score.await_args.args[1]
+        assert stored.judge_failed is True
+        assert stored.to_eval_score()["judge_failed"] is True
 
     async def test_non_uuid_incident_raises_before_judging(self) -> None:
         client = FakeJudgeClient()

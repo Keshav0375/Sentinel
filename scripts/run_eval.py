@@ -4,8 +4,11 @@ Usage::
 
     python3 scripts/run_eval.py --branches ../Sentinel-deployment/scenarios/branches.yaml
     python3 scripts/run_eval.py --branches <path> --dataset sentinel-scenario-runs --run-name R
+    python3 scripts/run_eval.py --branches <path> --no-store
 
 This is a read-only scorer: run scenarios by merging their branch PRs; this only scores.
+With DATABASE_URL set, each judged score is also stored on its incident row
+(incidents.eval_score); --no-store skips it.
 
 Results are written to:
   reports/eval_report.json  — machine-readable (for CI gates and dashboard)
@@ -51,6 +54,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset", default=DATASET_NAME, help="LangFuse dataset name")
     parser.add_argument("--run-name", default=None, help="dataset-run name (default: timestamp)")
+    parser.add_argument(
+        "--no-store",
+        action="store_true",
+        help="do not write incidents.eval_score (e.g. no database)",
+    )
     return parser.parse_args()
 
 
@@ -65,6 +73,7 @@ async def main() -> None:
             dataset_name=args.dataset,
             run_name=args.run_name,
             reports_dir=_REPORTS_DIR,
+            store_scores=not args.no_store,
         )
     except (EvalError, ProviderUnavailableError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -76,6 +85,8 @@ async def main() -> None:
     print(f"  Items scored    : {report.items_scored}")
     print(f"  Items invalid   : {len(run.invalid)}")
     print(f"  Judge conflicts : {report.judge_conflicts}")
+    print(f"  Judge failures  : {report.judge_failures}")
+    print(f"  Scores stored   : {sum(1 for r in run.results if r.stored)}")
     print(f"  Average score   : {_score_bar(report.avg_total_score)}")
     print(f"  Judge pass rate : {report.pass_rate * 100:.0f}%  (≥{PASS_THRESHOLD})")
     for cs in report.check_stats:

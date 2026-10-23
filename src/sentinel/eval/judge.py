@@ -269,9 +269,9 @@ async def evaluate_trajectory(
     """Score a single incident trajectory against known ground truth.
 
     Calls the judge LLM with the eval rubric as the system prompt. Retries up to 3
-    times with exponential backoff on failure. If all retries fail, returns a
-    zero-scored ``TrajectoryScore`` so the eval runner can continue with remaining
-    scenarios.
+    times with exponential backoff on failure. If all retries fail, returns a zero
+    ``TrajectoryScore`` marked ``judge_failed`` (stored flagged, never pushed, excluded from
+    aggregates) so the runner can continue.
 
     A run whose ``pipeline_result.models_used`` contains *model* is never judged: the judge
     would grade itself, so the result is a zero score marked ``judge_conflict`` (logged),
@@ -281,9 +281,10 @@ async def evaluate_trajectory(
         trajectory: Full incident trajectory dict (timeline, tool calls,
             agent outputs). Typically loaded from the trajectory JSON written
             by ``SentinelTracer``.
-        ground_truth: Scenario ground truth block containing ``severity``,
-            ``affected_service``, ``root_cause_summary``, ``recommended_action``,
-            and ``deploy_id``.
+        ground_truth: The branches.yaml entry the runner joins (``branch``, ``case``,
+            ``fault``, ``expected_signal_type``, ``expected_resolution``,
+            ``expected_failed_stage``, ``also_expected``) with ``expected_culprit`` bound to
+            ``pr-<N>-<sha>`` or ``"none"``.
         incident_id: Incident ID being evaluated (for correlation in logs).
         scenario_id: Scenario ID being evaluated.
         client: The judge's chat client (``make_judge_client``).
@@ -360,17 +361,22 @@ async def evaluate_trajectory(
         scenario_id=scenario_id,
         error=str(last_exc),
     )
-    return _zero_score(incident_id, scenario_id, model)
+    return _zero_score(incident_id, scenario_id, model, judge_failed=True)
 
 
 def _zero_score(
-    incident_id: str, scenario_id: str, model: str, *, judge_conflict: bool = False
+    incident_id: str,
+    scenario_id: str,
+    model: str,
+    *,
+    judge_conflict: bool = False,
+    judge_failed: bool = False,
 ) -> TrajectoryScore:
     """Return a TrajectoryScore of 0 for all dimensions (judge failure or conflict)."""
     reasoning = (
         "Judge conflict — the run used the judge's model; score invalid."
         if judge_conflict
-        else "Judge failed — score defaulted to 0."
+        else "Judge failed after retries — score invalid."
     )
     return TrajectoryScore(
         incident_id=incident_id,
@@ -386,6 +392,7 @@ def _zero_score(
         total_score=0.0,
         judge_model=model,
         judge_conflict=judge_conflict,
+        judge_failed=judge_failed,
     )
 
 
@@ -394,11 +401,16 @@ def push_scores(score: TrajectoryScore, trace_id: str) -> int:
 
     Only the dimension name and value leave the process (R14) — never the reasoning. A
     ``judge_conflict`` score is invalid and is not pushed: LangFuse averages could not
-    exclude it (decision 2026-10-18).
+    exclude it (decision 2026-10-18); a ``judge_failed`` score likewise.
     """
-    if score.judge_conflict:
+    if score.judge_conflict or score.judge_failed:
+        event = (
+            "judge_conflict_scores_not_pushed"
+            if score.judge_conflict
+            else "judge_failed_scores_not_pushed"
+        )
         logger.warning(
-            "judge_conflict_scores_not_pushed",
+            event,
             incident_id=score.incident_id,
             trace_id=trace_id,
             judge_model=score.judge_model,
@@ -425,8 +437,9 @@ async def score_incident(
     trace-id check, judge, store, push. A non-UUID *incident_id* raises
     :class:`~sentinel.exceptions.EvalError` before any judge call. A store failure
     (``SentinelMemoryError``) propagates and nothing is pushed; a missing incident row is
-    logged and the push still runs. A ``judge_conflict`` score is stored (flagged) but not
-    pushed. This does not flush: the short-lived caller calls ``flush_traces()`` (§6.2).
+    logged and the push still runs. A ``judge_conflict`` or ``judge_failed`` score is
+    stored (flagged) but not pushed. This does not flush: the short-lived caller calls
+    ``flush_traces()`` (§6.2).
 
     Raises:
         EvalError: *incident_id* is not a UUID, so it has no trace to score.
@@ -455,5 +468,6 @@ async def score_incident(
         stored=stored,
         pushed=pushed,
         judge_conflict=score.judge_conflict,
+        judge_failed=score.judge_failed,
     )
     return score

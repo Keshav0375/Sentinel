@@ -261,10 +261,12 @@ python scripts/run_scenario.py --list   # see all 10 scenarios
 python3 scripts/run_eval.py --branches ../Sentinel-deployment/scenarios/branches.yaml
 # dataset (default sentinel-scenario-runs) and dataset-run name:
 python3 scripts/run_eval.py --branches <path> --dataset sentinel-scenario-runs --run-name prompt-v2
+python3 scripts/run_eval.py --branches <path> --no-store   # do not write incidents.eval_score
 ```
 
 Results → `reports/eval_report.json` + `reports/eval_report.md`  
-Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
+Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)  
+With `DATABASE_URL` set, each judged score is also stored on its incident (`incidents.eval_score`).
 
 ---
 

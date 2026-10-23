@@ -79,6 +79,7 @@ class EvalReport:
     generated_at: str
     judge_model: str
     judge_conflicts: int = 0
+    judge_failures: int = 0
     ground_truth: list[GroundTruthResult] = field(default_factory=list[GroundTruthResult])
     check_stats: list[CheckStats] = field(default_factory=list[CheckStats])
     items_scored: int = 0
@@ -111,9 +112,14 @@ def build_report(
     in ``scores`` for visibility but is left out of every aggregate and of
     ``scenarios_run``; ``judge_conflicts`` counts them. Conflict ground-truth items are
     likewise kept in ``ground_truth`` but out of ``check_stats`` and ``items_scored``.
+
+    A ``judge_failed`` score (the judge errored on every retry) is treated the same way and
+    counted in ``judge_failures``; its ground-truth item still counts (the checks do not
+    depend on the judge).
     """
-    valid = [s for s in scores if not s.judge_conflict]
-    conflicts = len(scores) - len(valid)
+    valid = [s for s in scores if not s.judge_conflict and not s.judge_failed]
+    conflicts = sum(1 for s in scores if s.judge_conflict)
+    failures = sum(1 for s in scores if s.judge_failed)
     n = len(valid)
     generated_at = datetime.now(UTC).isoformat()
     judge_model = scores[0].judge_model if scores else "unknown"
@@ -137,6 +143,7 @@ def build_report(
             generated_at=generated_at,
             judge_model=judge_model,
             judge_conflicts=conflicts,
+            judge_failures=failures,
             **gt_fields,
         )
 
@@ -155,6 +162,7 @@ def build_report(
         generated_at=generated_at,
         judge_model=judge_model,
         judge_conflicts=conflicts,
+        judge_failures=failures,
         **gt_fields,
     )
 
@@ -238,6 +246,7 @@ def to_json_dict(report: EvalReport) -> dict[str, Any]:
             "pass_threshold": report.pass_threshold,
             "judge_model": report.judge_model,
             "judge_conflicts": report.judge_conflicts,
+            "judge_failures": report.judge_failures,
             "dataset": report.dataset_name,
             "run_name": report.run_name,
             "items_scored": report.items_scored,
@@ -290,6 +299,7 @@ def to_markdown(report: EvalReport) -> str:
     lines.append(f"| Run | {report.run_name or '-'} |")
     lines.append(f"| Scenarios evaluated | {report.scenarios_run} |")
     lines.append(f"| Judge conflicts (excluded) | {report.judge_conflicts} |")
+    lines.append(f"| Judge failures (excluded) | {report.judge_failures} |")
     lines.append(f"| Average total score | {report.avg_total_score:.2f} / {SCORE_MAX:.2f} |")
     lines.append(f"| Pass rate (≥{report.pass_threshold}) | {report.pass_rate * 100:.0f}% |")
     pf = "PASS" if report.avg_total_score >= report.pass_threshold else "FAIL"
@@ -326,6 +336,8 @@ def to_markdown(report: EvalReport) -> str:
         by_dim = {str(ds.dimension): ds.score for ds in score.dimension_scores}
         if score.judge_conflict:
             passed = "JUDGE_CONFLICT"
+        elif score.judge_failed:
+            passed = "JUDGE_FAILED"
         else:
             passed = "PASS" if score.total_score >= report.pass_threshold else "FAIL"
         row = [score.scenario_id, f"{score.total_score:.2f}", passed]
