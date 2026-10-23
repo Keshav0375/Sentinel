@@ -25,7 +25,7 @@ _SRC = _PROJECT_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from sentinel.eval.report import build_report, write_reports  # noqa: E402
+from sentinel.eval.report import PASS_THRESHOLD, build_report, write_reports  # noqa: E402
 from sentinel.eval.runner import (  # noqa: E402
     EvalRunResult,
     run_eval,
@@ -35,14 +35,13 @@ from sentinel.eval.runner import (  # noqa: E402
 from sentinel.infra.tracing import flush_traces  # noqa: E402
 
 _REPORTS_DIR = _PROJECT_ROOT / "reports"
-_PASS_THRESHOLD = 3.0
 
 
 def _score_bar(score: float, width: int = 20) -> str:
-    """Render a text progress bar for a 0-5 score."""
-    filled = int(round(score / 5.0 * width))
+    """Render a text progress bar for a 0-1 score."""
+    filled = int(round(score * width))
     bar = "█" * filled + "░" * (width - filled)
-    return f"[{bar}] {score:.2f}/5.00"
+    return f"[{bar}] {score:.2f}/1.00"
 
 
 def _print_summary(results: list[EvalRunResult]) -> None:
@@ -56,7 +55,7 @@ def _print_summary(results: list[EvalRunResult]) -> None:
     stats = summary_stats(results)
     print(f"  Scenarios run : {len(results)}")
     print(f"  Average score : {_score_bar(stats['avg_total'])}")
-    print(f"  Pass rate     : {stats['pass_rate'] * 100:.0f}%  (≥{_PASS_THRESHOLD}/5)")
+    print(f"  Pass rate     : {stats['pass_rate'] * 100:.0f}%  (≥{PASS_THRESHOLD})")
     print(f"  Failures      : {stats['failure_rate'] * 100:.0f}%  (pipeline error)")
     print()
 
@@ -64,7 +63,7 @@ def _print_summary(results: list[EvalRunResult]) -> None:
     print(f"  {'Scenario':<32} {'Total':>6}  {'Pass':>4}  Notes")
     print(f"  {'-' * 30:<32} {'-' * 6:>6}  {'-' * 4:>4}  {'-' * 14}")
     for r in results:
-        passed = "PASS" if r.score.total_score >= _PASS_THRESHOLD else "FAIL"
+        passed = "PASS" if r.score.total_score >= PASS_THRESHOLD else "FAIL"
         note = ""
         if r.pipeline_error:
             note = "pipeline error"

@@ -124,11 +124,11 @@ const DIMS = [
   {key:'remediation_safety',      label:'Remed. Safety'},
 ];
 
-const PASS_THRESHOLD = 3.0;
+const PASS_THRESHOLD = 0.6;
 
 function scoreClass(v) {
-  if (v >= 4)   return 'score-green';
-  if (v >= 2.5) return 'score-amber';
+  if (v >= 0.8) return 'score-green';
+  if (v >= 0.5) return 'score-amber';
   return 'score-red';
 }
 
@@ -237,7 +237,7 @@ function render(data) {
     DIMS.forEach(d => {
       const v = scores[d.key];
       if (v !== undefined) {
-        bodyHtml += `<td class="score-cell ${scoreClass(v)}">${v.toFixed(1)}</td>`;
+        bodyHtml += `<td class="score-cell ${scoreClass(v)}">${v.toFixed(2)}</td>`;
       } else {
         bodyHtml += '<td class="score-cell" style="color:var(--muted)">—</td>';
       }
@@ -268,8 +268,8 @@ function render(data) {
 }
 
 function colorForScore(v) {
-  if (v >= 4)   return 'var(--green)';
-  if (v >= 2.5) return 'var(--amber)';
+  if (v >= 0.8) return 'var(--green)';
+  if (v >= 0.5) return 'var(--amber)';
   return 'var(--red)';
 }
 

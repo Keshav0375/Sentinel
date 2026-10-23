@@ -32,6 +32,7 @@ from sentinel.memory.base import MemoryStore
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.models.alert import IncidentAlert, IncidentTags
+from sentinel.models.eval_result import DimensionScore, EvalDimension, TrajectoryScore
 from sentinel.models.incident import Incident, IncidentStatus, Severity, TimelineEntry
 from sentinel.models.memory import (
     EpisodicRecord,
@@ -202,6 +203,19 @@ def test_episodic_memory_satisfies_protocol() -> None:
 # ── No database configured ────────────────────────────────────────────────────
 
 
+def _eval_score(conflict: bool = False) -> TrajectoryScore:
+    return TrajectoryScore(
+        incident_id="i",
+        scenario_id="s",
+        dimension_scores=[
+            DimensionScore(dimension=d, score=0.8, reasoning="ok") for d in EvalDimension
+        ],
+        total_score=0.8,
+        judge_model="openai/gpt-4.1",
+        judge_conflict=conflict,
+    )
+
+
 def _calls() -> dict[str, Callable[[EpisodicMemory], Any]]:
     inc = _make_incident("payment-service", "db_connection_pool")
     some_id = str(uuid.uuid4())
@@ -220,6 +234,7 @@ def _calls() -> dict[str, Callable[[EpisodicMemory], Any]]:
         "get_linked_deployment": lambda m: m.get_linked_deployment(some_id),
         "find_incident_by_correlation_id": lambda m: m.find_incident_by_correlation_id(some_id),
         "link_deployment": lambda m: m.link_deployment(some_id, some_id),
+        "store_eval_score": lambda m: m.store_eval_score(some_id, _eval_score()),
         "delete": lambda m: m.delete(some_id),
     }
 
@@ -917,6 +932,29 @@ async def test_link_deployment(mem: EpisodicMemory, pool: asyncpg.Pool) -> None:
         await mem.link_deployment(inc.id, "nope")
     with pytest.raises(SentinelMemoryError, match="not a UUID"):
         await mem.link_deployment("nope", str(deploy_id))
+
+
+async def test_store_eval_score(mem: EpisodicMemory) -> None:
+    inc = _make_incident("payment-service", "db_connection_pool")
+    await mem.store_incident(inc)
+    score = _eval_score()
+
+    assert await mem.store_eval_score(inc.id, score) is True
+    row = await mem.get_incident_row(inc.id)
+    assert row is not None and row.eval_score == score.to_eval_score()
+
+    await mem.store_incident(inc)  # the upsert never touches eval_score
+    row = await mem.get_incident_row(inc.id)
+    assert row is not None and row.eval_score == score.to_eval_score()
+
+    conflict = _eval_score(conflict=True)  # overwrites, flagged
+    assert await mem.store_eval_score(inc.id, conflict) is True
+    row = await mem.get_incident_row(inc.id)
+    assert row is not None and row.eval_score == conflict.to_eval_score()
+
+    assert await mem.store_eval_score(str(uuid.uuid4()), score) is False
+    with pytest.raises(SentinelMemoryError, match="not a UUID"):
+        await mem.store_eval_score("nope", score)
 
 
 async def test_dd_event_id_is_stored(mem: EpisodicMemory, pool: asyncpg.Pool) -> None:

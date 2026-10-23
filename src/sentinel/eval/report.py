@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sentinel.models.eval_result import EvalDimension, TrajectoryScore
+from sentinel.models.eval_result import SCORE_MAX, EvalDimension, TrajectoryScore
 
 __all__ = [
     "PASS_THRESHOLD",
@@ -30,8 +30,7 @@ __all__ = [
     "write_reports",
 ]
 
-PASS_THRESHOLD: float = 3.0
-_SCORE_MAX: float = 5.0
+PASS_THRESHOLD: float = 0.6  # 60% of the 0-1 scale, decision 2026-10-22
 
 
 @dataclass(frozen=True)
@@ -76,7 +75,7 @@ def build_report(
     Args:
         scores: One ``TrajectoryScore`` per scenario that was evaluated.
         pass_threshold: Minimum ``total_score`` to count as a pass.
-            Defaults to 3.0 (60% of the 0-5 scale).
+            Defaults to 0.6 (60% of the 0-1 scale).
 
     Returns:
         ``EvalReport`` with per-dimension stats, pass rate, and metadata.
@@ -138,7 +137,7 @@ def _empty_dimension_stats() -> list[DimensionStats]:
 def _compute_dimension_stats(scores: list[TrajectoryScore]) -> list[DimensionStats]:
     """Compute per-dimension aggregate stats across all scores."""
     sums: dict[EvalDimension, float] = {d: 0.0 for d in EvalDimension}
-    mins: dict[EvalDimension, float] = {d: _SCORE_MAX for d in EvalDimension}
+    mins: dict[EvalDimension, float] = {d: SCORE_MAX for d in EvalDimension}
     maxs: dict[EvalDimension, float] = {d: 0.0 for d in EvalDimension}
     counts: dict[EvalDimension, int] = {d: 0 for d in EvalDimension}
 
@@ -218,7 +217,7 @@ def to_markdown(report: EvalReport) -> str:
     lines.append("|--------|-------|")
     lines.append(f"| Scenarios evaluated | {report.scenarios_run} |")
     lines.append(f"| Judge conflicts (excluded) | {report.judge_conflicts} |")
-    lines.append(f"| Average total score | {report.avg_total_score:.2f} / 5.00 |")
+    lines.append(f"| Average total score | {report.avg_total_score:.2f} / {SCORE_MAX:.2f} |")
     lines.append(f"| Pass rate (≥{report.pass_threshold}) | {report.pass_rate * 100:.0f}% |")
     pf = "PASS" if report.avg_total_score >= report.pass_threshold else "FAIL"
     lines.append(f"| Overall | **{pf}** |\n")
@@ -246,7 +245,7 @@ def to_markdown(report: EvalReport) -> str:
         else:
             passed = "PASS" if score.total_score >= report.pass_threshold else "FAIL"
         row = [score.scenario_id, f"{score.total_score:.2f}", passed]
-        row += [f"{by_dim.get(d, 0.0):.1f}" for d in dim_labels]
+        row += [f"{by_dim.get(d, 0.0):.2f}" for d in dim_labels]
         lines.append("| " + " | ".join(row) + " |")
 
     return "\n".join(lines) + "\n"

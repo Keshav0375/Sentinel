@@ -33,7 +33,7 @@ from sentinel.models.tools import EscalationContext
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _make_trajectory_score(total: float = 4.0, *, judge_conflict: bool = False) -> TrajectoryScore:
+def _make_trajectory_score(total: float = 0.8, *, judge_conflict: bool = False) -> TrajectoryScore:
     return TrajectoryScore(
         incident_id="inc-001",
         scenario_id="bad_deploy_01",
@@ -48,7 +48,7 @@ def _make_trajectory_score(total: float = 4.0, *, judge_conflict: bool = False) 
 
 def _make_eval_result(
     scenario_id: str = "bad_deploy_01",
-    total: float = 4.0,
+    total: float = 0.8,
     pipeline_error: str | None = None,
     trajectory_missing: bool = False,
     judge_conflict: bool = False,
@@ -107,7 +107,7 @@ def _judge() -> tuple[str, MagicMock]:
 
 class TestScoresFromResults:
     def test_extracts_scores(self) -> None:
-        results = [_make_eval_result("s1", 3.0), _make_eval_result("s2", 4.0)]
+        results = [_make_eval_result("s1", 0.6), _make_eval_result("s2", 0.8)]
         scores = scores_from_results(results)
         assert len(scores) == 2
         assert all(isinstance(s, TrajectoryScore) for s in scores)
@@ -116,10 +116,10 @@ class TestScoresFromResults:
         assert scores_from_results([]) == []
 
     def test_order_preserved(self) -> None:
-        results = [_make_eval_result("a", 1.0), _make_eval_result("b", 5.0)]
+        results = [_make_eval_result("a", 0.2), _make_eval_result("b", 1.0)]
         scores = scores_from_results(results)
-        assert scores[0].total_score == pytest.approx(1.0)
-        assert scores[1].total_score == pytest.approx(5.0)
+        assert scores[0].total_score == pytest.approx(0.2)
+        assert scores[1].total_score == pytest.approx(1.0)
 
 
 # ── summary_stats ─────────────────────────────────────────────────────────────
@@ -132,16 +132,16 @@ class TestSummaryStats:
         assert stats["pass_rate"] == pytest.approx(0.0)
 
     def test_avg_total_is_mean(self) -> None:
-        results = [_make_eval_result("a", 2.0), _make_eval_result("b", 4.0)]
+        results = [_make_eval_result("a", 0.4), _make_eval_result("b", 0.8)]
         stats = summary_stats(results)
-        assert stats["avg_total"] == pytest.approx(3.0)
+        assert stats["avg_total"] == pytest.approx(0.6)
 
     def test_pass_rate_with_threshold_3(self) -> None:
-        # 2.0 fails, 3.0 passes, 4.0 passes → 2/3 pass
+        # 0.4 fails, 0.6 passes, 0.8 passes → 2/3 pass
         results = [
-            _make_eval_result("a", 2.0),
-            _make_eval_result("b", 3.0),
-            _make_eval_result("c", 4.0),
+            _make_eval_result("a", 0.4),
+            _make_eval_result("b", 0.6),
+            _make_eval_result("c", 0.8),
         ]
         stats = summary_stats(results)
         assert stats["pass_rate"] == pytest.approx(2 / 3, abs=0.01)
@@ -149,7 +149,7 @@ class TestSummaryStats:
     def test_failure_rate_counts_pipeline_errors(self) -> None:
         results = [
             _make_eval_result("a", 0.0, pipeline_error="timeout"),
-            _make_eval_result("b", 4.0),
+            _make_eval_result("b", 0.8),
         ]
         stats = summary_stats(results)
         assert stats["failure_rate"] == pytest.approx(0.5)
@@ -161,27 +161,27 @@ class TestSummaryStats:
         assert len(stats["generated_at"]) > 10
 
     def test_all_pass(self) -> None:
-        results = [_make_eval_result("a", 4.0), _make_eval_result("b", 5.0)]
+        results = [_make_eval_result("a", 0.8), _make_eval_result("b", 1.0)]
         assert summary_stats(results)["pass_rate"] == pytest.approx(1.0)
 
     def test_all_fail(self) -> None:
-        results = [_make_eval_result("a", 0.0), _make_eval_result("b", 1.0)]
+        results = [_make_eval_result("a", 0.0), _make_eval_result("b", 0.2)]
         assert summary_stats(results)["pass_rate"] == pytest.approx(0.0)
 
     def test_judge_conflicts_are_counted_and_excluded(self) -> None:
         """Decision 2026-10-18: a judge_conflict score is invalid — not in any figure."""
         results = [
-            _make_eval_result("a", 4.0),
+            _make_eval_result("a", 0.8),
             _make_eval_result("b", 0.0, pipeline_error="x", judge_conflict=True),
         ]
         stats = summary_stats(results)
-        assert stats["avg_total"] == pytest.approx(4.0)
+        assert stats["avg_total"] == pytest.approx(0.8)
         assert stats["pass_rate"] == pytest.approx(1.0)
         assert stats["failure_rate"] == pytest.approx(0.0)
         assert stats["judge_conflicts"] == 1
 
     def test_only_conflicts_gives_zeros(self) -> None:
-        stats = summary_stats([_make_eval_result("a", 5.0, judge_conflict=True)])
+        stats = summary_stats([_make_eval_result("a", 1.0, judge_conflict=True)])
         assert stats["avg_total"] == pytest.approx(0.0)
         assert stats["judge_conflicts"] == 1
 
@@ -242,7 +242,7 @@ async def _run(
     async def judge(traj: dict[str, Any], *args: Any, **kwargs: Any) -> TrajectoryScore:
         if capture is not None:
             capture.update(traj)
-        return score or _make_trajectory_score(3.5)
+        return score or _make_trajectory_score(0.7)
 
     with (
         patch("sentinel.eval.runner.generate_alert", return_value=_alert()),
@@ -277,7 +277,8 @@ class TestRunScenarioEval:
             return_value=json.dumps(
                 {
                     "dimension_scores": [
-                        {"dimension": str(d), "score": 4, "reasoning": "ok"} for d in EvalDimension
+                        {"dimension": str(d), "score": 0.8, "reasoning": "ok"}
+                        for d in EvalDimension
                     ]
                 }
             )
@@ -306,7 +307,7 @@ class TestRunScenarioEval:
             assert run.score.total_score == 0.0
         else:
             client.complete.assert_awaited_once()
-            assert run.score.total_score == pytest.approx(4.0)
+            assert run.score.total_score == pytest.approx(0.8)
 
     async def test_returns_eval_run_result(self, tmp_path: Path) -> None:
         result = await _run(tmp_path)
@@ -354,7 +355,7 @@ class TestRunScenarioEval:
 
         async def judge(traj: dict[str, Any], *args: Any, **kwargs: Any) -> TrajectoryScore:
             captured.update(traj)
-            return _make_trajectory_score(1.0)
+            return _make_trajectory_score(0.2)
 
         try:
             install_trace_processors(tracer)
@@ -418,7 +419,7 @@ class TestRunEval:
             patch(
                 "sentinel.eval.runner.run_scenario_eval",
                 new_callable=AsyncMock,
-                return_value=_make_eval_result("bad_deploy_01", 3.5),
+                return_value=_make_eval_result("bad_deploy_01", 0.7),
             ),
             patch.dict(sys.modules, {"data": MagicMock(), "data.seed": _FAKE_SEED_MOD}),
         ):

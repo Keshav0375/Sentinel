@@ -25,9 +25,11 @@ class TestDimensionRubricStructure:
         for dim, rubric in DIMENSION_RUBRICS.items():
             assert len(rubric.levels) == 6, f"{dim} has {len(rubric.levels)} levels"
 
-    def test_rubric_levels_span_0_to_5(self) -> None:
+    def test_rubric_levels_span_0_to_1(self) -> None:
         for dim, rubric in DIMENSION_RUBRICS.items():
-            assert set(rubric.levels.keys()) == {0, 1, 2, 3, 4, 5}, f"{dim} missing some level keys"
+            assert set(rubric.levels.keys()) == {0.0, 0.2, 0.4, 0.6, 0.8, 1.0}, (
+                f"{dim} missing some level keys"
+            )
 
     def test_each_rubric_has_nonempty_description(self) -> None:
         for dim, rubric in DIMENSION_RUBRICS.items():
@@ -56,29 +58,36 @@ class TestDimensionRubricStructure:
 
 
 class TestRubricContent:
-    def test_triage_accuracy_5_mentions_service_and_severity(self) -> None:
+    def test_triage_accuracy_top_mentions_service_and_severity(self) -> None:
         rubric = DIMENSION_RUBRICS[EvalDimension.TRIAGE_ACCURACY]
-        text = rubric.levels[5].lower()
+        text = rubric.levels[1.0].lower()
         assert "service" in text
         assert "severity" in text
 
-    def test_remediation_safety_5_mentions_hitl(self) -> None:
+    def test_remediation_safety_top_mentions_hitl(self) -> None:
         rubric = DIMENSION_RUBRICS[EvalDimension.REMEDIATION_SAFETY]
-        assert "HITL" in rubric.levels[5]
+        assert "HITL" in rubric.levels[1.0]
 
-    def test_remediation_safety_0_mentions_dangerous(self) -> None:
+    def test_remediation_safety_bottom_mentions_dangerous(self) -> None:
         rubric = DIMENSION_RUBRICS[EvalDimension.REMEDIATION_SAFETY]
-        text = rubric.levels[0].lower()
+        text = rubric.levels[0.0].lower()
         assert "dangerous" in text or "approval" in text
 
-    def test_mttr_0_means_never_reached(self) -> None:
+    def test_mttr_bottom_means_never_reached(self) -> None:
         rubric = DIMENSION_RUBRICS[EvalDimension.MTTR]
-        text = rubric.levels[0].lower()
+        text = rubric.levels[0.0].lower()
         assert "never" in text or "reach" in text
 
-    def test_tool_efficiency_0_means_no_tools(self) -> None:
+    def test_escalation_is_not_zeroed_by_rubric(self) -> None:
+        mttr = DIMENSION_RUBRICS[EvalDimension.MTTR]
+        safety = DIMENSION_RUBRICS[EvalDimension.REMEDIATION_SAFETY]
+        assert "escalation" in mttr.description
+        assert "escalation" in safety.levels[1.0]
+        assert "no escalation" in mttr.levels[0.0]
+
+    def test_tool_efficiency_bottom_means_no_tools(self) -> None:
         rubric = DIMENSION_RUBRICS[EvalDimension.TOOL_EFFICIENCY]
-        text = rubric.levels[0].lower()
+        text = rubric.levels[0.0].lower()
         assert "no tools" in text or "called" in text
 
 
@@ -95,8 +104,14 @@ class TestJudgeSystemPrompt:
                 f"Dimension '{dim}' missing from judge system prompt"
             )
 
-    def test_prompt_mentions_0_to_5_scale(self) -> None:
-        assert "0-5" in JUDGE_SYSTEM_PROMPT or "0 to 5" in JUDGE_SYSTEM_PROMPT.lower()
+    def test_prompt_mentions_0_to_1_scale(self) -> None:
+        assert "0-1" in JUDGE_SYSTEM_PROMPT
+        assert "0-5" not in JUDGE_SYSTEM_PROMPT
+
+    def test_prompt_judges_both_outcomes_on_reasoning(self) -> None:
+        assert "rollback_proposed" in JUDGE_SYSTEM_PROMPT
+        assert "escalated" in JUDGE_SYSTEM_PROMPT
+        assert "not the outcome" in JUDGE_SYSTEM_PROMPT
 
     def test_prompt_includes_json_output_format(self) -> None:
         assert "dimension_scores" in JUDGE_SYSTEM_PROMPT

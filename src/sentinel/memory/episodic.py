@@ -11,7 +11,7 @@ timeline have no columns of their own and live in ``trajectory`` JSONB as
 :class:`~sentinel.models.memory.IncidentOutcome` for correlation_id, root_cause_confidence,
 resolution_type, reflexion_loops and langfuse_trace_id (and its result, in ``trajectory`` as
 ``pipeline_result``); dd_event_id comes from the alert (the webhook is its source, §2.1);
-pr_* and eval_score are written by later phases.
+pr_* are written by GHA; eval_score by :meth:`store_eval_score` (the eval judge).
 ``resolved_at`` is written when the incident has one, since ``mttr_seconds`` is derived
 from it.
 
@@ -52,6 +52,7 @@ from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra import database
 from sentinel.memory.base import MemoryStore
 from sentinel.memory.embeddings import EmbeddingClient
+from sentinel.models.eval_result import TrajectoryScore
 from sentinel.models.incident import Incident
 from sentinel.models.memory import (
     DeploymentRow,
@@ -447,6 +448,27 @@ class EpisodicMemory:
                 "UPDATE deployments SET incident_id = $1 WHERE id = $2",
                 incident_uuid,
                 deploy_uuid,
+            )
+        return status.split()[-1] != "0"
+
+    async def store_eval_score(self, incident_id: str, score: TrajectoryScore) -> bool:
+        """Write the judge's result to ``incidents.eval_score``; False when no such incident row.
+
+        The JSONB is ``score.to_eval_score()`` (decision 2026-10-22). Overwrites any previous
+        score; ``store_incident`` never touches the column.
+
+        Raises:
+            SentinelMemoryError: no database, the id is not a UUID, or the write failed.
+        """
+        pool = self._require_pool()
+        incident_uuid = _as_uuid(incident_id)
+        if incident_uuid is None:
+            raise SentinelMemoryError(f"{incident_id!r} is not a UUID")
+        async with database.acquire(pool) as conn:
+            status = await conn.execute(
+                "UPDATE incidents SET eval_score = $2::jsonb WHERE id = $1",
+                incident_uuid,
+                json.dumps(score.to_eval_score()),
             )
         return status.split()[-1] != "0"
 

@@ -27,6 +27,7 @@ import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from sentinel.agents.orchestrator import PIPELINE_ERROR, PipelineDeps, run_pipeline
 from sentinel.config import Settings, get_settings
 from sentinel.eval.judge import evaluate_trajectory, make_judge_client
+from sentinel.eval.report import PASS_THRESHOLD
 from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario
 from sentinel.generator.scenarios import Scenario
 from sentinel.infra.database import close_pool, init_pool_from_settings
@@ -325,7 +326,7 @@ def summary_stats(results: list[EvalRunResult]) -> dict[str, Any]:
     """Compute aggregate statistics from a list of EvalRunResults.
 
     Returns a dict with keys: ``avg_total``, ``pass_rate``, ``failure_rate``,
-    ``judge_conflicts``, ``generated_at``. Pass threshold is 3.0 (60% of the 0-5 scale).
+    ``judge_conflicts``, ``generated_at``. Pass threshold is PASS_THRESHOLD (0.6 of the 0-1 scale).
     A ``judge_conflict`` score is invalid (decision 2026-10-18): it is counted in
     ``judge_conflicts`` and left out of every other figure.
     """
@@ -341,7 +342,7 @@ def summary_stats(results: list[EvalRunResult]) -> dict[str, Any]:
         }
 
     total_sum = sum(r.score.total_score for r in valid)
-    pass_count = sum(1 for r in valid if r.score.total_score >= 3.0)
+    pass_count = sum(1 for r in valid if r.score.total_score >= PASS_THRESHOLD)
     error_count = sum(1 for r in valid if r.pipeline_error is not None)
 
     n = len(valid)

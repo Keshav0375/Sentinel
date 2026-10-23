@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Final
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, JsonValue, field_validator
+
+# The eval score scale (decision 2026-10-22): every dimension and total is in [0, 1].
+SCORE_MIN: Final = 0.0
+SCORE_MAX: Final = 1.0
 
 
 class EvalDimension(StrEnum):
     """The five dimensions scored by the LLM-as-judge.
 
-    Each dimension is scored 0-5 with reasoning. Together they capture both
+    Each dimension is scored 0-1 with reasoning. Together they capture both
     the correctness of the agent's conclusions and the quality of the process
     it followed to reach them.
     """
@@ -25,7 +30,7 @@ class EvalDimension(StrEnum):
 class DimensionScore(BaseModel):
     """A single dimension's score from the judge.
 
-    score is on a 0-5 integer/float scale (0 = completely wrong, 5 = perfect).
+    score is on a 0-1 scale (0 = completely wrong, 1 = perfect).
     reasoning is the judge's explanation for the score — crucial for debugging
     agent behavior and improving system prompts.
     """
@@ -37,8 +42,8 @@ class DimensionScore(BaseModel):
     @field_validator("score")
     @classmethod
     def score_in_range(cls, v: float) -> float:
-        if v < 0.0 or v > 5.0:
-            raise ValueError("score must be between 0 and 5")
+        if v < SCORE_MIN or v > SCORE_MAX:
+            raise ValueError("score must be between 0 and 1")
         return v
 
 
@@ -49,7 +54,7 @@ class TrajectoryScore(BaseModel):
     (every tool call, handoff, and agent output) against the scenario's
     known ground truth.
 
-    total_score is the mean of all dimension scores (0-5 scale).
+    total_score is the mean of all dimension scores (0-1 scale).
 
     judge_conflict marks a run the judge would have graded itself on — its model is in the
     run's ``models_used`` (decision 2026-10-18). Such a score is invalid: it is zeroed,
@@ -66,6 +71,51 @@ class TrajectoryScore(BaseModel):
     @field_validator("total_score")
     @classmethod
     def total_score_in_range(cls, v: float) -> float:
-        if v < 0.0 or v > 5.0:
-            raise ValueError("total_score must be between 0 and 5")
+        if v < SCORE_MIN or v > SCORE_MAX:
+            raise ValueError("total_score must be between 0 and 1")
         return v
+
+    def score_for(self, dimension: EvalDimension) -> float:
+        """The score of *dimension*; 0.0 when it is absent (the judge's missing-dimension rule)."""
+        for ds in self.dimension_scores:
+            if ds.dimension == dimension:
+                return ds.score
+        return 0.0
+
+    @property
+    def triage_accuracy(self) -> float:
+        """§6.4 attribute style; not serialised."""
+        return self.score_for(EvalDimension.TRIAGE_ACCURACY)
+
+    @property
+    def root_cause_correctness(self) -> float:
+        """§6.4 attribute style; not serialised."""
+        return self.score_for(EvalDimension.ROOT_CAUSE_CORRECTNESS)
+
+    @property
+    def tool_efficiency(self) -> float:
+        """§6.4 attribute style; not serialised."""
+        return self.score_for(EvalDimension.TOOL_EFFICIENCY)
+
+    @property
+    def mttr(self) -> float:
+        """§6.4 attribute style; not serialised."""
+        return self.score_for(EvalDimension.MTTR)
+
+    @property
+    def remediation_safety(self) -> float:
+        """§6.4 attribute style; not serialised."""
+        return self.score_for(EvalDimension.REMEDIATION_SAFETY)
+
+    def to_eval_score(self) -> dict[str, JsonValue]:
+        """The ``incidents.eval_score`` JSONB (decision 2026-10-22)."""
+        scores: dict[str, JsonValue] = {str(ds.dimension): ds.score for ds in self.dimension_scores}
+        reasoning: dict[str, JsonValue] = {
+            str(ds.dimension): ds.reasoning for ds in self.dimension_scores
+        }
+        return {
+            "judge_model": self.judge_model,
+            "judge_conflict": self.judge_conflict,
+            "scores": scores,
+            "reasoning": reasoning,
+        }
