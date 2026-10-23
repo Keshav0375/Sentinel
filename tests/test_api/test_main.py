@@ -20,7 +20,7 @@ from sentinel.main import create_app, make_pipeline_fn
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource, IncidentAlert
 from sentinel.models.incident import IncidentStatus
 from sentinel.models.pipeline import PipelineInput, PipelineResult
 from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
@@ -43,9 +43,13 @@ def _make_alert(service: str = "api-gateway") -> AlertPayload:
     )
 
 
+def _make_incident_alert(service: str = "api-gateway") -> IncidentAlert:
+    return IncidentAlert(title="error_rate", severity="critical", service=service)
+
+
 def _populated_stm(incident_id: str = "inc-test0001") -> ShortTermMemory:
     stm = ShortTermMemory()
-    stm.create(incident_id, _make_alert())
+    stm.create(incident_id, _make_incident_alert())
     return stm
 
 
@@ -110,8 +114,8 @@ async def test_lifespan_startup_failure_closes_pool(
     opened: list[asyncpg.Pool | None] = []
     real_init = main.init_pool_from_settings
 
-    async def _spy_init(settings: Settings) -> asyncpg.Pool | None:
-        pool = await real_init(settings)
+    async def _spy_init(settings: Settings, **kwargs: Any) -> asyncpg.Pool | None:
+        pool = await real_init(settings, **kwargs)
         opened.append(pool)
         return pool
 
@@ -203,9 +207,10 @@ async def test_pipeline_fn_marks_rollback_proposed_and_stores_the_result() -> No
 
 
 @pytest.mark.asyncio
-async def test_get_incident_returns_the_9_3_outputs_of_the_stored_result() -> None:
-    """target_deploy, target_sha and evidence_summary are stored with the result and
-    returned by GET /incidents/{id} (the §9.3 job reads them)."""
+async def test_get_incident_returns_the_9_3_outputs_of_an_unstored_result() -> None:
+    """target_deploy, target_sha and evidence_summary of an incident not yet stored are
+    returned by GET /incidents/{id} under trajectory.pipeline_result, where the §9.3 job
+    reads them (stored rows keep them there too)."""
     from fastapi.testclient import TestClient  # noqa: PLC0415
 
     from sentinel.api.incidents import make_incidents_router  # noqa: PLC0415
@@ -213,14 +218,19 @@ async def test_get_incident_returns_the_9_3_outputs_of_the_stored_result() -> No
     stm = _populated_stm(_INCIDENT)
     with patch(_RUN_PATCH, new_callable=AsyncMock, return_value=_result()):
         await _make_fn(stm)(_request())
+    episodic = MagicMock(spec=EpisodicMemory)
+    episodic.get_incident_row = AsyncMock(return_value=None)
     app = FastAPI()
-    app.include_router(make_incidents_router(stm))
+    app.include_router(make_incidents_router(stm, episodic))
     with TestClient(app) as client:
         body = client.get(f"/incidents/{_INCIDENT}").json()
 
-    assert body["result"]["target_deploy"] == "a1b2c3d"
-    assert body["result"]["target_sha"] == "a1b2c3d"
-    assert body["result"]["evidence_summary"] == "checks fail since pr-42"
+    assert body["status"] == "in_progress"
+    pipeline_result = body["trajectory"]["pipeline_result"]
+    assert pipeline_result["target_deploy"] == "a1b2c3d"
+    assert pipeline_result["target_sha"] == "a1b2c3d"
+    assert pipeline_result["evidence_summary"] == "checks fail since pr-42"
+    assert pipeline_result["resolution_type"] == "rollback"
 
 
 @pytest.mark.asyncio

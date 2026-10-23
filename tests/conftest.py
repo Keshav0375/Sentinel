@@ -6,7 +6,8 @@ The suite is independent of the caller's shell and of the developer's ``.env``:
 ``SENTINEL_PRIMARY_PROVIDER`` are removed so no test can reach a real model, the LangFuse
 keys are removed so the client is disabled and nothing is ever sent, and the Datadog
 settings are removed so ``Settings`` falls back to its defaults (a test that needs keys
-passes fakes). The only database the suite touches is
+passes fakes). The Azure runtime variables (Key Vault, PG*, route-auth tenant) are removed
+too, so no test reaches Azure or a developer's tenant. The only database the suite touches is
 ``TEST_DATABASE_URL``. These variables are removed again before every test, so a test file
 run on its own (which may import litellm, and so load ``.env``, only mid-session) is as
 isolated as the full suite.
@@ -60,12 +61,23 @@ _LLM_VARS = (
     "SENTINEL_PRIMARY_PROVIDER",
     "SENTINEL_FAKE_LLM",
 )
+# Removed too: no test reaches Azure or a developer's tenant, and the app's route auth is
+# unconfigured (401) unless a test configures it.
+_RUNTIME_VARS = (
+    "KEY_VAULT_URL",
+    "PGHOST",
+    "PGDATABASE",
+    "PGUSER",
+    "SENTINEL_DEV_OPEN_DASHBOARD",
+    "SENTINEL_API_TENANT_ID",
+    "SENTINEL_API_AUDIENCE",
+)
 
 
 def pytest_configure(config: pytest.Config) -> None:
     """Before collection: no LLM keys (a test that needs one passes a fake to Settings)
     and no LangFuse keys — a keyless langfuse client is a disabled no-op (no network)."""
-    for var in (*_LANGFUSE_KEYS, *_DATADOG_VARS, *_LLM_VARS):
+    for var in (*_LANGFUSE_KEYS, *_DATADOG_VARS, *_LLM_VARS, *_RUNTIME_VARS):
         os.environ.pop(var, None)
     # Drop the SDK's default OpenAI trace exporter for the whole run, as the app does at
     # startup (infra/tracing.install_trace_processors); a test that needs processors sets
@@ -106,13 +118,13 @@ def _no_openai_requests() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _scrubbed_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Before every test: no DATABASE_URL, LLM, LangFuse or Datadog variable.
+    """Before every test: no DATABASE_URL, LLM, LangFuse, Datadog or Azure-runtime variable.
 
     litellm loads a developer ``.env`` into ``os.environ`` on first import, which for a
     test file run alone can be inside a test (e.g. a lazy ``import sentinel.main``),
     after the session fixture ran. A test that needs one of these sets it itself.
     """
-    for var in ("DATABASE_URL", *_LANGFUSE_KEYS, *_DATADOG_VARS, *_LLM_VARS):
+    for var in ("DATABASE_URL", *_LANGFUSE_KEYS, *_DATADOG_VARS, *_LLM_VARS, *_RUNTIME_VARS):
         monkeypatch.delenv(var, raising=False)
 
 

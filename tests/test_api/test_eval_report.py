@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -161,6 +162,10 @@ class TestEvalReportEndpoint:
 
 
 class TestEvalPage:
+    @pytest.fixture(autouse=True)
+    def _open_dashboard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")
+
     def test_get_eval_returns_html(self) -> None:
         from sentinel.main import create_app
 

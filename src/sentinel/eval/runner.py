@@ -101,7 +101,8 @@ async def run_scenario_eval(
     judge_model, judge_client = make_judge_client(settings)
 
     # ── Set up incident in STM ─────────────────────────────────────────────────
-    short_term_memory.create(incident_id, alert)
+    request = PipelineInput.from_alert(incident_id, alert)
+    short_term_memory.create(incident_id, request.alert)
 
     # ── Run pipeline ───────────────────────────────────────────────────────────
     # run_pipeline never raises: a failure inside it is an escalated result.
@@ -113,7 +114,7 @@ async def run_scenario_eval(
         # A synthetic run is not a past incident: search_past_incidents must not recall it.
         persist=False,
     )
-    result = await run_pipeline(PipelineInput.from_alert(incident_id, alert), deps)
+    result = await run_pipeline(request, deps)
     pipeline_error: str | None = None
     reason = result.escalation.missing[0] if result.escalation and result.escalation.missing else ""
     if reason.startswith(PIPELINE_ERROR):

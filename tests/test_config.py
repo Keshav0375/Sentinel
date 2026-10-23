@@ -17,6 +17,7 @@ import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -130,6 +131,40 @@ def test_new_fields_read_their_env_vars(
     assert s.langfuse_base_url == "https://us.cloud.langfuse.com"
 
 
+def test_safety_limit_defaults(no_settings_env: None) -> None:
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_webhook_max_body_bytes == 262144
+    assert s.sentinel_max_concurrent_pipelines == 5
+    assert s.sentinel_pipeline_timeout_s == 900.0
+    assert s.sentinel_shutdown_grace_s == 20.0
+
+
+def test_safety_limits_read_env(no_settings_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTINEL_WEBHOOK_MAX_BODY_BYTES", "1024")
+    monkeypatch.setenv("SENTINEL_MAX_CONCURRENT_PIPELINES", "2")
+    monkeypatch.setenv("SENTINEL_PIPELINE_TIMEOUT_S", "60")
+    monkeypatch.setenv("SENTINEL_SHUTDOWN_GRACE_S", "0")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_webhook_max_body_bytes == 1024
+    assert s.sentinel_max_concurrent_pipelines == 2
+    assert s.sentinel_pipeline_timeout_s == 60.0
+    assert s.sentinel_shutdown_grace_s == 0.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("sentinel_webhook_max_body_bytes", 0),
+        ("sentinel_max_concurrent_pipelines", 0),
+        ("sentinel_pipeline_timeout_s", 0),
+        ("sentinel_shutdown_grace_s", -1),
+    ],
+)
+def test_safety_limits_reject_bad_values(field: str, value: float) -> None:
+    with pytest.raises(ValidationError, match=field):
+        Settings(_env_file=None, **{field: value})  # type: ignore[arg-type]
+
+
 def test_no_api_token_setting() -> None:
     """Inbound auth is Entra (§3.6): there is no shared-token setting."""
     assert "sentinel_api_token" not in Settings.model_fields
@@ -147,6 +182,10 @@ def test_sample_env_loads(no_settings_env: None) -> None:
     assert s.sentinel_log_level == "INFO"
     assert s.sentinel_embedding_model == "all-MiniLM-L6-v2"
     assert (s.sentinel_db_pool_min, s.sentinel_db_pool_max) == (2, 10)
+    assert s.sentinel_webhook_max_body_bytes == 262144
+    assert s.sentinel_max_concurrent_pipelines == 5
+    assert s.sentinel_pipeline_timeout_s == 900.0
+    assert s.sentinel_shutdown_grace_s == 20.0
     assert s.database_url == ""
     assert s.langfuse_base_url == "https://cloud.langfuse.com"
     assert secret_value(s.anthropic_api_key, "ANTHROPIC_API_KEY") == "sk-ant-..."
@@ -155,6 +194,9 @@ def test_sample_env_loads(no_settings_env: None) -> None:
     assert s.sentinel_primary_provider == "anthropic"
     for field in ("dd_api_key", "dd_app_key", "github_api_token"):
         assert getattr(s, field) is None, field
+    assert s.sentinel_api_tenant_id is None and s.sentinel_api_audience is None
+    assert s.key_vault_url is None and (s.pghost, s.pgdatabase, s.pguser) == (None, None, None)
+    assert s.sentinel_dev_open_dashboard is False
 
 
 def test_sample_env_has_no_api_token() -> None:
@@ -192,6 +234,57 @@ def test_blank_secret_counts_as_unset(
     for field in _SECRET_FIELDS:
         assert getattr(s, field) is None, field
     assert s.langfuse_base_url is None
+
+
+def test_api_auth_settings_default_none(no_settings_env: None) -> None:
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_api_tenant_id is None
+    assert s.sentinel_api_audience is None
+
+
+def test_api_auth_settings_read_env(no_settings_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTINEL_API_TENANT_ID", "11111111-2222-3333-4444-555555555555")
+    monkeypatch.setenv("SENTINEL_API_AUDIENCE", "api://x/sentinel-backend-d1-dev")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_api_tenant_id == "11111111-2222-3333-4444-555555555555"
+    assert s.sentinel_api_audience == "api://x/sentinel-backend-d1-dev"
+    # Public identifiers, not secrets: plain str.
+    assert type(s.sentinel_api_tenant_id) is str
+    assert type(s.sentinel_api_audience) is str
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_api_auth_blank_counts_as_unset(
+    blank: str, no_settings_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SENTINEL_API_TENANT_ID", blank)
+    monkeypatch.setenv("SENTINEL_API_AUDIENCE", blank)
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_api_tenant_id is None
+    assert s.sentinel_api_audience is None
+
+
+def test_runtime_access_fields_read_env(
+    no_settings_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KEY_VAULT_URL, PG* and the dev flag map onto Settings; blank strings count as unset."""
+    monkeypatch.setenv("KEY_VAULT_URL", "https://sentinel-kv-0375.vault.azure.net")
+    monkeypatch.setenv("PGHOST", "sentinel-pg-0375.postgres.database.azure.com")
+    monkeypatch.setenv("PGDATABASE", "sentinel")
+    monkeypatch.setenv("PGUSER", "sentinel-backend-wi")
+    monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.key_vault_url == "https://sentinel-kv-0375.vault.azure.net"
+    assert s.pghost == "sentinel-pg-0375.postgres.database.azure.com"
+    assert s.pgdatabase == "sentinel"
+    assert s.pguser == "sentinel-backend-wi"
+    assert s.sentinel_dev_open_dashboard is True
+
+    for var in ("KEY_VAULT_URL", "PGHOST", "PGDATABASE", "PGUSER"):
+        monkeypatch.setenv(var, "  ")
+    blank = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert blank.key_vault_url is None
+    assert (blank.pghost, blank.pgdatabase, blank.pguser) == (None, None, None)
 
 
 def test_secrets_are_secretstr_and_masked() -> None:
@@ -299,16 +392,23 @@ def test_app_lifespan_boots_without_any_secret(
     monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
     monkeypatch.setattr(main, "EmbeddingClient", MagicMock())
     monkeypatch.setattr(main, "install_trace_processors", MagicMock())
+    monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")  # /api/config reachable without a token
 
     with TestClient(main.create_app()) as client:
         response = client.get("/health")
         config = client.get("/api/config")
+        webhook = client.post(
+            "/webhooks/incident",
+            json={"signal_type": "runtime_error", "correlation_id": str(uuid4()), "title": "t"},
+        )
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     # No LLM key either: the §4.7 model view still serves (keys are read only at use).
     assert config.status_code == 200
     assert config.json()["roles"]["triage"]["primary"] == "anthropic/claude-haiku-4-5"
+    # The dev flag opens the dashboard only: the webhook still needs a token.
+    assert webhook.status_code == 401
 
 
 def _free_port() -> int:
@@ -373,3 +473,10 @@ def test_sentinel_serve_boots_without_llm_keys_database_or_langfuse(
     log = log_path.read_text(errors="replace")
     assert status == 200, f"serve did not come up (exit={proc.poll()}):\n{log[-4000:]}"
     assert "sentinel_ready" in log
+
+    # Every route but the probes needs a token; none is configured here.
+    with pytest.raises(urllib.error.HTTPError) as err:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/api/config", timeout=5)
+    assert err.value.code == 401
+    log = log_path.read_text(errors="replace")
+    assert "auth_not_configured" in log

@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.alert import IncidentAlert
 from sentinel.models.incident import IncidentStatus, TimelineEntry
 
 # ── Import the script module ──────────────────────────────────────────────────
@@ -38,14 +38,7 @@ run_scenario = _script.run_scenario  # type: ignore[attr-defined]
 
 def _make_stm_with_incident(incident_id: str = "inc-test0001") -> ShortTermMemory:
     stm = ShortTermMemory()
-    alert = AlertPayload(
-        source=AlertSource.DATADOG,
-        service="api-gateway",
-        metric="error_rate",
-        threshold=0.05,
-        current_value=0.34,
-        severity=AlertSeverity.CRITICAL,
-    )
+    alert = IncidentAlert(title="error_rate", severity="critical", service="api-gateway")
     stm.create(incident_id, alert)
     return stm
 

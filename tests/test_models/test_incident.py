@@ -8,19 +8,12 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.alert import IncidentAlert
 from sentinel.models.incident import Incident, IncidentStatus, Severity, TimelineEntry
 
 
-def _alert() -> AlertPayload:
-    return AlertPayload(
-        source=AlertSource.DATADOG,
-        service="api-gateway",
-        metric="error_rate",
-        threshold=0.05,
-        current_value=0.34,
-        severity=AlertSeverity.CRITICAL,
-    )
+def _alert() -> IncidentAlert:
+    return IncidentAlert(title="error_rate", severity="critical", service="api-gateway")
 
 
 # ── Severity ──────────────────────────────────────────────────────────────────
@@ -119,7 +112,7 @@ def test_incident_alert_attached() -> None:
     alert = _alert()
     inc = Incident(alert=alert)
     assert inc.alert.service == "api-gateway"
-    assert inc.alert.severity is AlertSeverity.CRITICAL
+    assert inc.alert.severity == "critical"
 
 
 def test_incident_add_timeline_entry() -> None:

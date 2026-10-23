@@ -28,8 +28,10 @@ LangFuse (langfuse v3, backend §6) — the surface the agent pipeline uses::
 - ``load_prompt`` runs the SDK's synchronous ``get_prompt`` in a worker thread, so a slow or
   unreachable LangFuse never blocks the event loop. Both of its paths end the prompt with
   ``agents.loader.UNTRUSTED_DATA_PREAMBLE`` (decision 2026-10-14), exactly once.
-- ``shutdown_traces()`` runs in the FastAPI lifespan on exit; CLI/eval entry points call
-  ``flush_traces()`` before returning. Neither raises.
+- ``shutdown_traces()`` runs in the FastAPI lifespan on exit, bounded by
+  ``TRACE_SHUTDOWN_TIMEOUT_S``: a hung flush is abandoned in a daemon thread, so it never holds
+  up the process exit. CLI/eval entry points call ``flush_traces()`` before returning. Neither
+  raises.
 - The client reads ``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY`` / ``LANGFUSE_BASE_URL``
   from the environment. Without both keys it is disabled: ``@observe`` and ``push_score``
   are no-ops, ``load_prompt`` serves the file, nothing touches the network. A blank key is
@@ -68,13 +70,14 @@ import copy
 import json
 import logging
 import os
+import threading
 from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast, overload
+from typing import Any, Final, Literal, cast, overload
 from uuid import UUID
 
 from agents import (
@@ -103,6 +106,7 @@ from sentinel.models.incident import TimelineEntry
 __all__ = [
     "INCIDENT_TOKEN_BUDGET",
     "PIPELINE_TRACE_NAME",
+    "TRACE_SHUTDOWN_TIMEOUT_S",
     "IncidentTokens",
     "LangfuseGenerationBridge",
     "SentinelTracer",
@@ -318,8 +322,40 @@ def flush_traces() -> None:
         logger.warning("langfuse_flush_failed", error=str(exc))
 
 
-def shutdown_traces() -> None:
-    """Flush and stop the LangFuse client — the FastAPI lifespan calls this on exit."""
+# The longest the app's exit waits for the LangFuse shutdown (backend 5 review). The SDK's
+# flush has no overall timeout: OTel's force_flush exports every queued batch and the score
+# queue is join()ed. Each export request is already capped by the SDK's LANGFUSE_TIMEOUT
+# (default 5 s, applied to its HTTP client and the OTLP span exporter). Budget: config.py,
+# sentinel_shutdown_grace_s.
+TRACE_SHUTDOWN_TIMEOUT_S: Final = 5.0
+
+
+def shutdown_traces(timeout_s: float | None = None) -> bool:
+    """Flush and stop the LangFuse client, waiting at most *timeout_s* — the lifespan's exit step.
+
+    *timeout_s* defaults to ``TRACE_SHUTDOWN_TIMEOUT_S`` (read at call time). The SDK call runs in
+    a daemon thread. Past the bound it is logged (``langfuse_shutdown_timeout``) and abandoned, so
+    a hung export (keys set, no network) cannot keep the pod from exiting. Never raises.
+
+    Returns:
+        True when the shutdown finished within the bound (an SDK error is logged); False when it
+        timed out or its thread could not start.
+    """
+    limit = TRACE_SHUTDOWN_TIMEOUT_S if timeout_s is None else timeout_s
+    worker = threading.Thread(target=_shutdown_client, name="langfuse-shutdown", daemon=True)
+    try:
+        worker.start()
+    except RuntimeError as exc:
+        logger.warning("langfuse_shutdown_failed", error=str(exc))
+        return False
+    worker.join(limit)
+    if worker.is_alive():
+        logger.warning("langfuse_shutdown_timeout", timeout_s=limit)
+        return False
+    return True
+
+
+def _shutdown_client() -> None:
     try:
         get_client().shutdown()
     except Exception as exc:

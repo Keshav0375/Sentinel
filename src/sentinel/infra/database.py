@@ -1,6 +1,6 @@
 """asyncpg connection pool for PostgreSQL + pgvector (Phase 2).
 
-Runs alongside the Phase-1 SQLite factory in ``infra/db.py`` until that is deleted
+The Phase-1 SQLite factory in ``infra/db.py`` is deleted in backend task 9.1
 (backend.md §13.5). One pool per process: :func:`init_pool` sets the module-level
 holder at app startup, :func:`close_pool` drains it at shutdown, and :func:`acquire`
 lends a connection from it. Every pooled connection has the pgvector codec
@@ -16,8 +16,8 @@ import asyncio
 import inspect
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any, Final, cast
+from urllib.parse import quote, urlsplit
 
 # asyncpg ships no type stubs and only partial inline annotations. Pyright runs against
 # the runtime package alone, locally and in CI (no asyncpg-stubs), so the few untyped
@@ -65,6 +65,10 @@ _QUERY_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 _POSTGRES_SCHEMES = frozenset({"postgres", "postgresql"})
+
+# Azure Database for PostgreSQL flexible server; "require" keeps the Entra token off plaintext.
+ENTRA_PG_PORT: Final = 5432
+ENTRA_PG_SSLMODE: Final = "require"
 
 # Upper bound on a graceful close; after this the pool is terminated so shutdown
 # never hangs on a connection a stuck request still holds.
@@ -242,28 +246,68 @@ async def close_pool() -> None:
     logger.info("db_pool_closed")
 
 
-async def init_pool_from_settings(settings: Settings) -> asyncpg.Pool | None:
-    """Lifespan entry point: create the pool only when ``DATABASE_URL`` is Postgres.
+def entra_dsn(host: str, database: str, user: str) -> str:
+    """DSN for the Entra-only Azure server — no password; it is an Entra token per connection."""
+    return (
+        f"postgresql://{quote(user, safe='')}@{host}:{ENTRA_PG_PORT}"
+        f"/{quote(database, safe='')}?sslmode={ENTRA_PG_SSLMODE}"
+    )
 
-    No ``DATABASE_URL`` (or a non-Postgres one) is not an error while the Phase-1
-    SQLite store is still live — the app boots without a pool and returns None.
+
+async def init_pool_from_settings(
+    settings: Settings,
+    *,
+    password_factory: Callable[[], PasswordProvider] | None = None,
+) -> asyncpg.Pool | None:
+    """Lifespan entry point: create the pool from ``DATABASE_URL`` or the ``PG*`` variables.
+
+    A non-blank ``DATABASE_URL`` wins (local and CI; a non-Postgres one is skipped with a
+    warning). Otherwise ``PGHOST``, ``PGDATABASE`` and ``PGUSER`` together select the
+    Entra-only Azure server, with *password_factory* called once for the password
+    provider asyncpg invokes on every new connection. Neither (or an incomplete set, or no
+    *password_factory*) is not an error: the app boots without a pool and returns None.
 
     Raises:
         SentinelMemoryError: a Postgres DSN is configured but the pool failed.
     """
     url = settings.database_url.strip()
-    if not url:
-        logger.info("db_pool_skipped", reason="DATABASE_URL not set")
-        return None
-    if not is_postgres_dsn(url):
-        logger.warning(
+    if url:
+        if not is_postgres_dsn(url):
+            logger.warning(
+                "db_pool_skipped",
+                reason="DATABASE_URL is not a postgres DSN",
+                scheme=urlsplit(url).scheme,
+            )
+            return None
+        return await init_pool(
+            url, min_size=settings.sentinel_db_pool_min, max_size=settings.sentinel_db_pool_max
+        )
+    pg = {"PGHOST": settings.pghost, "PGDATABASE": settings.pgdatabase, "PGUSER": settings.pguser}
+    if all(v is None for v in pg.values()):
+        logger.info(
             "db_pool_skipped",
-            reason="DATABASE_URL is not a postgres DSN",
-            scheme=urlsplit(url).scheme,
+            reason="neither DATABASE_URL nor PGHOST/PGDATABASE/PGUSER is set",
         )
         return None
+    host, database, user = settings.pghost, settings.pgdatabase, settings.pguser
+    if host is None or database is None or user is None:
+        logger.warning(
+            "db_pool_skipped",
+            reason="PGHOST, PGDATABASE and PGUSER must all be set",
+            missing=[k for k, v in pg.items() if v is None],
+        )
+        return None
+    if password_factory is None:
+        logger.warning(
+            "db_pool_skipped", reason="PGHOST/PGDATABASE/PGUSER need an Entra token provider"
+        )
+        return None
+    logger.info("db_pool_entra", db_host=host, db_name=database)
     return await init_pool(
-        url, min_size=settings.sentinel_db_pool_min, max_size=settings.sentinel_db_pool_max
+        entra_dsn(host, database, user),
+        min_size=settings.sentinel_db_pool_min,
+        max_size=settings.sentinel_db_pool_max,
+        password=password_factory(),
     )
 
 

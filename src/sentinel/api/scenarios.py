@@ -2,7 +2,7 @@
 
 Returns the list of all available scenarios with their alert payloads so the
 dashboard can populate its "Fire Scenario" dropdown and POST the correct
-``AlertPayload`` to the webhook receiver.
+``IncidentPayload`` (built from the scenario's alert) to ``/webhooks/incident``.
 """
 
 from __future__ import annotations
@@ -35,9 +35,10 @@ def make_scenarios_router() -> APIRouter:
     async def get_scenarios() -> list[ScenarioInfo]:  # pyright: ignore[reportUnusedFunction]
         """Return all available scenarios with pre-generated alert payloads.
 
-        The alert payload is safe to POST directly to ``/webhooks/alert``.
-        Each call generates fresh ``alert_id`` / ``timestamp`` values so the
-        deduplicator treats each fire as a new incident.
+        The dashboard builds an ``IncidentPayload`` from each alert for
+        ``/webhooks/incident`` (with a fresh ``correlation_id`` per fire, so the
+        deduplicator treats each fire as a new incident). Each call generates fresh
+        ``alert_id`` / ``timestamp`` values.
         """
         results: list[ScenarioInfo] = []
         for sid in list_scenarios():

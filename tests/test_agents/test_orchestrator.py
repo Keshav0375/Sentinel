@@ -42,10 +42,10 @@ from sentinel.infra import tracing
 from sentinel.infra.database import create_pool
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.alert import IncidentAlert, IncidentContext, PRDetails
 from sentinel.models.analysis import AnalysisResult
 from sentinel.models.deploy import CorrelatedDeploy
-from sentinel.models.incident import Severity, TriageResult
+from sentinel.models.incident import IncidentStatus, Severity, TriageResult
 from sentinel.models.pipeline import PipelineInput, PipelineResult, SignalType
 from sentinel.models.reflexion import FetchLogsCall, SuspectDeploy
 from sentinel.models.tools import DeployRecord, LogFetchInput, TargetDeploy
@@ -85,14 +85,14 @@ def _deps(pool: asyncpg.Pool | None = None, **settings: Any) -> PipelineDeps:
     )
 
 
-def _request(signal_type: SignalType = "runtime_error") -> PipelineInput:
-    alert = AlertPayload(
-        source=AlertSource.DATADOG,
+def _request(signal_type: SignalType = "runtime_error", pr_sha: str | None = None) -> PipelineInput:
+    alert = IncidentAlert(
+        title="synthetics.http.failed",
+        severity="critical",
         service=SERVICE,
-        metric="synthetics.http.failed",
-        threshold=1,
-        current_value=3,
-        severity=AlertSeverity.CRITICAL,
+        context=(
+            IncidentContext(pr_details=PRDetails(sha=pr_sha)) if pr_sha else IncidentContext()
+        ),
     )
     return PipelineInput(
         incident_id=str(uuid.uuid4()),
@@ -826,6 +826,38 @@ async def test_the_fast_path_rollback_is_pinned_to_the_failed_deploy(
     assert _runs(script, REVERIFICATION_AGENT) == 0
 
 
+async def test_fast_path_pin_match_proposes(failed_target_ok: list[TargetDeploy]) -> None:
+    request = _request("deploy_failure", pr_sha=SHA)
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, _deps())
+
+    assert result.status == "rollback_proposed"
+    assert _runs(script, REVERIFICATION_AGENT) == 1
+
+
+async def test_fast_path_pin_mismatch_escalates(failed_target_ok: list[TargetDeploy]) -> None:
+    request = _request("deploy_failure", pr_sha="fffffff0")
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, _deps())
+
+    assert result.status == "escalated"
+    assert result.escalation is not None
+    assert "is not the failed deploy's commit" in result.escalation.missing[0]
+    assert "fffffff0" in result.escalation.missing[0]
+    assert _runs(script, REVERIFICATION_AGENT) == 0
+
+
+async def test_pin_is_ignored_on_runtime_error(target_ok: list[TargetDeploy]) -> None:
+    request = _request("runtime_error", pr_sha="fffffff0")
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, _deps())
+
+    assert result.status == "rollback_proposed"
+
+
 # ── Rollback target pinned to the gate-approved, verified deploy ──────────────
 
 
@@ -1306,3 +1338,50 @@ async def test_the_stored_outcome_mirrors_the_result(target_ok: list[TargetDeplo
     assert outcome.root_cause_confidence == result.confidence
     assert outcome.reflexion_loops == result.reflexion_loops
     assert outcome.pipeline_result == result.model_dump(mode="json")
+
+
+async def test_wall_clock_timeout_escalates_and_is_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def hang(self: Any) -> Any:
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(orchestrator._IncidentRun, "_plan_and_execute", hang)  # type: ignore[reportPrivateUsage]
+    episodic = MagicMock()
+    episodic.store_incident = AsyncMock()
+    deps = dataclasses.replace(_deps(sentinel_pipeline_timeout_s=0.05), episodic_memory=episodic)
+
+    result = await run_pipeline(_request(), deps)
+
+    assert result.status == "escalated"
+    assert result.escalation is not None
+    assert result.escalation.missing[0] == "pipeline timeout (0.05s) during plan"
+    episodic.store_incident.assert_awaited_once()
+    (incident,), _ = episodic.store_incident.call_args
+    assert incident.status is IncidentStatus.ESCALATED
+
+
+async def _deployment_links(pool: asyncpg.Pool) -> list[Any]:
+    return [r["incident_id"] for r in await pool.fetch("SELECT incident_id FROM deployments")]
+
+
+async def test_a_proposed_rollback_links_the_deployment(pool: asyncpg.Pool) -> None:
+    await _deploy_row(pool)
+    request = _request()
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, _stored_deps(pool))
+
+    assert result.status == "rollback_proposed"
+    assert await _deployment_links(pool) == [uuid.UUID(request.incident_id)]
+
+
+async def test_no_persist_no_link(pool: asyncpg.Pool) -> None:
+    await _deploy_row(pool)
+    request = _request()
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, dataclasses.replace(_stored_deps(pool), persist=False))
+
+    assert result.status == "rollback_proposed"
+    assert await _deployment_links(pool) == [None]

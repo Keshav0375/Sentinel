@@ -159,8 +159,8 @@ async def run_scenario(
         incident_id = str(uuid.uuid4())
         tracer = SentinelTracer(short_term_memory, trajectories_dir=resolved_traj)
         install_trace_processors(tracer)
-        short_term_memory.create(incident_id, alert)
         request = PipelineInput.from_alert(incident_id, alert)
+        short_term_memory.create(incident_id, request.alert)
         print(f"  [OK] incident: {incident_id} ({request.signal_type})")
 
         # ── Run pipeline ───────────────────────────────────────────────────────────

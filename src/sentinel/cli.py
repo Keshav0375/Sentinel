@@ -2,7 +2,7 @@
 
 Usage::
 
-    sentinel serve          # seed DB + launch dashboard on :8000
+    sentinel serve          # launch the app on :8000
     sentinel serve --port 3000
     sentinel scenario bad_deploy_01   # run a single scenario interactively
     sentinel scenarios      # list available scenarios
@@ -37,15 +37,12 @@ def _seed_database() -> None:
 
 
 def _serve(port: int = 8000, host: str = "0.0.0.0") -> None:
-    """Seed the database and launch the FastAPI dashboard."""
+    """Launch the FastAPI app (dashboard + API)."""
     import uvicorn
 
     print("=" * 50)
     print("  Sentinel — Autonomous Incident Response Agent")
     print("=" * 50)
-    print()
-    print("  Seeding database...")
-    _seed_database()
     print()
     print(f"  Starting dashboard on http://localhost:{port}")
     print("  Press Ctrl+C to stop")
@@ -99,7 +96,7 @@ def main() -> None:
     if not args or args[0] in ("-h", "--help"):
         print(
             "Usage:\n"
-            "  sentinel serve [--port PORT]    Seed DB + launch dashboard\n"
+            "  sentinel serve [--port PORT]    Launch the app (dashboard + API)\n"
             "  sentinel scenario <id>          Run a single scenario interactively\n"
             "  sentinel scenarios              List available scenarios\n"
             "  sentinel --help                 Show this help\n"

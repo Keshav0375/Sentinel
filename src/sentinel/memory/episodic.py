@@ -10,7 +10,8 @@ timeline have no columns of their own and live in ``trajectory`` JSONB as
 :class:`Incident` cannot supply stay NULL/default: the phase-4 pipeline passes an
 :class:`~sentinel.models.memory.IncidentOutcome` for correlation_id, root_cause_confidence,
 resolution_type, reflexion_loops and langfuse_trace_id (and its result, in ``trajectory`` as
-``pipeline_result``); dd_event_id, pr_* and eval_score are written by later phases.
+``pipeline_result``); dd_event_id comes from the alert (the webhook is its source, §2.1);
+pr_* and eval_score are written by later phases.
 ``resolved_at`` is written when the incident has one, since ``mttr_seconds`` is derived
 from it.
 
@@ -18,9 +19,16 @@ Provenance: ``root_cause`` and ``resolution`` are agent output, not verified fac
 stored ``provenance`` records ``root_cause_by`` / ``resolution_by`` (the agent named by the
 pipeline's outcome, else ``"unknown"``), ``model_generated: true`` and ``stored_at``; it
 reads back inside ``EpisodicRecord.raw_timeline["provenance"]``. The embedded symptom text
-holds only what was observed (the alert: service, metric, value, threshold, severity, and a
-title/description when the alert metadata carries one) — never an agent's hypothesis or
+holds only what was observed (the alert: service, title, severity, and the deploy_status /
+failed_stage tags when it carries them) — never an agent's hypothesis or
 root cause, so recall is not keyed on earlier model output.
+
+Read API for ``GET /incidents*`` (§3.2): :meth:`get_incident_row` /
+:meth:`list_incident_rows` return the full §5.3 row (:class:`IncidentRow`, no embedding),
+:meth:`stored_incident_ids` says which ids have a row, and :meth:`get_linked_deployment`
+reads the ``deployments`` row whose ``incident_id`` is the incident (written by
+:meth:`link_deployment`, the pipeline's backfill). :meth:`find_incident_by_correlation_id`
+backs the webhook's correlation_id dedupe.
 
 With no pool (no ``DATABASE_URL``) every method raises
 :class:`~sentinel.exceptions.SentinelMemoryError` — there are no silent empty results.
@@ -38,13 +46,20 @@ from typing import Any
 # asyncpg ships no type stubs (see infra/database.py); only its types are named here.
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from pgvector import Vector
+from pydantic import JsonValue
 
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra import database
 from sentinel.memory.base import MemoryStore
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.models.incident import Incident
-from sentinel.models.memory import EpisodicRecord, IncidentOutcome, MemoryQueryResult
+from sentinel.models.memory import (
+    DeploymentRow,
+    EpisodicRecord,
+    IncidentOutcome,
+    IncidentRow,
+    MemoryQueryResult,
+)
 
 # IVFFlat only searches `probes` of the index's lists; at the default of 1 a small or
 # freshly built table can miss its nearest rows. Probing every list (= lists of
@@ -58,6 +73,17 @@ _NO_POOL = "memory unavailable: no database configured (DATABASE_URL is not set)
 _COLUMNS = (
     "id, service, severity, root_cause, resolution, resolution_type, mttr_seconds, embedding, "
     "created_at, trajectory"
+)
+
+# Every incidents column but embedding, §5.3 order (IncidentRow).
+_ROW_COLUMNS = (
+    "id, alert_id, dd_event_id, correlation_id, severity, service, status, root_cause, "
+    "root_cause_confidence, resolution, resolution_type, pr_number, pr_url, trajectory, "
+    "eval_score, langfuse_trace_id, reflexion_loops, created_at, resolved_at, mttr_seconds"
+)
+_DEPLOYMENT_COLUMNS = (
+    "id, service, pr_number, commit_sha, author, deploy_status, gha_run_id, "
+    "dd_deploy_event_id, files_changed, incident_id, deployed_at, metadata"
 )
 
 
@@ -106,7 +132,7 @@ class EpisodicMemory:
         symptoms = _build_symptom_text(incident)
         embedding = await self._embeddings.embed(symptoms)
 
-        severity = incident.severity.value if incident.severity else incident.alert.severity.value
+        severity = incident.severity.value if incident.severity else incident.alert.severity
         service = incident.affected_service or incident.alert.service
 
         mttr_seconds: int | None = None
@@ -138,20 +164,23 @@ class EpisodicMemory:
         if outcome is not None:
             trajectory["pipeline_result"] = outcome.pipeline_result
         outcome_columns, outcome_values = _outcome_columns(outcome)
-        # $13… are the outcome's columns, in _OUTCOME_COLUMNS order (none without one).
+        # $14… are the outcome's columns, in _OUTCOME_COLUMNS order (none without one).
         extra_names = "".join(f", {name}" for name in outcome_columns)
-        extra_params = "".join(f", ${13 + i}" for i in range(len(outcome_columns)))
+        extra_params = "".join(f", ${14 + i}" for i in range(len(outcome_columns)))
         extra_updates = "".join(f",\n{name} = EXCLUDED.{name}" for name in outcome_columns)
 
         async with database.acquire(pool) as conn:
             await conn.execute(
                 f"""
                 INSERT INTO incidents
-                    (id, alert_id, severity, service, status, root_cause, resolution,
-                     trajectory, created_at, resolved_at, mttr_seconds, embedding{extra_names})
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12{extra_params})
+                    (id, alert_id, dd_event_id, severity, service, status, root_cause,
+                     resolution, trajectory, created_at, resolved_at, mttr_seconds,
+                     embedding{extra_names})
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12,
+                        $13{extra_params})
                 ON CONFLICT (id) DO UPDATE SET
                     alert_id = EXCLUDED.alert_id,
+                    dd_event_id = EXCLUDED.dd_event_id,
                     severity = EXCLUDED.severity,
                     service = EXCLUDED.service,
                     status = EXCLUDED.status,
@@ -170,6 +199,7 @@ class EpisodicMemory:
                 """,
                 incident_uuid,
                 incident.alert.alert_id,
+                incident.alert.dd_event_id,
                 severity,
                 service,
                 incident.status.value,
@@ -285,15 +315,7 @@ class EpisodicMemory:
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
 
-        conditions: list[str] = []
-        args: list[Any] = []
-        if status is not None:
-            args.append(str(status))
-            conditions.append(f"status = ${len(args)}")
-        if service is not None:
-            args.append(service)
-            conditions.append(f"service = ${len(args)}")
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        where, args = _filters(status, service)
         args.append(limit)
 
         async with database.acquire(pool) as conn:
@@ -303,6 +325,130 @@ class EpisodicMemory:
                 *args,
             )
         return [_row_to_record(row) for row in rows]
+
+    async def get_incident_row(self, incident_id: str) -> IncidentRow | None:
+        """The full §5.3 row (no embedding) of *incident_id*, or None. A non-UUID id → None.
+
+        Raises:
+            SentinelMemoryError: no database, or the query failed.
+        """
+        pool = self._require_pool()
+        incident_uuid = _as_uuid(incident_id)
+        if incident_uuid is None:
+            return None
+        async with database.acquire(pool) as conn:
+            row = await conn.fetchrow(
+                f"SELECT {_ROW_COLUMNS} FROM incidents WHERE id = $1", incident_uuid
+            )
+        return None if row is None else _row_to_incident_row(row)
+
+    async def list_incident_rows(
+        self,
+        *,
+        status: str | None = None,
+        service: str | None = None,
+        limit: int = _DEFAULT_LIST_LIMIT,
+    ) -> list[IncidentRow]:
+        """Full rows, newest first, filtered like :meth:`list_incidents`.
+
+        Raises:
+            SentinelMemoryError: no database, or the query failed.
+            ValueError: limit < 1.
+        """
+        pool = self._require_pool()
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+
+        where, args = _filters(status, service)
+        args.append(limit)
+
+        async with database.acquire(pool) as conn:
+            rows = await conn.fetch(
+                f"SELECT {_ROW_COLUMNS} FROM incidents {where} "
+                f"ORDER BY created_at DESC, id LIMIT ${len(args)}",
+                *args,
+            )
+        return [_row_to_incident_row(row) for row in rows]
+
+    async def stored_incident_ids(self, incident_ids: Sequence[str]) -> set[str]:
+        """The ids among *incident_ids* (returned as given) that have an ``incidents`` row.
+
+        Non-UUID ids never do.
+
+        Raises:
+            SentinelMemoryError: no database, or the query failed.
+        """
+        pool = self._require_pool()
+        pairs = [(given, u) for given in incident_ids if (u := _as_uuid(given)) is not None]
+        if not pairs:
+            return set()
+        async with database.acquire(pool) as conn:
+            rows = await conn.fetch(
+                "SELECT id FROM incidents WHERE id = ANY($1::uuid[])", [u for _, u in pairs]
+            )
+        found = {row["id"] for row in rows}
+        return {given for given, u in pairs if u in found}
+
+    async def get_linked_deployment(self, incident_id: str) -> DeploymentRow | None:
+        """The ``deployments`` row whose ``incident_id`` is *incident_id* (newest if several).
+
+        Raises:
+            SentinelMemoryError: no database, or the query failed.
+        """
+        pool = self._require_pool()
+        incident_uuid = _as_uuid(incident_id)
+        if incident_uuid is None:
+            return None
+        async with database.acquire(pool) as conn:
+            row = await conn.fetchrow(
+                f"SELECT {_DEPLOYMENT_COLUMNS} FROM deployments WHERE incident_id = $1 "
+                "ORDER BY deployed_at DESC NULLS LAST, id LIMIT 1",
+                incident_uuid,
+            )
+        return None if row is None else _row_to_deployment(row)
+
+    async def find_incident_by_correlation_id(self, correlation_id: str) -> str | None:
+        """The id of the oldest stored incident with *correlation_id*, or None.
+
+        None as well when *correlation_id* is not a UUID (the column is UUID-typed).
+
+        Raises:
+            SentinelMemoryError: no database, or the query failed.
+        """
+        pool = self._require_pool()
+        correlation_uuid = _as_uuid(correlation_id)
+        if correlation_uuid is None:
+            return None
+        async with database.acquire(pool) as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM incidents WHERE correlation_id = $1 "
+                "ORDER BY created_at ASC NULLS LAST, id LIMIT 1",
+                correlation_uuid,
+            )
+        return None if row is None else str(row["id"])
+
+    async def link_deployment(self, incident_id: str, deploy_id: str) -> bool:
+        """Set ``deployments.incident_id`` on the row *deploy_id*; False when no such row.
+
+        Overwrites any previous link. The incident row must already exist (FK).
+
+        Raises:
+            SentinelMemoryError: no database, an id is not a UUID, or the write failed.
+        """
+        pool = self._require_pool()
+        incident_uuid = _as_uuid(incident_id)
+        if incident_uuid is None:
+            raise SentinelMemoryError(f"{incident_id!r} is not a UUID")
+        deploy_uuid = _as_uuid(deploy_id)
+        if deploy_uuid is None:
+            raise SentinelMemoryError(f"{deploy_id!r} is not a UUID")
+        async with database.acquire(pool) as conn:
+            status = await conn.execute(
+                "UPDATE deployments SET incident_id = $1 WHERE id = $2",
+                incident_uuid,
+                deploy_uuid,
+            )
+        return status.split()[-1] != "0"
 
     # ── MemoryStore protocol ──────────────────────────────────────────────────
 
@@ -362,6 +508,20 @@ def _as_uuid(value: str) -> uuid.UUID | None:
         return None
 
 
+def _filters(status: str | None, service: str | None) -> tuple[str, list[Any]]:
+    """The list filters' WHERE clause ("" for none) and its arguments, numbered from $1."""
+    conditions: list[str] = []
+    args: list[Any] = []
+    if status is not None:
+        args.append(str(status))
+        conditions.append(f"status = ${len(args)}")
+    if service is not None:
+        args.append(service)
+        conditions.append(f"service = ${len(args)}")
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    return where, args
+
+
 # The incidents columns only the phase-4 pipeline supplies (IncidentOutcome), in SQL order.
 _OUTCOME_COLUMNS = (
     "correlation_id",
@@ -398,20 +558,16 @@ def _as_vector(value: Any) -> list[float] | None:
 def _build_symptom_text(incident: Incident) -> str:
     """The text embedded for similarity search: only what the alert observed.
 
-    Service, metric, current value vs threshold, severity, and the alert's title /
-    description when its metadata carries them. Agent output (triage's affected service,
-    the analysis hypothesis, any root cause) is deliberately left out.
+    Service, title, severity, and the deploy_status / failed_stage tags when present.
+    Agent output (triage's affected service, the analysis hypothesis, any root cause) is
+    deliberately left out.
     """
     alert = incident.alert
-    parts: list[str] = [
-        f"Service {alert.service} {alert.metric}",
-        f"current {alert.current_value} threshold {alert.threshold}",
-        f"severity {alert.severity}",
-    ]
-    for key in ("title", "description"):
-        value = alert.metadata.get(key)
-        if isinstance(value, str) and value.strip():
-            parts.append(value.strip())
+    parts: list[str] = [f"Service {alert.service} {alert.title}", f"severity {alert.severity}"]
+    for key in ("deploy_status", "failed_stage"):
+        value = getattr(alert.tags, key)
+        if value:
+            parts.append(f"{key} {value}")
     return " ".join(parts)
 
 
@@ -457,6 +613,59 @@ def _row_to_record(row: asyncpg.Record) -> EpisodicRecord:
     if row["created_at"] is not None:
         fields["created_at"] = row["created_at"]
     return EpisodicRecord(**fields)
+
+
+def _json_column(raw: str | None) -> JsonValue:
+    """A JSONB column (asyncpg returns text) decoded; NULL → None."""
+    return None if raw is None else json.loads(raw)
+
+
+def _uuid_text(value: uuid.UUID | None) -> str | None:
+    return None if value is None else str(value)
+
+
+def _row_to_incident_row(row: asyncpg.Record) -> IncidentRow:
+    """Convert an ``incidents`` row (``_ROW_COLUMNS``) to an IncidentRow."""
+    return IncidentRow(
+        id=str(row["id"]),
+        alert_id=row["alert_id"],
+        dd_event_id=row["dd_event_id"],
+        correlation_id=_uuid_text(row["correlation_id"]),
+        severity=row["severity"],
+        service=row["service"],
+        status=row["status"],
+        root_cause=row["root_cause"],
+        root_cause_confidence=row["root_cause_confidence"],
+        resolution=row["resolution"],
+        resolution_type=row["resolution_type"],
+        pr_number=row["pr_number"],
+        pr_url=row["pr_url"],
+        trajectory=_json_column(row["trajectory"]),
+        eval_score=_json_column(row["eval_score"]),
+        langfuse_trace_id=row["langfuse_trace_id"],
+        reflexion_loops=row["reflexion_loops"],
+        created_at=row["created_at"],
+        resolved_at=row["resolved_at"],
+        mttr_seconds=row["mttr_seconds"],
+    )
+
+
+def _row_to_deployment(row: asyncpg.Record) -> DeploymentRow:
+    """Convert a ``deployments`` row (``_DEPLOYMENT_COLUMNS``) to a DeploymentRow."""
+    return DeploymentRow(
+        id=str(row["id"]),
+        service=row["service"],
+        pr_number=row["pr_number"],
+        commit_sha=row["commit_sha"],
+        author=row["author"],
+        deploy_status=row["deploy_status"],
+        gha_run_id=row["gha_run_id"],
+        dd_deploy_event_id=row["dd_deploy_event_id"],
+        files_changed=_json_column(row["files_changed"]),
+        incident_id=_uuid_text(row["incident_id"]),
+        deployed_at=row["deployed_at"],
+        metadata=_json_column(row["metadata"]),
+    )
 
 
 # Runtime protocol compliance check — caught at import, not first use.

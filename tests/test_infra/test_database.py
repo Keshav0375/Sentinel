@@ -11,6 +11,7 @@ import traceback
 import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -24,6 +25,7 @@ from sentinel.infra.database import (
     acquire,
     close_pool,
     create_pool,
+    entra_dsn,
     get_pool,
     init_pool,
     init_pool_from_settings,
@@ -44,27 +46,33 @@ def _without_password(dsn: str) -> tuple[str, str]:
     return urlunsplit(parts._replace(netloc=netloc)), parts.password or ""
 
 
-async def _backend_count(dsn: str) -> int:
-    """Server-side connections to this database, excluding the counting one."""
+def _tagged(dsn: str, app_name: str) -> str:
+    """*dsn* with ``application_name=<app_name>``: asyncpg passes it to the server."""
+    parts = urlsplit(dsn)
+    query = "&".join(q for q in (parts.query, f"application_name={app_name}") if q)
+    return urlunsplit(parts._replace(query=query))
+
+
+async def _backend_count(dsn: str, app_name: str) -> int:
+    """Server-side connections tagged *app_name* (other tests' pools do not count)."""
     conn = await asyncpg.connect(dsn)
     try:
         count = await conn.fetchval(
-            "SELECT count(*) FROM pg_stat_activity "
-            "WHERE datname = current_database() AND pid <> pg_backend_pid()"
+            "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", app_name
         )
     finally:
         await conn.close()
     return int(count)
 
 
-async def _wait_for_backend_count(dsn: str, expected: int) -> int:
+async def _wait_for_backend_count(dsn: str, app_name: str, expected: int) -> int:
     """pg_stat_activity lags a closed socket slightly — poll briefly."""
-    count = await _backend_count(dsn)
+    count = await _backend_count(dsn, app_name)
     for _ in range(50):
         if count == expected:
             break
         await asyncio.sleep(0.05)
-        count = await _backend_count(dsn)
+        count = await _backend_count(dsn, app_name)
     return count
 
 
@@ -221,18 +229,19 @@ async def test_init_pool_twice_raises(pg_dsn: str) -> None:
 
 
 async def test_module_pool_acquire_and_close_leaks_nothing(pg_dsn: str) -> None:
-    baseline = await _backend_count(pg_dsn)
-    await init_pool(pg_dsn, min_size=2, max_size=3)
+    app_name = f"sentinel-test-{uuid.uuid4().hex[:12]}"
+    await init_pool(_tagged(pg_dsn, app_name), min_size=2, max_size=3)
     async with acquire() as conn:
         assert await conn.fetchval("SELECT 1") == 1
-    assert await _backend_count(pg_dsn) >= baseline + 2
+        assert await conn.fetchval("SHOW application_name") == app_name
+    assert await _backend_count(pg_dsn, app_name) == 2
 
     await close_pool()
 
     assert database._pool is None  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(SentinelMemoryError):
         get_pool()
-    assert await _wait_for_backend_count(pg_dsn, baseline) == baseline
+    assert await _wait_for_backend_count(pg_dsn, app_name, 0) == 0
 
 
 async def test_password_callable_is_used(pg_dsn: str) -> None:
@@ -403,3 +412,74 @@ async def test_unparseable_dsn_never_leaks_from_lazy_acquire(
 async def test_invalid_bounds_wrapped(pg_dsn: str) -> None:
     with pytest.raises(SentinelMemoryError):
         await create_pool(pg_dsn, min_size=5, max_size=2)
+
+
+# ── Entra-only Azure server (PG* variables; no database needed) ───────────────
+
+_PG_HOST = "sentinel-pg-0375.postgres.database.azure.com"
+
+
+def test_entra_dsn_quotes_user_and_database() -> None:
+    assert (
+        entra_dsn("h.postgres.database.azure.com", "sentinel", "sentinel-backend-wi")
+        == "postgresql://sentinel-backend-wi@h.postgres.database.azure.com:5432/sentinel"
+        "?sslmode=require"
+    )
+    assert "a%20b%40c@" in entra_dsn("h", "sentinel", "a b@c")
+
+
+async def test_init_from_settings_pg_env_uses_entra_password_callable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = object()
+    init = AsyncMock(return_value=pool)
+    monkeypatch.setattr(database, "init_pool", init)
+    password = AsyncMock(return_value="tok")
+    factory = MagicMock(return_value=password)
+    settings = _settings(pghost=_PG_HOST, pgdatabase="sentinel", pguser="sentinel-backend-wi")
+    assert await init_pool_from_settings(settings, password_factory=factory) is pool
+    init.assert_awaited_once_with(
+        entra_dsn(_PG_HOST, "sentinel", "sentinel-backend-wi"),
+        min_size=2,
+        max_size=10,
+        password=password,
+    )
+    factory.assert_called_once_with()
+
+
+async def test_init_from_settings_database_url_wins_over_pg_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    init = AsyncMock(return_value=object())
+    monkeypatch.setattr(database, "init_pool", init)
+    factory = MagicMock()
+    url = "postgresql://u:p@localhost:5432/db"
+    settings = _settings(
+        database_url=url, pghost=_PG_HOST, pgdatabase="sentinel", pguser="sentinel-backend-wi"
+    )
+    await init_pool_from_settings(settings, password_factory=factory)
+    init.assert_awaited_once_with(url, min_size=2, max_size=10)
+    factory.assert_not_called()
+
+
+async def test_init_from_settings_partial_pg_env_creates_no_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    init = AsyncMock()
+    monkeypatch.setattr(database, "init_pool", init)
+    factory = MagicMock()
+    assert (
+        await init_pool_from_settings(_settings(pghost=_PG_HOST), password_factory=factory) is None
+    )
+    init.assert_not_awaited()
+    factory.assert_not_called()
+
+
+async def test_init_from_settings_pg_env_without_token_provider_creates_no_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    init = AsyncMock()
+    monkeypatch.setattr(database, "init_pool", init)
+    settings = _settings(pghost=_PG_HOST, pgdatabase="sentinel", pguser="sentinel-backend-wi")
+    assert await init_pool_from_settings(settings) is None
+    init.assert_not_awaited()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sentinel.models.alert import AlertPayload
+from sentinel.models.alert import IncidentAlert
 from sentinel.models.incident import IncidentStatus, TimelineEntry
 
 
@@ -33,7 +33,7 @@ class ShortTermMemory:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    def create(self, incident_id: str, alert: AlertPayload) -> None:
+    def create(self, incident_id: str, alert: IncidentAlert) -> None:
         """Initialise a new incident record.
 
         Sets the result to None and status to TRIAGE. Overwrites any existing record

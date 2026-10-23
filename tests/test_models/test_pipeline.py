@@ -13,7 +13,15 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource
+from sentinel.models.alert import (
+    AlertPayload,
+    AlertSeverity,
+    AlertSource,
+    IncidentAlert,
+    IncidentContext,
+    IncidentPayload,
+    PRDetails,
+)
 from sentinel.models.pipeline import (
     DEFAULT_SIGNAL_TYPE,
     SIGNAL_TYPES,
@@ -35,6 +43,10 @@ def _alert(**metadata: Any) -> AlertPayload:
         severity=AlertSeverity.CRITICAL,
         metadata=metadata,
     )
+
+
+def _incident_alert() -> IncidentAlert:
+    return IncidentAlert(title="t", service="sentinel-watchtower")
 
 
 def _spec(incident_id: str) -> RollbackSpec:
@@ -114,14 +126,14 @@ def test_incident_and_correlation_ids_must_be_uuids() -> None:
     with pytest.raises(ValidationError, match="not a UUID"):
         PipelineInput(
             incident_id=str(uuid.uuid4()),
-            alert=_alert(),
+            alert=_incident_alert(),
             signal_type="runtime_error",
             correlation_id="nope",
         )
     with pytest.raises(ValidationError):
         PipelineInput(
             incident_id=str(uuid.uuid4()),
-            alert=_alert(),
+            alert=_incident_alert(),
             signal_type="maybe",  # type: ignore[arg-type]
             correlation_id=str(uuid.uuid4()),
         )
@@ -131,6 +143,36 @@ def test_ids_are_normalised() -> None:
     raw = uuid.uuid4()
     request = PipelineInput.from_alert(raw.hex.upper(), _alert())
     assert request.incident_id == str(raw)
+
+
+def test_from_payload_carries_signal_correlation_and_pin() -> None:
+    incident_id, correlation_id = str(uuid.uuid4()), str(uuid.uuid4())
+    payload = IncidentPayload(
+        signal_type="deploy_failure",
+        correlation_id=correlation_id.upper(),
+        title="deploy failed",
+        tags={"service": "sentinel-watchtower"},  # type: ignore[arg-type]
+        context=IncidentContext(pr_details=PRDetails(sha=" a1b2c3d4e5f6 ")),
+    )
+    request = PipelineInput.from_payload(incident_id, payload)
+    assert request.incident_id == incident_id
+    assert request.signal_type == "deploy_failure"
+    assert request.correlation_id == correlation_id
+    assert request.alert.service == "sentinel-watchtower"
+    assert request.alert.title == "deploy failed"
+    assert request.pinned_sha == "a1b2c3d4e5f6"
+
+
+def test_pinned_sha_none_without_pr_details() -> None:
+    request = PipelineInput.from_alert(str(uuid.uuid4()), _alert())
+    assert request.pinned_sha is None
+    blank = PipelineInput(
+        incident_id=str(uuid.uuid4()),
+        alert=IncidentAlert(title="t", context=IncidentContext(pr_details=PRDetails(sha="  "))),
+        signal_type="deploy_failure",
+        correlation_id=str(uuid.uuid4()),
+    )
+    assert blank.pinned_sha is None
 
 
 # ── PipelineResult ────────────────────────────────────────────────────────────
