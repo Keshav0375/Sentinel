@@ -22,6 +22,7 @@ The pytest globs below must cover every `tests/` directory named by a task file 
 the sentinel-brain repo's implementation/tasks/. If a phase adds a test package, add it here —
 otherwise the gate reports green without ever running that phase's tests.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -43,7 +44,23 @@ MATRIX: dict[str, list[Check]] = {
         ("ruff-format", ["ruff", "format", "--check", "src/", "tests/"], True),
         ("pyright", ["pyright", "src/"], True),
         ("gitleaks", ["gitleaks", "detect", "--no-banner", "--redact"], True),
-        ("pip-audit", ["pip-audit", "--strict"], False),
+        # filelock CVE-2026-112940/-112913/-112907: fixed only in filelock 4.2.1, but litellm
+        # (<=1.106.2) caps filelock <4.0. Accepted until litellm lifts the cap; re-check by
+        # 2026-11-24 (sentinel-brain decisions 2026-10-24, STATE follow-up). Drop the ignores then.
+        (
+            "pip-audit",
+            [
+                "pip-audit",
+                "--strict",
+                "--ignore-vuln",
+                "CVE-2026-112940",
+                "--ignore-vuln",
+                "CVE-2026-112913",
+                "--ignore-vuln",
+                "CVE-2026-112907",
+            ],
+            False,
+        ),
         # Unit = no external service required.
         (
             "pytest-unit",
@@ -119,7 +136,14 @@ MATRIX: dict[str, list[Check]] = {
         # initialised by the root's. Path-pruned in repos without the module.
         (
             "tf-test-init",
-            ["terraform", "-chdir=modules/naming", "init", "-backend=false", "-input=false", "-no-color"],
+            [
+                "terraform",
+                "-chdir=modules/naming",
+                "init",
+                "-backend=false",
+                "-input=false",
+                "-no-color",
+            ],
             False,
         ),
         ("tf-test", ["terraform", "-chdir=modules/naming", "test", "-no-color"], False),
@@ -328,15 +352,20 @@ def main() -> int:
     report = gate(args.repo, path, args.fast)
 
     if args.json:
-        print(json.dumps({
-            "repo": report.repo,
-            "path": report.path,
-            "ok": report.ok,
-            "inconclusive": report.inconclusive,
-            "ran": len(report.ran),
-            "skipped": [r.name for r in report.skipped],
-            "results": [r.__dict__ for r in report.results],
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "repo": report.repo,
+                    "path": report.path,
+                    "ok": report.ok,
+                    "inconclusive": report.inconclusive,
+                    "ran": len(report.ran),
+                    "skipped": [r.name for r in report.skipped],
+                    "results": [r.__dict__ for r in report.results],
+                },
+                indent=2,
+            )
+        )
     else:
         print_human(report, unicode_ok)
 
