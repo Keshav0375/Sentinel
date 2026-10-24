@@ -70,6 +70,8 @@ class Settings(BaseSettings):
 
     # Read at use by providers/router.py, never at boot. A missing primary-provider key
     # falls back to the other provider; with neither, the incident escalates.
+    # In the pod they come from Key Vault (anthropic-api-key, openai-api-key; decision
+    # 2026-10-24), never from env vars.
     anthropic_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
 
@@ -133,8 +135,8 @@ class Settings(BaseSettings):
 
     # ── Azure runtime access (§8.2; decision 2026-10-19) ─────────────────────
     # Key Vault with datadog-api-key, datadog-app-key, langfuse-public-key/-secret-key/-base-url,
-    # read once at startup (restart to rotate; infra/workload_identity). Unset → env only.
-    # LLM keys never come from it.
+    # anthropic-api-key and openai-api-key (decision 2026-10-24), read once at startup (restart
+    # to rotate; infra/workload_identity). Unset → env only. The GitHub PAT never comes from it.
     key_vault_url: str | None = None
     # Entra-only Azure PostgreSQL, used only when DATABASE_URL is blank: all three or none. The
     # password is an Entra token fetched per new connection

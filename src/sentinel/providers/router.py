@@ -127,7 +127,8 @@ JUDGE_MODELS: Final[Mapping[Provider, str]] = {
     "openai": "anthropic/claude-opus-4-1",
 }
 
-# Settings field holding each provider's API key (until phase 7 federates the pod).
+# Settings field holding each provider's API key: the environment locally, Key Vault in the
+# pod (infra/workload_identity; decision 2026-10-24).
 _CREDENTIAL_FIELDS: Final[Mapping[Provider, str]] = {
     "anthropic": "anthropic_api_key",
     "openai": "openai_api_key",
@@ -225,8 +226,9 @@ _check_model_map()
 def provider_credential(provider: Provider, settings: Settings) -> str | None:
     """The credential for *provider*, read now; None when it is not configured.
 
-    Today: the API key from Settings. Backend phase 7 replaces this one function with a
-    workload-identity token exchange (decision 2026-08-30); no caller reads a key itself.
+    The API key from Settings: the environment locally, or the Key Vault secret read once at
+    startup in the pod (decision 2026-10-24, which replaces the 2026-08-30 workload-identity
+    deferral). No caller reads a key itself.
     """
     secret = getattr(settings, _CREDENTIAL_FIELDS[provider])
     return None if secret is None else secret.get_secret_value()

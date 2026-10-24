@@ -13,14 +13,20 @@ from the export with its lock hashes and no dependency resolution. torch comes f
 CPU-only index at the locked version: the PyPI wheel drags in the CUDA stack (cuda-*,
 nvidia-*, triton), which is dropped from the set — the CPU wheel needs none of it.
 `pip check` then proves the installed set is complete and consistent.
+
+`--main-only` (the container image, Dockerfile): the main group only, and the project
+itself is not installed. The image runs from `src/` on PYTHONPATH, because the poetry
+package includes `data/`, which stays out of the image.
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
@@ -64,21 +70,30 @@ def split_requirements(exported: str) -> tuple[list[str], str]:
     return kept, torch_version
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Install exactly the poetry.lock set.")
+    parser.add_argument(
+        "--main-only",
+        action="store_true",
+        help="main group only; do not install the project (container image)",
+    )
+    args = parser.parse_args(argv)
+    groups = ("--only", "main") if args.main_only else ("--with", "dev")
     root = Path(__file__).resolve().parent.parent
     pip = [sys.executable, "-m", "pip", "install", "--no-deps"]
     with tempfile.TemporaryDirectory() as tmp:
         exported = Path(tmp, "locked.txt")
         poetry = ("poetry", "-C", str(root))
         run(*poetry, "check", "--lock")
-        run(*poetry, "export", "--with", "dev", "-f", "requirements.txt", "-o", str(exported))
+        run(*poetry, "export", *groups, "-f", "requirements.txt", "-o", str(exported))
         kept, torch_version = split_requirements(exported.read_text())
         hashed = Path(tmp, "hashed.txt")
         hashed.write_text("\n".join(kept) + "\n")
 
         run(*pip, "--require-hashes", "-r", str(hashed))
         run(*pip, "--index-url", TORCH_CPU_INDEX, f"torch=={torch_version}")
-        run(*pip, "-e", str(root))
+        if not args.main_only:
+            run(*pip, "-e", str(root))
     run(sys.executable, "-m", "pip", "check")
 
 

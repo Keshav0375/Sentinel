@@ -1,6 +1,7 @@
 """Azure runtime access: the workload-identity credential and the startup Key Vault read.
 
-backend.md §8.2 and the decision of 2026-10-19 ("Runtime config"). One
+backend.md §8.2 and the decisions of 2026-10-19 ("Runtime config") and 2026-10-24
+(the LLM keys). One
 ``DefaultAzureCredential`` per process (workload identity in the pod) is built lazily on
 first use, so nothing here calls Azure at import or at a boot without ``KEY_VAULT_URL`` /
 ``PGHOST``. The vault is read once at startup (§8.2 implies re-reads; not implemented): a
@@ -43,18 +44,28 @@ logger = get_logger("sentinel.infra.workload_identity")
 
 POSTGRES_ENTRA_SCOPE: Final = "https://ossrdbms-aad.database.windows.net/.default"
 
-# Key Vault secret name → Settings field. No other name is ever requested: the LLM keys
-# and the GitHub PAT stay environment-only.
+# Key Vault secret name → Settings field. No other name is ever requested. The LLM keys come
+# from here in the pod (decision 2026-10-24) and are never put in the environment.
+# The GitHub PAT stays environment-only.
 KEY_VAULT_SECRETS: Final[Mapping[str, str]] = {
     "datadog-api-key": "dd_api_key",
     "datadog-app-key": "dd_app_key",
     "langfuse-public-key": "langfuse_public_key",
     "langfuse-secret-key": "langfuse_secret_key",
     "langfuse-base-url": "langfuse_base_url",
+    "anthropic-api-key": "anthropic_api_key",
+    "openai-api-key": "openai_api_key",
 }
 
 _SECRET_STR_FIELDS: Final = frozenset(
-    {"dd_api_key", "dd_app_key", "langfuse_public_key", "langfuse_secret_key"}
+    {
+        "dd_api_key",
+        "dd_app_key",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+        "anthropic_api_key",
+        "openai_api_key",
+    }
 )
 
 # The langfuse v3 client reads only the process environment, so these are mirrored there.
@@ -180,7 +191,8 @@ async def load_key_vault_secrets(
 
     No ``KEY_VAULT_URL`` returns *settings* itself and never touches the credential. The
     three LangFuse values are also written to the environment, the only place the
-    LangFuse client reads them. A failure is logged and never fatal.
+    LangFuse client reads them. The LLM keys are not: the router passes them to LiteLLM
+    explicitly. A failure is logged and never fatal.
     """
     if settings.key_vault_url is None:
         logger.info("key_vault_skipped", reason="KEY_VAULT_URL not set")
