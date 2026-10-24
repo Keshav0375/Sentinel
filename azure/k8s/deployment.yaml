@@ -1,0 +1,75 @@
+# Sentinel backend Deployment (backend.md 8.1; decisions 2026-10-24).
+# Placeholders are listed in placeholders.txt; apply with kubectl -n.
+# Recreate + 1 replica: requests/limits equal the namespace quota.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentinel-backend
+  labels:
+    app: sentinel-backend
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sentinel-backend
+  template:
+    metadata:
+      labels:
+        app: sentinel-backend
+        azure.workload.identity/use: "true"
+    spec:
+      # Infra-owned SA with the workload-identity client-id annotation.
+      serviceAccountName: sentinel-backend
+      # Worst-case shutdown is 37 s; uvicorn drains for 5 s first.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sentinel-backend
+          image: "${ACR_LOGIN_SERVER}/sentinel-backend:${IMAGE_TAG}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: sentinel-config
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            # Above READY_PING_TIMEOUT_S (2 s) in sentinel/api/health.py.
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            # The app writes /app/reports on the root filesystem.
+            readOnlyRootFilesystem: false

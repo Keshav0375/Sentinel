@@ -1,0 +1,19 @@
+# Cilium enforces the namespace's default-deny-ingress (infra). Allow TCP
+# 8000 to the backend pods from any source: LB traffic and health probes.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sentinel-backend
+  labels:
+    app: sentinel-backend
+spec:
+  podSelector:
+    matchLabels:
+      app: sentinel-backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8000
