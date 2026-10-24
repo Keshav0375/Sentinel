@@ -1,0 +1,125 @@
+# Manual up/down toggle and nightly scale-to-zero safety net (backend task 8.4).
+# Source: architecture backend.md sections 8.5 (rule 4) and 9.5, as amended by decisions.md
+# 2026-10-24 (phases 7 and 8). Scale-to-zero is pod-level: backend-down deletes the Service and
+# scales the Deployment to 0. The shared cluster is never stopped here (a separate manual op).
+# The nightly run always scales down and ignores SENTINEL_KEEP_WARM, so a forgotten demo session
+# costs at most one night.
+name: "[sentinel] backend — scale"
+
+on:
+  workflow_dispatch:
+    inputs:
+      direction:
+        description: Scale the backend up or down
+        required: true
+        type: choice
+        options:
+          - up
+          - down
+        default: down
+  schedule:
+    - cron: '0 2 * * *'
+
+concurrency:
+  group: sentinel-backend
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  scale:
+    name: scale
+    runs-on: ubuntu-24.04
+    environment: sentinel-dev
+    timeout-minutes: 60
+    outputs:
+      backend-url: ${{ steps.up.outputs.backend-url }}
+    steps:
+      - id: checkout
+        name: Check out the composite actions
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - id: login
+        name: Azure login (resource tenant)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - id: resolve-tag
+        name: Resolve stable to its sha- tag
+        if: github.event_name == 'workflow_dispatch' && inputs.direction == 'up'
+        shell: bash
+        env:
+          ACR_NAME: ${{ vars.ACR_NAME }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::resolve-tag: $1"; exit 1; }
+          [ -n "${ACR_NAME:-}" ] || die "vars.ACR_NAME is empty"
+          digest="$(az acr repository show --name "$ACR_NAME" --image sentinel-backend:stable \
+            --query digest -o tsv --only-show-errors)" || die "sentinel-backend:stable not found in ACR"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "stable digest is malformed"
+          tags="$(az acr manifest list-metadata --registry "$ACR_NAME" --name sentinel-backend \
+            --query "[?digest=='${digest}'].tags[]" -o tsv --only-show-errors)" ||
+            die "could not list sentinel-backend manifests"
+          tag="$(printf '%s\n' "$tags" | tr '\t' '\n' | grep -E '^sha-[0-9a-f]{7}$' | sort | head -n 1)" ||
+            tag=""
+          [ -n "$tag" ] || die "stable has no sha-<7 hex> tag"
+          echo "::notice::resolve-tag: stable is $tag"
+          echo "image-tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - id: up
+        name: Bring the backend up
+        if: github.event_name == 'workflow_dispatch' && inputs.direction == 'up'
+        uses: ./.github/actions/backend-up
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          image-tag: ${{ steps.resolve-tag.outputs.image-tag }}
+          acr-login-server: ${{ vars.ACR_LOGIN_SERVER }}
+          api-tenant-id: ${{ vars.SENTINEL_API_TENANT_ID }}
+          api-audience: ${{ vars.SENTINEL_API_AUDIENCE }}
+          key-vault-url: ${{ vars.KEY_VAULT_URI }}
+          pg-host: ${{ vars.PG_HOST }}
+          pg-database: ${{ vars.PG_DATABASE }}
+          pg-user: ${{ vars.PG_USER_BACKEND }}
+
+      - id: summary
+        name: Publish the backend URL
+        if: github.event_name == 'workflow_dispatch' && inputs.direction == 'up'
+        shell: bash
+        env:
+          BACKEND_URL: ${{ steps.up.outputs.backend-url }}
+          IMAGE_TAG: ${{ steps.resolve-tag.outputs.image-tag }}
+        run: |
+          set -euo pipefail
+          echo "::notice::backend-url: $BACKEND_URL"
+          {
+            echo "### Sentinel backend is up"
+            echo ""
+            echo "- backend-url: $BACKEND_URL"
+            echo "- image-tag: $IMAGE_TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - id: down-manual
+        name: Scale the backend down (manual, honours SENTINEL_KEEP_WARM)
+        if: github.event_name == 'workflow_dispatch' && inputs.direction == 'down'
+        uses: ./.github/actions/backend-down
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          keep-warm: ${{ vars.SENTINEL_KEEP_WARM }}
+
+      - id: down-nightly
+        name: Scale the backend to zero (nightly safety net, ignores SENTINEL_KEEP_WARM)
+        if: github.event_name == 'schedule'
+        uses: ./.github/actions/backend-down
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          keep-warm: 'false'
