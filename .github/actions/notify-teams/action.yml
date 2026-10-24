@@ -45,7 +45,10 @@ runs:
         esac
         payload_file="$(mktemp "${RUNNER_TEMP:-/tmp}/teams.XXXXXX")"
         trap 'rm -f "$payload_file"' EXIT
-        jq -cn --arg title "$TITLE" --arg body "$BODY" --arg sev "$SEVERITY" --arg color "$color" '{
+        # Plain text only: TextRun renders no markdown, and U+200B breaks "](" so no [text](url) link can form.
+        jq -cn --arg title "$TITLE" --arg body "$BODY" --arg sev "$SEVERITY" --arg color "$color" '
+        def plain: gsub("\\]\\("; "]​(");
+        {
           type: "message",
           attachments: [{
             contentType: "application/vnd.microsoft.card.adaptive",
@@ -54,9 +57,11 @@ runs:
               type: "AdaptiveCard",
               version: "1.4",
               body: [
-                {type: "TextBlock", text: $title, weight: "Bolder", size: "Medium", color: $color, wrap: true},
+                {type: "RichTextBlock", inlines: [
+                  {type: "TextRun", text: ($title | plain), weight: "Bolder", size: "Medium", color: $color}
+                ]},
                 {type: "TextBlock", text: ("Severity: " + $sev), isSubtle: true, spacing: "None", wrap: true},
-                {type: "TextBlock", text: $body, wrap: true}
+                {type: "RichTextBlock", inlines: [{type: "TextRun", text: ($body | plain)}]}
               ]
             }
           }]

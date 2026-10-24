@@ -110,7 +110,12 @@ def test_deployment_shape() -> None:
     container = _container()
     assert container["name"] == "sentinel-backend"
     assert container["ports"] == [{"name": "http", "containerPort": 8000, "protocol": "TCP"}]
-    assert "volumes" not in pod
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["volumes"] == [{"name": "reports", "emptyDir": {}}, {"name": "tmp", "emptyDir": {}}]
+    assert container["volumeMounts"] == [
+        {"name": "reports", "mountPath": "/app/reports"},
+        {"name": "tmp", "mountPath": "/tmp"},
+    ]
     assert "imagePullSecrets" not in pod
 
 
@@ -160,7 +165,7 @@ def test_deployment_security_context() -> None:
     assert _container()["securityContext"] == {
         "allowPrivilegeEscalation": False,
         "capabilities": {"drop": ["ALL"]},
-        "readOnlyRootFilesystem": False,
+        "readOnlyRootFilesystem": True,
     }
 
 

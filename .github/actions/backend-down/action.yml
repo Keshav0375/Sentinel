@@ -2,8 +2,8 @@
 # Source: architecture backend.md section 8.5 as amended by decisions.md 2026-10-24 (phase 7).
 # Pod-level scale-down only: delete the Service (releases the LoadBalancer IP) and scale the Deployment to 0.
 # The shared cluster keeps running; it is never powered off here. Skipped entirely when keep-warm is true.
-# Trusted ref: the Service manifest is read from $GITHUB_WORKSPACE/azure/k8s, i.e. the caller's checkout, so
-# the caller must run actions/checkout on a trusted ref first. Caller: azure/login (resource tenant) first.
+# The Service is deleted by name; no manifest is read from the caller's workspace.
+# Caller: azure/login (resource tenant) first.
 name: Sentinel backend-down
 description: >-
   Delete the backend Service and scale the Deployment to 0 unless keep-warm is true. The shared cluster
@@ -79,10 +79,8 @@ runs:
         set -euo pipefail
         die() { echo "::error::backend-down: $1"; exit 1; }
         [ -n "${NAMESPACE:-}" ] || die "input for NAMESPACE is empty"
-        k8s="${GITHUB_WORKSPACE:?}/azure/k8s"
-        [ -f "$k8s/service.yaml" ] || die "$k8s/service.yaml not found: run actions/checkout on a trusted ref first"
         # The Service delete releases the LB IP; the shared cluster keeps running (decisions 2026-10-24).
-        kubectl -n "$NAMESPACE" delete -f "$k8s/service.yaml" --ignore-not-found
+        kubectl -n "$NAMESPACE" delete service/sentinel-backend --ignore-not-found
         if kubectl -n "$NAMESPACE" get deployment/sentinel-backend -o name >/dev/null 2>&1; then
           kubectl -n "$NAMESPACE" scale deployment/sentinel-backend --replicas=0
         else

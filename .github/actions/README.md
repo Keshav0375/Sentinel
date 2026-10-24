@@ -6,22 +6,28 @@ action to pin.
 
 ## Actions
 
-- `backend-up` - start the cluster if stopped, apply `azure/k8s`, scale to 1, wait for `/health` and `/ready`.
+- `backend-up` - validate every value, then apply the `azure/k8s` manifests bundled with the action; wait
+  for an in-flight start/stop/update (<= 20 min), start the cluster if stopped, scale to 1, wait for `/health`
+  and `/ready`.
   - Inputs: `namespace` (default `sentinel-dev`), `resource-group`, `cluster-name`, `image-tag`,
     `acr-login-server`, `api-tenant-id`, `api-audience`, `key-vault-url`, `pg-host`, `pg-database`, `pg-user`.
   - Outputs: `backend-url`.
-- `backend-down` - delete the Service and scale the Deployment to 0 unless `keep-warm` is `true`.
+- `backend-down` - delete Service `sentinel-backend` by name and scale the Deployment to 0 unless `keep-warm` is `true`.
   - Inputs: `namespace` (default `sentinel-dev`), `resource-group`, `cluster-name`, `keep-warm` (default `false`).
   - Outputs: none.
 - `get-kv-secrets` - read the named secrets from Key Vault; unrequested outputs stay empty.
-  - Inputs: `vault-name`, `names` (comma, space or newline separated).
+  - Inputs: `vault-uri` (`https://<vault>.vault.azure.net/`, the infra KV URI; the vault name is derived from
+    it), `names` (comma, space or newline separated).
   - Outputs: `datadog-api-key`, `datadog-app-key`, `langfuse-public-key`, `langfuse-secret-key`,
     `langfuse-base-url`, `teams-webhook-url`.
 - `get-db-token` - mint a short-lived Entra token for Azure PostgreSQL.
   - Inputs: none. Outputs: `pg-token`.
 - `get-backend-token` - mint an Entra bearer token for the Sentinel API.
   - Inputs: `audience` (one value), `tenant` (optional). Outputs: `bearer`.
-- `notify-teams` - post an Adaptive Card to a Teams webhook.
+- `notify-teams` - post an Adaptive Card to a Teams webhook. Title and body render as plain text (Adaptive Card
+  `TextRun`, and `](` is broken with a zero-width space), so caller-supplied text such as
+  `[Approve](https://...)` cannot pose as a link; a bare URL stays visible verbatim. Never pass untrusted text
+  expecting formatting.
   - Inputs: `title`, `body`, `webhook-url`, `severity` (`info`, `warning`, `critical`; default `info`).
   - Outputs: none.
 - `psql-exec` - run one row-returning statement; `result` is a one-line JSON array.
@@ -57,9 +63,12 @@ directory. The revert PR on `Sentinel-deployment` remains the human gate.
 
 ## Trusted ref
 
-`backend-up` and `backend-down` apply and delete manifests from `$GITHUB_WORKSPACE/azure/k8s`, so the job must
-run `actions/checkout` on a trusted ref (`main`, or the pushed commit), never a `pull_request` head from a fork,
-and must run in the `sentinel-dev` environment.
+`backend-up` renders and applies the manifests bundled with the action itself
+(`$GITHUB_ACTION_PATH/../../../azure/k8s`), so the commit pinned in `uses:` is the trusted ref: pin a reviewed
+`main` commit. The caller's workspace (`$GITHUB_WORKSPACE`) is never read, so a checked-out fork head cannot
+change what is applied; `backend-down` deletes the Service by name. Every rendered value is validated first
+(no `"`, `\`, `$` or line break, then the per-field pattern in `azure/k8s/placeholders.txt`); a mismatch
+fails before any `kubectl` call. Run in the `sentinel-dev` environment.
 
 ## Login
 

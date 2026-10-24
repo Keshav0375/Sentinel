@@ -288,7 +288,7 @@ def fake_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     loads: list[str] = []
 
     class _FakeSentenceTransformer(_FakeModel):
-        def __init__(self, model_name: str) -> None:
+        def __init__(self, model_name: str, revision: str | None = None) -> None:
             super().__init__()
             time.sleep(0.05)  # widen the race window for the concurrency test
             loads.append(model_name)
@@ -321,6 +321,26 @@ def test_from_model_name_caches_per_model_name(fake_sentence_transformers: list[
     EmbeddingClient.from_model_name("model-b")
     EmbeddingClient.from_model_name("model-a")
     assert fake_sentence_transformers == ["model-a", "model-b"]
+
+
+def test_from_model_name_pins_the_baked_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    class _RecordingSentenceTransformer(_FakeModel):
+        def __init__(self, model_name: str, revision: str | None = None) -> None:
+            super().__init__()
+            calls.append((model_name, revision))
+
+    module = types.ModuleType("sentence_transformers")
+    module.SentenceTransformer = _RecordingSentenceTransformer  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+    monkeypatch.setattr(embeddings, "_MODEL_CACHE", {})
+    EmbeddingClient.from_model_name("all-MiniLM-L6-v2")
+    EmbeddingClient.from_model_name("other-model")
+    assert calls == [
+        ("all-MiniLM-L6-v2", "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"),
+        ("other-model", None),
+    ]
 
 
 def test_from_model_name_concurrent_first_calls_load_once(

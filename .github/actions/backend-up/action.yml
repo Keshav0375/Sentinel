@@ -1,13 +1,13 @@
 # Bring the Sentinel backend up on the shared AKS cluster (backend task 7.3).
 # Source: architecture backend.md section 8.5 as amended by decisions.md 2026-10-24 (phase 7).
-# Starts the cluster only if it is stopped, renders azure/k8s with the placeholders.txt recipe, applies it
-# into the namespace, scales to 1 and waits for /health and /ready. It never stops the cluster.
-# Trusted ref: manifests are read ONLY from $GITHUB_WORKSPACE/azure/k8s, i.e. the caller's checkout, so the
-# caller must run actions/checkout on a trusted ref first. Caller: azure/login (resource tenant) first.
+# Starts the cluster only if it is stopped, renders the azure/k8s manifests bundled with this action at its
+# pinned commit ($GITHUB_ACTION_PATH/../../../azure/k8s) after validating every value, applies them into the
+# namespace, scales to 1 and waits for /health and /ready. It never stops the cluster.
+# The caller's workspace is never read. Caller: azure/login (resource tenant) first.
 name: Sentinel backend-up
 description: >-
-  Start the AKS cluster if needed, apply azure/k8s from the caller's checkout and wait until the backend
-  answers /health and /ready.
+  Start the AKS cluster if needed, apply the azure/k8s manifests bundled with the action and wait until the
+  backend answers /health and /ready.
 
 inputs:
   namespace:
@@ -67,15 +67,35 @@ runs:
         done
         # az cannot mint new tokens once the GitHub OIDC assertion expires, and a cluster start can outlast it.
         az account get-access-token --resource 6dae42f8-4368-4678-94ff-3960e28e3630 -o none
-        state="$(az aks show --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" \
-          --query powerState.code -o tsv)"
-        case "$state" in
+        # Wait out an in-flight start, stop or update (80 x 15 s = 20 min). A failed az call is one attempt;
+        # five in a row is an error.
+        power=""; prov=""; fails=0
+        for _ in $(seq 1 80); do
+          if out="$(az aks show --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" \
+            --query '[powerState.code, provisioningState]' -o tsv)"; then
+            fails=0
+            IFS=$'\t' read -r power prov <<< "$out" || true
+          else
+            fails=$((fails + 1))
+            [ "$fails" -lt 5 ] || die "az aks show failed 5 times in a row"
+            prov=""
+          fi
+          case "$prov" in
+            Succeeded) break;;
+            ''|Creating|Updating|Upgrading|Scaling|Starting|Stopping|Migrating) ;;
+            *) die "cluster provisioning state is '$prov'";;
+          esac
+          echo "::notice::backend-up: cluster provisioning state is '${prov:-unknown}'; waiting"
+          sleep 15
+        done
+        [ "$prov" = "Succeeded" ] || die "cluster provisioning did not settle within 20 min (last '${prov:-unknown}')"
+        case "$power" in
           Stopped)
             echo "::notice::backend-up: cluster $CLUSTER_NAME is stopped; starting it"
             az aks start --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" --only-show-errors
             ;;
           Running) ;;
-          *) die "cluster power state is '$state'";;
+          *) die "unexpected cluster power state '${power:-none}'";;
         esac
     - id: credentials
       name: Get cluster credentials (kubelogin)
@@ -113,11 +133,49 @@ runs:
         set -euo pipefail
         die() { echo "::error::backend-up: $1"; exit 1; }
         [ -n "${NAMESPACE:-}" ] || die "input for NAMESPACE is empty"
-        k8s="${GITHUB_WORKSPACE:?}/azure/k8s"
-        [ -f "$k8s/placeholders.txt" ] ||
-          die "$k8s/placeholders.txt not found: run actions/checkout on a trusted ref first"
+        # The manifests bundled with this action at its pinned commit; the caller's workspace is never read.
+        k8s="$(cd "${GITHUB_ACTION_PATH:?}/../../../azure/k8s" 2>/dev/null && pwd)" ||
+          die "bundled manifests not found beside the action (azure/k8s)"
+        [ -f "$k8s/placeholders.txt" ] || die "bundled azure/k8s/placeholders.txt not found"
         command -v envsubst >/dev/null 2>&1 || die "envsubst not on PATH (install gettext-base)"
-        [[ "$IMAGE_TAG" =~ ^sha-[0-9a-f]{7}$ ]] || die "image-tag must be sha-<7 hex>"
+        guid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        uri_re='^api://[A-Za-z0-9][A-Za-z0-9._~/-]*$'
+        label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+        # Every check names the placeholder, never its value. Patterns: azure/k8s/placeholders.txt.
+        has_bad_chars() {
+          case "$1" in
+            *\"*|*\\*|*\$*|*$'\n'*|*$'\r'*) return 0;;
+          esac
+          return 1
+        }
+        check_audience() {
+          local item guid=""
+          case "$1" in ,*|*,|*,,*) die "SENTINEL_API_AUDIENCE has an empty item";; esac
+          IFS=',' read -r -a items <<< "$1"
+          for item in "${items[@]}"; do
+            if [[ "$item" =~ $guid_re ]]; then
+              guid=1
+            elif ! [[ "$item" =~ $uri_re ]]; then
+              die "SENTINEL_API_AUDIENCE item is neither a lowercase GUID nor an api:// URI"
+            fi
+          done
+          [ -n "$guid" ] || die "SENTINEL_API_AUDIENCE must include the API app client-id GUID"
+        }
+        check_value() {
+          local re
+          case "$1" in
+            ACR_LOGIN_SERVER) re="^${label}\.azurecr\.io$";;
+            IMAGE_TAG) re='^sha-[0-9a-f]{7}$';;
+            SENTINEL_API_TENANT_ID) re="$guid_re";;
+            SENTINEL_API_AUDIENCE) check_audience "$2"; return 0;;
+            KEY_VAULT_URL) re='^https://[A-Za-z][A-Za-z0-9-]{1,22}[A-Za-z0-9]\.vault\.azure\.net/?$';;
+            PGHOST) re="^${label}(\.${label})+$";;
+            PGDATABASE) re='^[A-Za-z_][A-Za-z0-9_]{0,62}$';;
+            PGUSER) re='^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$';;
+            *) die "no validation rule for placeholder $1";;
+          esac
+          [[ "$2" =~ $re ]] || die "$1 does not match its pattern (see azure/k8s/placeholders.txt)"
+        }
         names=()
         while IFS= read -r line || [ -n "$line" ]; do
           case "$line" in ''|'#'*) continue;; esac
@@ -126,6 +184,8 @@ runs:
         vars=""
         for n in ${names[@]+"${names[@]}"}; do
           [ -n "${!n:-}" ] || die "no value for placeholder $n"
+          if has_bad_chars "${!n}"; then die "$n contains a quote, backslash, dollar sign or line break"; fi
+          check_value "$n" "${!n}"
           vars="$vars \${$n}"
         done
         out="$(mktemp -d "${RUNNER_TEMP:-/tmp}/sentinel-k8s.XXXXXX")"
@@ -149,7 +209,9 @@ runs:
         die() { echo "::error::backend-up: $1"; exit 1; }
         ip=""
         for _ in $(seq 1 60); do
-          ip="$(kubectl -n "$NAMESPACE" get svc sentinel-backend -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+          # A transient API error is one failed attempt (60 x 5 s), not a step failure.
+          ip="$(kubectl -n "$NAMESPACE" get svc sentinel-backend \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" || ip=""
           [ -n "$ip" ] && break
           sleep 5
         done

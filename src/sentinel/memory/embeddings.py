@@ -19,18 +19,26 @@ from typing import Any
 _MODEL_CACHE: dict[str, Any] = {}
 _MODEL_LOCK = threading.Lock()
 
+# Hugging Face Hub commit of each model the image bakes (Dockerfile builder stage). The pod runs
+# with HF_HUB_OFFLINE=1 and a cache loaded by commit (no refs/main), so the runtime asks for the
+# same commit.
+PINNED_REVISIONS: dict[str, str] = {
+    "all-MiniLM-L6-v2": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+}
+
 
 def _load_model(model_name: str) -> Any:
     """Return the process-wide SentenceTransformer for *model_name*, loading it once.
 
     The lock is held across the load so concurrent first calls never load it twice.
+    A pinned model id loads its PINNED_REVISIONS commit; any other id loads the default revision.
     """
     with _MODEL_LOCK:
         model: Any = _MODEL_CACHE.get(model_name)
         if model is None:
             from sentence_transformers import SentenceTransformer  # lazy — avoids torch at import
 
-            model = SentenceTransformer(model_name)
+            model = SentenceTransformer(model_name, revision=PINNED_REVISIONS.get(model_name))
             _MODEL_CACHE[model_name] = model
         return model
 

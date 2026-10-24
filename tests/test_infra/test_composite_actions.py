@@ -69,7 +69,7 @@ EXPECTED_INPUTS: dict[str, dict[str, tuple[bool, str | None]]] = {
         "tenant": (False, ""),
     },
     "get-kv-secrets": {
-        "vault-name": (True, None),
+        "vault-uri": (True, None),
         "names": (True, None),
     },
     "notify-teams": {
@@ -153,6 +153,20 @@ MANIFEST_FILES = {"configmap.yaml", "deployment.yaml", "networkpolicy.yaml", "se
 
 # Stub bodies (run after the stub has logged "<name> <args>" to $STUB_LOG).
 AZ_ECHO_POWER = 'case "$1 $2" in "aks show") echo "$STUB_POWER";; esac; exit 0'
+# Answers the n-th `az aks show` with the n-th line of $STUB_SHOW_SEQ (the last line repeats;
+# FAIL = exit 1).
+AZ_SHOW_SEQ = r"""
+case "$1 $2" in
+  "aks show")
+    n=$(grep -c '^az aks show ' "$STUB_LOG")
+    line=$(sed -n "${n}p" "$STUB_SHOW_SEQ")
+    [ -n "$line" ] || line=$(tail -n 1 "$STUB_SHOW_SEQ")
+    if [ "$line" = FAIL ]; then echo "transient ARM error" >&2; exit 1; fi
+    printf '%s\n' "$line"
+    ;;
+esac
+exit 0
+"""
 KUBECTL_BODY = r"""
 case "$*" in
   *" apply "*)
@@ -243,7 +257,8 @@ def _run_step(
         "GITHUB_OUTPUT": str(github_output),
         "GITHUB_PATH": str(tmp_path / "github-path"),
         "RUNNER_TEMP": str(runner_temp),
-        "GITHUB_WORKSPACE": str(REPO_ROOT),
+        "GITHUB_ACTION_PATH": str(ACTIONS_DIR / action),
+        "GITHUB_WORKSPACE": str(tmp_path / "workspace"),
         "STUB_LOG": str(stub_log),
         **resolved,
         **(extra_env or {}),
@@ -263,6 +278,17 @@ def _run_step(
             outputs[key] = value
     log = stub_log.read_text().splitlines() if stub_log.exists() else []
     return StepRun(proc.returncode, proc.stdout + proc.stderr, outputs, log)
+
+
+def _show_seq(tmp_path: Path, *lines: str) -> dict[str, str]:
+    """Write the `az aks show` answers (one per attempt); return the stub's env."""
+    path = tmp_path / "show-seq"
+    path.write_text("".join(f"{line}\n" for line in lines))
+    return {"STUB_SHOW_SEQ": str(path)}
+
+
+def _shows(run: StepRun) -> list[str]:
+    return [line for line in run.log if line.startswith("az aks show ")]
 
 
 def _need(tool: str) -> None:
@@ -396,8 +422,14 @@ def test_backend_down_honours_keep_warm() -> None:
         if step["id"] != "keep-warm":
             assert "inputs.keep-warm != 'true'" in step["if"], step["id"]
     teardown = _script(_step("backend-down", "teardown"))
-    assert 'delete -f "$k8s/service.yaml" --ignore-not-found' in teardown
+    assert "delete service/sentinel-backend --ignore-not-found" in teardown
     assert "--replicas=0" in teardown
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_no_action_reads_the_workspace(action: str) -> None:
+    for step in _steps(action):
+        assert "GITHUB_WORKSPACE" not in _script(step), (action, step["id"])
 
 
 def test_readme_documents_pinning_and_trust() -> None:
@@ -405,6 +437,8 @@ def test_readme_documents_pinning_and_trust() -> None:
     assert re.search(r"uses: Keshav0375/Sentinel/\.github/actions/[a-z-]+@[0-9a-f]{40}", readme)
     assert re.search(r"uses: \S+@main", readme) is None
     assert "trusted ref" in readme
+    assert "GITHUB_ACTION_PATH" in readme
+    assert "vault-uri" in readme
     assert "identity tenant" in readme
     for action in ACTIONS:
         assert action in readme, action
@@ -498,7 +532,10 @@ def test_get_kv_secrets_fetches_masks_outputs(tmp_path: Path) -> None:
     run = _run_step(
         "get-kv-secrets",
         "fetch",
-        {"vault-name": "kv-test", "names": "datadog-api-key, teams-webhook-url"},
+        {
+            "vault-uri": "https://kv-test.vault.azure.net/",
+            "names": "datadog-api-key, teams-webhook-url",
+        },
         tmp_path,
         {"az": KV_AZ},
     )
@@ -519,7 +556,7 @@ def test_get_kv_secrets_rejects_undeclared_name(tmp_path: Path) -> None:
     run = _run_step(
         "get-kv-secrets",
         "fetch",
-        {"vault-name": "kv-test", "names": "teams-webhook-url github-pat"},
+        {"vault-uri": "https://kv-test.vault.azure.net/", "names": "teams-webhook-url github-pat"},
         tmp_path,
         {"az": KV_AZ},
     )
@@ -533,11 +570,48 @@ def test_get_kv_secrets_rejects_empty_secret(tmp_path: Path) -> None:
     run = _run_step(
         "get-kv-secrets",
         "fetch",
-        {"vault-name": "kv-test", "names": "datadog-api-key"},
+        {"vault-uri": "https://kv-test.vault.azure.net/", "names": "datadog-api-key"},
         tmp_path,
         {"az": "exit 0"},
     )
     assert run.returncode != 0
+    assert run.outputs == {}
+
+
+def test_get_kv_secrets_accepts_uri_without_slash(tmp_path: Path) -> None:
+    run = _run_step(
+        "get-kv-secrets",
+        "fetch",
+        {"vault-uri": "https://kv-test.vault.azure.net", "names": "datadog-api-key"},
+        tmp_path,
+        {"az": KV_AZ},
+    )
+    assert run.returncode == 0, run.stdout
+    assert any("--vault-name kv-test " in line for line in run.log)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "kv-test",
+        "http://kv-test.vault.azure.net/",
+        "https://kv-test.vault.azure.net.evil.io/",
+        "https://kv-test.vault.azure.net/secrets/x",
+        "https://kv_test.vault.azure.net/",
+        "https://ab.vault.azure.net/",
+    ],
+)
+def test_get_kv_secrets_rejects_bad_vault_uri(tmp_path: Path, uri: str) -> None:
+    run = _run_step(
+        "get-kv-secrets",
+        "fetch",
+        {"vault-uri": uri, "names": "datadog-api-key"},
+        tmp_path,
+        {"az": KV_AZ},
+    )
+    assert run.returncode != 0
+    assert "::error::get-kv-secrets: vault-uri" in run.stdout
+    assert run.log == []
     assert run.outputs == {}
 
 
@@ -658,6 +732,13 @@ exit 0
 """
 
 
+def _card_texts(body: list[dict[str, Any]]) -> list[str]:
+    return [
+        b["text"] if b["type"] == "TextBlock" else "".join(i["text"] for i in b["inlines"])
+        for b in body
+    ]
+
+
 def test_notify_teams_posts_adaptive_card(tmp_path: Path) -> None:
     _need("jq")
     run = _run_step(
@@ -678,10 +759,44 @@ def test_notify_teams_posts_adaptive_card(tmp_path: Path) -> None:
     attachment = payload["attachments"][0]
     assert attachment["contentType"] == "application/vnd.microsoft.card.adaptive"
     body = attachment["content"]["body"]
-    assert [b["text"] for b in body] == ["Rollback PR opened", "Severity: warning", "line one"]
-    assert body[0]["color"] == "Warning"
+    assert _card_texts(body) == ["Rollback PR opened", "Severity: warning", "line one"]
+    assert body[0]["type"] == "RichTextBlock"
+    assert body[0]["inlines"][0] == {
+        "type": "TextRun",
+        "text": "Rollback PR opened",
+        "weight": "Bolder",
+        "size": "Medium",
+        "color": "Warning",
+    }
     assert run.log[0].endswith(" https://example.invalid/hook")
     assert "::add-mask::https://example.invalid/hook" in run.stdout
+
+
+def test_notify_teams_neutralises_markdown_links(tmp_path: Path) -> None:
+    _need("jq")
+    run = _run_step(
+        "notify-teams",
+        "post",
+        {
+            "title": "[Open](https://evil.example/t)",
+            "body": "Click [Approve](https://evil.example/x) now",
+            "webhook-url": "https://example.invalid/hook",
+        },
+        tmp_path,
+        {"curl": CURL_BODY},
+    )
+    assert run.returncode == 0, run.stdout
+    payload = json.loads(Path(f"{tmp_path / 'stub.log'}.json").read_text())
+    body = payload["attachments"][0]["content"]["body"]
+    assert body[0]["inlines"][0]["text"] == "[Open]\u200b(https://evil.example/t)"
+    assert body[2] == {
+        "type": "RichTextBlock",
+        "inlines": [
+            {"type": "TextRun", "text": "Click [Approve]\u200b(https://evil.example/x) now"}
+        ],
+    }
+    texts = [i["text"] for b in (body[0], body[2]) for i in b["inlines"]]
+    assert all("](" not in t for t in texts)
 
 
 def test_notify_teams_rejects_unknown_severity(tmp_path: Path) -> None:
@@ -698,7 +813,7 @@ def test_notify_teams_rejects_unknown_severity(tmp_path: Path) -> None:
 
 def _up_stubs() -> dict[str, str]:
     return {
-        "az": AZ_ECHO_POWER,
+        "az": AZ_SHOW_SEQ,
         "kubelogin": "exit 0",
         "kubectl": KUBECTL_BODY,
         "curl": "exit 0",
@@ -715,7 +830,7 @@ def test_backend_up_dry_run(tmp_path: Path, power: str) -> None:
             SAMPLE_UP_INPUTS,
             tmp_path,
             _up_stubs(),
-            {"STUB_POWER": power},
+            _show_seq(tmp_path, f"{power}\tSucceeded"),
         )
         for step_id in ("cluster", "credentials", "apply", "url")
     }
@@ -757,30 +872,191 @@ def test_backend_up_fails_without_lb_ip(tmp_path: Path) -> None:
     assert run.outputs == {}
 
 
-def test_backend_up_rejects_bad_image_tag(tmp_path: Path) -> None:
-    run = _run_step(
-        "backend-up",
-        "apply",
-        {**SAMPLE_UP_INPUTS, "image-tag": "latest"},
-        tmp_path,
-        _up_stubs(),
-    )
+def _apply(
+    tmp_path: Path, inputs: dict[str, str], extra_env: dict[str, str] | None = None
+) -> StepRun:
+    return _run_step("backend-up", "apply", inputs, tmp_path, _up_stubs(), extra_env)
+
+
+def test_backend_up_reads_bundled_manifests(tmp_path: Path) -> None:
+    _need("envsubst")
+    decoy = tmp_path / "ws" / "azure" / "k8s"
+    decoy.mkdir(parents=True)
+    shutil.copy(K8S_DIR / "placeholders.txt", decoy / "placeholders.txt")
+    (decoy / "evil.yaml").write_text("kind: Secret\n")
+    run = _apply(tmp_path, SAMPLE_UP_INPUTS, {"GITHUB_WORKSPACE": str(tmp_path / "ws")})
+    assert run.returncode == 0, run.stdout
+    rendered = Path(f"{tmp_path / 'stub.log'}.rendered")
+    assert {p.name for p in rendered.iterdir()} == MANIFEST_FILES
+    assert '"${GITHUB_ACTION_PATH:?}/../../../azure/k8s"' in _script(_step("backend-up", "apply"))
+    assert (ACTIONS_DIR / "backend-up" / ".." / ".." / ".." / "azure" / "k8s").resolve() == K8S_DIR
+
+
+def test_backend_up_fails_without_bundled_manifests(tmp_path: Path) -> None:
+    nowhere = tmp_path / "a" / "b" / "c"
+    nowhere.mkdir(parents=True)
+    run = _apply(tmp_path, SAMPLE_UP_INPUTS, {"GITHUB_ACTION_PATH": str(nowhere)})
     assert run.returncode != 0
+    assert "bundled manifests" in run.stdout
+    assert run.log == []
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "placeholder"),
+    [
+        ("acr-login-server", "registry.example.com", "ACR_LOGIN_SERVER"),
+        ("acr-login-server", "https://sentinelacrtest.azurecr.io", "ACR_LOGIN_SERVER"),
+        ("pg-host", "pg_host.postgres.database.azure.com", "PGHOST"),
+        ("pg-host", "localhost", "PGHOST"),
+        ("pg-host", "pg.example.com\n  evil: x", "PGHOST"),
+        ("key-vault-url", "http://kv-sentinel-test.vault.azure.net/", "KEY_VAULT_URL"),
+        ("key-vault-url", "https://kv-sentinel-test.vault.azure.net.evil.io/", "KEY_VAULT_URL"),
+        ("api-tenant-id", "not-a-guid", "SENTINEL_API_TENANT_ID"),
+        ("api-tenant-id", "00000000-0000-0000-0000-00000000000A", "SENTINEL_API_TENANT_ID"),
+        (
+            "api-audience",
+            "api://00000000-0000-0000-0000-000000000001/sentinel-backend-sentinel-dev",
+            "SENTINEL_API_AUDIENCE",
+        ),
+        ("api-audience", "00000000-0000-0000-0000-000000000002,", "SENTINEL_API_AUDIENCE"),
+        (
+            "api-audience",
+            "00000000-0000-0000-0000-000000000002, api://x/y",
+            "SENTINEL_API_AUDIENCE",
+        ),
+        ("pg-database", "sentinel-dev", "PGDATABASE"),
+        ("pg-database", "sentinel$HOME", "PGDATABASE"),
+        ("pg-user", "id backend", "PGUSER"),
+        ("pg-user", "id\\backend", "PGUSER"),
+        ("image-tag", 'sha-0730682"', "IMAGE_TAG"),
+        ("image-tag", "latest", "IMAGE_TAG"),
+    ],
+)
+def test_backend_up_rejects_bad_value(
+    tmp_path: Path, name: str, value: str, placeholder: str
+) -> None:
+    _need("envsubst")
+    run = _apply(tmp_path, {**SAMPLE_UP_INPUTS, name: value})
+    assert run.returncode != 0
+    assert f"::error::backend-up: {placeholder}" in run.stdout
     assert not any(" apply " in line for line in run.log)
+    assert not Path(f"{tmp_path / 'stub.log'}.rendered").exists()
 
 
-def test_backend_up_requires_checkout(tmp_path: Path) -> None:
-    run = _run_step(
+def test_backend_up_error_hides_value(tmp_path: Path) -> None:
+    _need("envsubst")
+    run = _apply(tmp_path, {**SAMPLE_UP_INPUTS, "pg-database": 'sentinel"leak'})
+    assert run.returncode != 0
+    assert 'sentinel"leak' not in run.stdout
+
+
+def test_backend_up_accepts_value_variants(tmp_path: Path) -> None:
+    _need("envsubst")
+    inputs = {
+        **SAMPLE_UP_INPUTS,
+        "key-vault-url": "https://kv-sentinel-test.vault.azure.net",
+        "api-audience": "00000000-0000-0000-0000-000000000002",
+    }
+    run = _apply(tmp_path, inputs)
+    assert run.returncode == 0, run.stdout
+    configmap = (Path(f"{tmp_path / 'stub.log'}.rendered") / "configmap.yaml").read_text()
+    assert "https://kv-sentinel-test.vault.azure.net" in configmap
+    assert "00000000-0000-0000-0000-000000000002" in configmap
+
+
+def _cluster(tmp_path: Path, *lines: str) -> StepRun:
+    return _run_step(
         "backend-up",
-        "apply",
+        "cluster",
         SAMPLE_UP_INPUTS,
         tmp_path,
         _up_stubs(),
-        {"GITHUB_WORKSPACE": str(tmp_path)},
+        _show_seq(tmp_path, *lines),
     )
+
+
+def test_backend_up_waits_for_in_flight_start(tmp_path: Path) -> None:
+    run = _cluster(tmp_path, "Running\tStarting", "Running\tStarting", "Running\tSucceeded")
+    assert run.returncode == 0, run.stdout
+    assert len(_shows(run)) == 3
+    assert not any(line.startswith("az aks start") for line in run.log)
+    assert "waiting" in run.stdout
+
+
+def test_backend_up_waits_for_stop_then_starts(tmp_path: Path) -> None:
+    run = _cluster(tmp_path, "Running\tStopping", "Stopped\tSucceeded")
+    assert run.returncode == 0, run.stdout
+    assert len(_shows(run)) == 2
+    starts = [line for line in run.log if line.startswith("az aks start")]
+    assert len(starts) == 1
+    assert starts[0].startswith("az aks start --resource-group rg-test --name aks-test")
+
+
+def test_backend_up_retries_transient_az_error(tmp_path: Path) -> None:
+    run = _cluster(tmp_path, "FAIL", "Running\tSucceeded")
+    assert run.returncode == 0, run.stdout
+    assert len(_shows(run)) == 2
+
+
+def test_backend_up_dies_after_repeated_az_errors(tmp_path: Path) -> None:
+    run = _cluster(tmp_path, "FAIL")
     assert run.returncode != 0
-    assert "checkout" in run.stdout
-    assert run.log == []
+    assert len(_shows(run)) == 5
+    assert "5 times" in run.stdout
+
+
+def test_backend_up_gives_up_on_unsettled_cluster(tmp_path: Path) -> None:
+    run = _cluster(tmp_path, "Running\tUpdating")
+    assert run.returncode != 0
+    assert len(_shows(run)) == 80
+    assert "20 min" in run.stdout
+
+
+@pytest.mark.parametrize("state", ["Failed", "Canceled", "Deleting"])
+def test_backend_up_dies_on_bad_provisioning(tmp_path: Path, state: str) -> None:
+    run = _cluster(tmp_path, f"Running\t{state}")
+    assert run.returncode != 0
+    assert len(_shows(run)) == 1
+    assert state in run.stdout
+    assert not any(line.startswith("az aks start") for line in run.log)
+
+
+def test_backend_up_rejects_unknown_power_state(tmp_path: Path) -> None:
+    run = _cluster(tmp_path, "Deallocated\tSucceeded")
+    assert run.returncode != 0
+    assert "power state" in run.stdout
+    assert not any(line.startswith("az aks start") for line in run.log)
+
+
+KUBECTL_FLAKY_SVC = r"""
+case "$*" in
+  *" get svc "*)
+    n=$(grep -c ' get svc ' "$STUB_LOG")
+    if [ "$n" -le 2 ]; then echo boom >&2; exit 1; fi
+    printf '10.0.0.7'
+    ;;
+esac
+exit 0
+"""
+
+
+def test_backend_up_lb_poll_survives_transient_kubectl_error(tmp_path: Path) -> None:
+    stubs = _up_stubs()
+    stubs["kubectl"] = KUBECTL_FLAKY_SVC
+    run = _run_step("backend-up", "url", SAMPLE_UP_INPUTS, tmp_path, stubs)
+    assert run.returncode == 0, run.stdout
+    assert run.outputs == {"backend-url": "http://10.0.0.7"}
+    assert len([line for line in run.log if " get svc " in line]) == 3
+
+
+def test_backend_up_lb_poll_gives_up_after_kubectl_errors(tmp_path: Path) -> None:
+    stubs = _up_stubs()
+    stubs["kubectl"] = "exit 1"
+    run = _run_step("backend-up", "url", SAMPLE_UP_INPUTS, tmp_path, stubs)
+    assert run.returncode != 0
+    assert "LoadBalancer" in run.stdout
+    assert len([line for line in run.log if " get svc " in line]) == 60
+    assert run.outputs == {}
 
 
 DOWN_INPUTS = {"resource-group": "rg-test", "cluster-name": "aks-test"}
@@ -795,10 +1071,7 @@ def test_backend_down_running_cluster(tmp_path: Path) -> None:
     teardown = _run_step("backend-down", "teardown", DOWN_INPUTS, tmp_path, stubs, env)
     assert teardown.returncode == 0, teardown.stdout
     joined = "\n".join(teardown.log)
-    assert (
-        f"kubectl -n sentinel-dev delete -f {REPO_ROOT}/azure/k8s/service.yaml --ignore-not-found"
-        in joined
-    )
+    assert "kubectl -n sentinel-dev delete service/sentinel-backend --ignore-not-found" in joined
     assert "kubectl -n sentinel-dev scale deployment/sentinel-backend --replicas=0" in joined
     assert "aks start" not in joined
 

@@ -2,21 +2,22 @@
 # One name per line; lines starting with # are comments. The ONLY place
 # the list lives: tests/test_infra/test_k8s_manifests.py checks it.
 #
-# Render with exactly these names, then apply namespaced:
+# backend-up renders its own bundled copy and first validates every value (no ", \, $ or line break;
+# then the pattern below). Render with exactly these names, then apply namespaced:
 #   VARS=$(grep -v '^#' azure/k8s/placeholders.txt | sed 's/.*/${&}/' | paste -sd' ' -)
 #   for f in azure/k8s/*.yaml; do envsubst "$VARS" < "$f" > "$OUT/${f##*/}"; done
 #   kubectl -n "$NAMESPACE" apply -f "$OUT"
 # The namespace is not a placeholder: every kubectl call passes -n
 # (infra-owned, sentinel-dev).
 #
-# ACR_LOGIN_SERVER        infra output: ACR login server, no scheme
-# IMAGE_TAG               sha-<7-char commit>
-# SENTINEL_API_TENANT_ID  identity tenant of the API app registration
-# SENTINEL_API_AUDIENCE   comma list: API app client-id GUID[,identifier URI]
-# KEY_VAULT_URL           infra output: Key Vault URI
-# PGHOST                  infra output: Postgres server FQDN
-# PGDATABASE              infra output: database name
-# PGUSER                  infra output: Entra principal name of the backend
+# ACR_LOGIN_SERVER        infra output, no scheme: <dns label>.azurecr.io (lowercase)
+# IMAGE_TAG               sha-<7 lowercase hex>
+# SENTINEL_API_TENANT_ID  identity tenant of the API app registration: lowercase GUID
+# SENTINEL_API_AUDIENCE   comma list, no spaces: API app client-id GUID (required)[,api://… URI]
+# KEY_VAULT_URL           infra output: https://<vault>.vault.azure.net/ (trailing / optional)
+# PGHOST                  infra output: lowercase FQDN (two or more DNS labels)
+# PGDATABASE              infra output: identifier [A-Za-z_][A-Za-z0-9_]*, max 63
+# PGUSER                  infra output: backend UAMI name [A-Za-z0-9][A-Za-z0-9_-]*, max 63
 ACR_LOGIN_SERVER
 IMAGE_TAG
 SENTINEL_API_TENANT_ID

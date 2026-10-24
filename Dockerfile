@@ -1,8 +1,11 @@
 # Sentinel backend image (backend.md §7; decision 2026-10-24). The AKS node is arm64:
 #   docker buildx build --platform linux/arm64 -t sentinel-backend:<tag> --load .
 
+# Base pinned to the linux/arm64/v8 manifest of python:3.12-slim (3.12.15-slim-trixie; index
+# sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704), resolved 2026-10-24.
+# Refresh: docker buildx imagetools inspect python:3.12-slim (take the linux/arm64 entry).
 # ── Stage 1: builder: the poetry.lock main set, installed into /opt/venv ──────
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:6c6ae3622772575c3ac02ecb2b02a06d05f19e1713a0cbff476ef37bca79e90f AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -19,12 +22,13 @@ COPY scripts/install_locked.py scripts/
 RUN /opt/venv/bin/python scripts/install_locked.py --main-only
 
 # Bake the embedding model into a fixed HF cache (same id as Settings.sentinel_embedding_model,
-# loaded the same way as memory/embeddings.py) so the pod never reaches huggingface.co.
+# pinned to the Hub commit in sentinel.memory.embeddings.PINNED_REVISIONS; tests/test_infra/test_dockerfile.py
+# keeps them equal) so the pod never reaches huggingface.co. Loaded by commit, so the pod resolves it offline.
 ENV HF_HOME=/opt/hf
-RUN /opt/venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+RUN /opt/venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2', revision='1110a243fdf4706b3f48f1d95db1a4f5529b4d41')"
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:6c6ae3622772575c3ac02ecb2b02a06d05f19e1713a0cbff476ef37bca79e90f AS runtime
 
 # The app runs from src/ on PYTHONPATH and is not pip-installed: the poetry package
 # includes data/, which never enters the image.
@@ -49,7 +53,8 @@ WORKDIR /app
 COPY src/ src/
 COPY alembic/ alembic/
 COPY alembic.ini .
-# The app writes reports/ (trajectories, eval report) relative to the working directory.
+# The app writes reports/ relative to the working directory; in the pod it is an emptyDir
+# (read-only root filesystem).
 RUN mkdir reports && chown 10001:10001 reports
 
 USER 10001:10001

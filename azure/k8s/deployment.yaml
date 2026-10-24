@@ -23,6 +23,9 @@ spec:
     spec:
       # Infra-owned SA with the workload-identity client-id annotation.
       serviceAccountName: sentinel-backend
+      # The workload-identity webhook projects its own azure-identity-token volume (api://AzureADTokenExchange)
+      # and sets AZURE_FEDERATED_TOKEN_FILE; the default API token is not needed (the app never calls the K8s API).
+      automountServiceAccountToken: false
       # Worst-case shutdown is 37 s; uvicorn drains for 5 s first.
       terminationGracePeriodSeconds: 45
       securityContext:
@@ -31,6 +34,11 @@ spec:
         runAsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      volumes:
+        - name: reports
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: sentinel-backend
           image: "${ACR_LOGIN_SERVER}/sentinel-backend:${IMAGE_TAG}"
@@ -42,6 +50,11 @@ spec:
           envFrom:
             - configMapRef:
                 name: sentinel-config
+          volumeMounts:
+            - name: reports
+              mountPath: /app/reports
+            - name: tmp
+              mountPath: /tmp
           readinessProbe:
             httpGet:
               path: /ready
@@ -71,5 +84,5 @@ spec:
             capabilities:
               drop:
                 - ALL
-            # The app writes /app/reports on the root filesystem.
-            readOnlyRootFilesystem: false
+            # Writable paths are the two emptyDirs: /app/reports and /tmp.
+            readOnlyRootFilesystem: true
