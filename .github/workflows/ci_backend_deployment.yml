@@ -1,0 +1,634 @@
+# Post-merge deployment of the Sentinel backend (backend task 8.2).
+# Source: architecture backend.md section 9.2 as amended by decisions.md 2026-10-24 (phase 7 and phase 8).
+# Pushes to main / release-phase-2: quality checks, an immutable sha-<7> image in ACR, bring-up on the shared
+# AKS cluster, tests plus a live smoke incident, then promote (stable tag, ACR cleanup) or roll back (undo, Teams),
+# and always scale the backend down (unless SENTINEL_KEEP_WARM is true).
+# Void in 9.2: "Sync KV secrets to a K8s Secret" and "kubectl set image". Phase 7 has no K8s Secret and the
+# manifests carry ${IMAGE_TAG}; backend-up renders, applies and waits. deploy-to-aks then re-checks the live image.
+# Judge score: the live pipeline never runs the judge. incidents.eval_score is written only by the eval runner
+# (eval/judge.py, eval/runner.py), so the smoke asserts the key is present and notes whether it is null.
+name: "[sentinel] backend — deployment"
+
+on:
+  push:
+    branches: [main, release-phase-2]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - "Dockerfile"
+      - "azure/**"
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "scripts/**"
+
+# One deployment at a time: a second push waits for the first to finish and never cancels it mid-rollout.
+concurrency:
+  group: sentinel-backend
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Poetry exports poetry.lock for scripts/install_locked.py; pinned so the export is reproducible.
+  POETRY_VERSION: "2.5.1"
+  POETRY_PLUGIN_EXPORT_VERSION: "1.10.1"
+  NAMESPACE: sentinel-dev
+
+jobs:
+  run-quality:
+    name: Run Quality Checks
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - id: python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - id: pip-cache
+        name: Cache pip packages
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: pip-${{ runner.os }}-${{ runner.arch }}-${{ env.PYTHON_VERSION }}-
+
+      - id: poetry
+        name: Install Poetry + export plugin
+        run: |
+          set -euo pipefail
+          pipx install "poetry==${POETRY_VERSION}"
+          pipx inject poetry "poetry-plugin-export==${POETRY_PLUGIN_EXPORT_VERSION}"
+
+      # Exactly the poetry.lock set, hash checked, with the CPU-only torch wheel.
+      - id: install
+        name: Install locked dependencies (CPU-only torch)
+        run: |
+          set -euo pipefail
+          python scripts/install_locked.py
+
+      - id: ruff-check
+        name: Ruff lint
+        run: |
+          set -euo pipefail
+          ruff check src/ tests/
+
+      - id: ruff-format
+        name: Ruff format
+        run: |
+          set -euo pipefail
+          ruff format --check src/ tests/
+
+      - id: pyright
+        name: Pyright type check
+        run: |
+          set -euo pipefail
+          pyright src/
+
+  build-and-push:
+    name: Build and Push Image
+    needs: run-quality
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    environment: sentinel-dev
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image-tag: ${{ steps.tag.outputs.image-tag }}
+    env:
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+    steps:
+      - id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - id: tag
+        name: Compute the immutable image tag
+        run: |
+          set -euo pipefail
+          echo "image-tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - id: login
+        name: Azure login (resource tenant)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - id: acr-login
+        name: Log in to ACR
+        run: |
+          set -euo pipefail
+          die() { echo "::error::acr-login: $1"; exit 1; }
+          [ -n "${ACR_NAME:-}" ] || die "ACR_NAME is empty"
+          [ -n "${ACR_LOGIN_SERVER:-}" ] || die "ACR_LOGIN_SERVER is empty"
+          az acr login --name "$ACR_NAME"
+
+      - id: exists
+        name: Skip the build when the tag is already in ACR
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.image-tag }}
+        run: |
+          set -euo pipefail
+          if az acr repository show --name "$ACR_NAME" --image "sentinel-backend:$IMAGE_TAG" -o none 2>/dev/null; then
+            echo "::notice::$IMAGE_TAG is already in ACR; not rebuilt (tags are immutable)"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: build
+        name: Build the arm64 image
+        if: steps.exists.outputs.exists != 'true'
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.image-tag }}
+        run: |
+          set -euo pipefail
+          docker build --platform linux/arm64 --pull -t "$ACR_LOGIN_SERVER/sentinel-backend:$IMAGE_TAG" .
+
+      - id: push
+        name: Push the image
+        if: steps.exists.outputs.exists != 'true'
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.image-tag }}
+        run: |
+          set -euo pipefail
+          docker push "$ACR_LOGIN_SERVER/sentinel-backend:$IMAGE_TAG"
+
+  deploy-to-aks:
+    name: Deploy to AKS
+    needs: build-and-push
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    environment: sentinel-dev
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      backend-url: ${{ steps.up.outputs.backend-url }}
+    env:
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+    steps:
+      - id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - id: login
+        name: Azure login (resource tenant)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - id: tools
+        name: Ensure envsubst is installed
+        run: |
+          set -euo pipefail
+          if ! command -v envsubst >/dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q gettext-base
+          fi
+
+      - id: up
+        name: Bring the backend up
+        uses: ./.github/actions/backend-up
+        with:
+          namespace: ${{ env.NAMESPACE }}
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          image-tag: ${{ needs.build-and-push.outputs.image-tag }}
+          acr-login-server: ${{ vars.ACR_LOGIN_SERVER }}
+          api-tenant-id: ${{ vars.SENTINEL_API_TENANT_ID }}
+          api-audience: ${{ vars.SENTINEL_API_AUDIENCE }}
+          key-vault-url: ${{ vars.KEY_VAULT_URI }}
+          pg-host: ${{ vars.PG_HOST }}
+          pg-database: ${{ vars.PG_DATABASE }}
+          pg-user: ${{ vars.PG_USER_BACKEND }}
+
+      - id: verify
+        name: Verify the live image and health
+        env:
+          BACKEND_URL: ${{ steps.up.outputs.backend-url }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::verify: $1"; exit 1; }
+          expected="$ACR_LOGIN_SERVER/sentinel-backend:$IMAGE_TAG"
+          live="$(kubectl -n "$NAMESPACE" get deployment/sentinel-backend \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="sentinel-backend")].image}')"
+          [ "$live" = "$expected" ] || die "deployment runs '$live', expected '$expected'"
+          for path in /health /ready; do
+            curl -fsS --max-time 10 --retry 3 --retry-delay 5 -o /dev/null "$BACKEND_URL$path" || die "$path failed"
+          done
+          echo "::notice::deploy: $IMAGE_TAG is live at $BACKEND_URL"
+
+  run-tests:
+    name: Run Tests Against Live Deployment
+    needs: deploy-to-aks
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    environment: sentinel-dev
+    permissions:
+      id-token: write
+      contents: read
+    # The database tests (pool, migrations, seed, lifespan) run against a real pgvector server.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: sentinel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sentinel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BACKEND_URL: ${{ needs.deploy-to-aks.outputs.backend-url }}
+    steps:
+      - id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - id: python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - id: pip-cache
+        name: Cache pip packages
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: pip-${{ runner.os }}-${{ runner.arch }}-${{ env.PYTHON_VERSION }}-
+
+      - id: poetry
+        name: Install Poetry + export plugin
+        run: |
+          set -euo pipefail
+          pipx install "poetry==${POETRY_VERSION}"
+          pipx inject poetry "poetry-plugin-export==${POETRY_PLUGIN_EXPORT_VERSION}"
+
+      # Exactly the poetry.lock set, hash checked, with the CPU-only torch wheel.
+      - id: install
+        name: Install locked dependencies (CPU-only torch)
+        run: |
+          set -euo pipefail
+          python scripts/install_locked.py
+
+      # 002_seed_services embeds its row with the real all-MiniLM-L6-v2 model.
+      - id: hf-cache
+        name: Cache embedding model
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-MiniLM-L6-v2
+
+      - id: unit
+        name: Pytest (unit set)
+        env:
+          GROQ_API_KEY: "fake-key-for-ci"
+          SENTINEL_DB_PATH: ":memory:"
+          TEST_DATABASE_URL: "postgresql://postgres:test@localhost:5432/sentinel"
+        run: |
+          set -euo pipefail
+          python -m pytest tests/test_models/ tests/test_tools/ tests/test_providers/ tests/test_scripts/ \
+            tests/test_config.py -x -q
+
+      - id: integration
+        name: Pytest (integration set)
+        env:
+          GROQ_API_KEY: "fake-key-for-ci"
+          SENTINEL_DB_PATH: ":memory:"
+          TEST_DATABASE_URL: "postgresql://postgres:test@localhost:5432/sentinel"
+        run: |
+          set -euo pipefail
+          python -m pytest tests/test_infra/ tests/test_memory/ tests/test_agents/ tests/test_api/ \
+            tests/test_eval/ -x -q
+
+      # The bearer is minted in the identity tenant, so log in again there (after the long pytest steps).
+      - id: login-identity
+        name: Azure login (identity tenant)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_GHA_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_IDENTITY_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - id: token
+        name: Mint the API bearer token
+        uses: ./.github/actions/get-backend-token
+        with:
+          audience: ${{ vars.SENTINEL_API_AUDIENCE }}
+          tenant: ${{ vars.AZURE_IDENTITY_TENANT_ID }}
+
+      - id: smoke
+        name: Smoke test the live deployment
+        env:
+          BEARER: ${{ steps.token.outputs.bearer }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::smoke: $1"; exit 1; }
+          [[ "${BACKEND_URL:-}" =~ ^http://[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "backend-url is not http://<IPv4>"
+          [ -n "${BEARER:-}" ] || die "no bearer token"
+          work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/smoke.XXXXXX")"
+          trap 'rm -rf "$work"' EXIT
+          umask 077
+          printf 'Authorization: Bearer %s\n' "$BEARER" > "$work/auth"
+          cid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          jq -cn --arg cid "$cid" --arg tag "sha-${GITHUB_SHA::7}" '{signal_type: "runtime_error",
+            correlation_id: $cid, title: ("CI smoke test " + $tag), source: "ci-smoke", severity: "low",
+            tags: {service: "sentinel-watchtower"}}' > "$work/payload.json"
+          code="$(curl -sS --max-time 30 -o "$work/ack.json" -w '%{http_code}' -H @"$work/auth" \
+            -H 'Content-Type: application/json' --data-binary @"$work/payload.json" \
+            "$BACKEND_URL/webhooks/incident")" || code="000"
+          [ "$code" = "202" ] || die "POST /webhooks/incident answered HTTP $code"
+          [ "$(jq -r .status "$work/ack.json")" = "accepted" ] || die "webhook did not accept the incident"
+          id="$(jq -r .incident_id "$work/ack.json")"
+          uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          [[ "$id" =~ $uuid_re ]] || die "incident_id is not a UUID"
+          deadline=$((SECONDS + 1200))
+          status=""
+          while :; do
+            code="$(curl -sS --max-time 15 -o "$work/row.json" -w '%{http_code}' -H @"$work/auth" \
+              "$BACKEND_URL/incidents/$id")" || code="000"
+            if [ "$code" = "200" ]; then
+              status="$(jq -r '.status // ""' "$work/row.json")"
+              case "$status" in rollback_proposed|escalated) break;; esac
+            fi
+            [ "$SECONDS" -lt "$deadline" ] ||
+              die "incident $id not stored with a terminal status in 1200 s (HTTP $code, status '${status:-none}')"
+            sleep 15
+          done
+          jq -e --arg id "$id" --arg cid "$cid" '.id == $id and .correlation_id == $cid
+            and (.resolution_type == "rollback" or .resolution_type == "escalated")
+            and .created_at != null and .langfuse_trace_id != null and has("eval_score")' \
+            "$work/row.json" >/dev/null || die "stored incident $id is missing expected fields"
+          # The live pipeline does not run the judge; eval_score is written by the eval runner.
+          if [ "$(jq -r '.eval_score == null' "$work/row.json")" = "true" ]; then
+            echo "::notice::smoke: eval_score is null (the judge runs in the eval runner, not the live pipeline)"
+          fi
+          echo "::notice::smoke: incident $id stored as $status"
+          echo "Smoke: incident \`$id\` → \`$status\`" >> "$GITHUB_STEP_SUMMARY"
+
+  promote-or-rollback:
+    name: Promote or Rollback
+    needs: [run-quality, build-and-push, deploy-to-aks, run-tests]
+    if: always()
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    environment: sentinel-dev
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+      AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+      IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+    steps:
+      - id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - id: verdict
+        name: Decide promote, rollback or nothing
+        env:
+          RUN_TESTS: ${{ needs.run-tests.result }}
+          DEPLOY: ${{ needs.deploy-to-aks.result }}
+        run: |
+          set -euo pipefail
+          if [ "${RUN_TESTS:-}" = "success" ]; then
+            mode=promote
+          else
+            case "${DEPLOY:-}" in success|failure|cancelled) mode=rollback;; *) mode=none;; esac
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "::notice::promote-or-rollback: mode $mode"
+
+      - id: login
+        name: Azure login (resource tenant)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - id: kube
+        name: Check the cluster and get credentials
+        if: always() && steps.verdict.outputs.mode != 'none'
+        run: |
+          set -euo pipefail
+          die() { echo "::error::promote-or-rollback: $1"; exit 1; }
+          for v in AKS_RESOURCE_GROUP AKS_CLUSTER_NAME; do
+            [ -n "${!v:-}" ] || die "$v is empty"
+          done
+          # az cannot mint new tokens once the GitHub OIDC assertion expires, so cache the AKS token first.
+          az account get-access-token --resource 6dae42f8-4368-4678-94ff-3960e28e3630 -o none
+          state="$(az aks show --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" \
+            --query powerState.code -o tsv)"
+          if [ "$state" = "Stopped" ]; then
+            echo "::notice::promote-or-rollback: cluster $AKS_CLUSTER_NAME is stopped; nothing to inspect"
+            echo "running=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! command -v kubelogin >/dev/null 2>&1; then
+            bin="${RUNNER_TEMP:?}/sentinel-kube-bin"
+            mkdir -p "$bin"
+            az aks install-cli --install-location "$bin/kubectl" --kubelogin-install-location "$bin/kubelogin" \
+              --only-show-errors
+            echo "$bin" >> "$GITHUB_PATH"
+            export PATH="$bin:$PATH"
+          fi
+          az aks get-credentials --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" \
+            --overwrite-existing --only-show-errors
+          kubelogin convert-kubeconfig -l azurecli
+          echo "running=true" >> "$GITHUB_OUTPUT"
+
+      - id: stable
+        name: Move the stable tag to the new image
+        if: steps.verdict.outputs.mode == 'promote'
+        run: |
+          set -euo pipefail
+          az acr login --name "$ACR_NAME"
+          docker buildx imagetools create --tag "$ACR_LOGIN_SERVER/sentinel-backend:stable" \
+            "$ACR_LOGIN_SERVER/sentinel-backend:$IMAGE_TAG"
+
+      - id: cleanup
+        name: Clean up old image tags
+        if: steps.verdict.outputs.mode == 'promote' && steps.kube.outputs.running == 'true'
+        run: |
+          set -euo pipefail
+          die() { echo "::error::acr-cleanup: $1"; exit 1; }
+          image="$(kubectl -n "$NAMESPACE" get deployment/sentinel-backend \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="sentinel-backend")].image}')"
+          running="${image##*:}"
+          [[ "$running" =~ ^sha-[0-9a-f]{7}$ ]] || die "running image tag is not sha-<7 hex>"
+          tags="$(az acr repository show-tags --name "$ACR_NAME" --repository sentinel-backend \
+            --detail --orderby time_desc -o json)"
+          jq -e 'all(.[]; (.digest // "") != "") and (map(select(.name == "stable")) | length == 1)' \
+            <<< "$tags" >/dev/null || die "tag list lacks digests or a single stable tag"
+          plan="$(jq -r --arg running "$running" '
+            [.[] | select(.name | test("^sha-[0-9a-f]{7}$"))] as $sha
+            | [.[] | select(.name == "stable") | .digest] as $stable
+            | ([$sha[] | .name] | .[0:3]) as $newest
+            | [$sha[] | select(
+                ((.name as $n | $newest | any(. == $n)) or .name == $running
+                 or (.digest as $d | $stable | any(. == $d))) | not)] as $drop
+            | [$drop[] | .name] as $dropn
+            | [.[] | select(.name as $n | $dropn | any(. == $n) | not) | .digest] as $kept
+            | $drop[] | (if (.digest as $d | $kept | any(. == $d)) then "untag" else "delete" end) + " " + .name
+          ' <<< "$tags")"
+          while read -r action tag; do
+            [ -n "${action:-}" ] || continue
+            case "$action" in
+              untag) az acr repository untag --name "$ACR_NAME" --image "sentinel-backend:$tag";;
+              delete) az acr repository delete --name "$ACR_NAME" --image "sentinel-backend:$tag" --yes;;
+              *) die "unexpected plan line";;
+            esac
+            echo "::notice::acr-cleanup: $action $tag"
+          done <<< "$plan"
+
+      - id: undo
+        name: Roll the deployment back
+        if: always() && steps.verdict.outputs.mode == 'rollback' && steps.kube.outputs.running == 'true'
+        run: |
+          set -euo pipefail
+          die() { echo "::error::rollback: $1"; exit 1; }
+          expected="$ACR_LOGIN_SERVER/sentinel-backend:${IMAGE_TAG:-}"
+          live="$(kubectl -n "$NAMESPACE" get deployment/sentinel-backend \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="sentinel-backend")].image}' 2>/dev/null)" || live=""
+          if [ -z "${IMAGE_TAG:-}" ] || [ "$live" != "$expected" ]; then
+            echo "::notice::rollback: ${IMAGE_TAG:-the new image} is not live; nothing to undo"
+            echo "undone=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          history="$(kubectl -n "$NAMESPACE" rollout history deployment/sentinel-backend)"
+          revs="$(printf '%s\n' "$history" | grep -cE '^[0-9]+' || true)"
+          if [ "${revs:-0}" -lt 2 ]; then
+            echo "::warning::rollback: no previous revision; scaling deployment/sentinel-backend to 0"
+            kubectl -n "$NAMESPACE" scale deployment/sentinel-backend --replicas=0
+            echo "undone=scaled-to-zero" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          kubectl -n "$NAMESPACE" rollout undo deployment/sentinel-backend
+          kubectl -n "$NAMESPACE" rollout status deployment/sentinel-backend --timeout=600s ||
+            die "undo did not settle in 600 s"
+          echo "undone=true" >> "$GITHUB_OUTPUT"
+
+      - id: msg
+        name: Compose the Teams message
+        if: always() && steps.verdict.outputs.mode != 'promote'
+        env:
+          MODE: ${{ steps.verdict.outputs.mode }}
+          UNDO_OUTCOME: ${{ steps.undo.outcome }}
+          UNDONE: ${{ steps.undo.outputs.undone }}
+          RUNNING: ${{ steps.kube.outputs.running }}
+        run: |
+          set -euo pipefail
+          tag="${IMAGE_TAG:-sha-${GITHUB_SHA::7}}"
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          ref="$GITHUB_REF_NAME"
+          if [ "${MODE:-}" = "rollback" ]; then
+            if [ "${UNDO_OUTCOME:-}" = "failure" ]; then
+              title="[sentinel] backend rollback failed"
+              prefix="rollout undo failed for $tag on $ref; the broken image may still be live."
+              severity=critical
+            elif [ "${UNDO_OUTCOME:-}" = "success" ] && [ "${UNDONE:-}" = "true" ]; then
+              title="[sentinel] backend deploy rolled back"
+              prefix="backend deploy $tag rolled back on $ref."
+              severity=critical
+            elif [ "${UNDO_OUTCOME:-}" = "success" ] && [ "${UNDONE:-}" = "scaled-to-zero" ]; then
+              title="[sentinel] backend deploy failed"
+              prefix="backend deploy $tag failed on $ref; no previous revision, scaled to 0."
+              severity=critical
+            elif [ "${UNDO_OUTCOME:-}" = "success" ]; then
+              title="[sentinel] backend deploy failed"
+              prefix="backend deploy $tag failed on $ref before it went live; nothing to roll back."
+              severity=warning
+            elif [ "${RUNNING:-}" = "false" ]; then
+              title="[sentinel] backend deploy failed"
+              prefix="backend deploy $tag failed on $ref; the cluster is stopped, nothing is live."
+              severity=warning
+            else
+              title="[sentinel] backend rollback not attempted"
+              prefix="backend deploy $tag failed on $ref and the cluster could not be reached"
+              prefix="$prefix to roll back; check it."
+              severity=critical
+            fi
+          else
+            title="[sentinel] backend deploy failed"
+            prefix="backend deploy $tag failed on $ref before deploy (quality checks or image build);"
+            prefix="$prefix nothing was deployed."
+            severity=warning
+          fi
+          {
+            echo "title=$title"
+            echo "body=$prefix Run: $run"
+            echo "severity=$severity"
+          } >> "$GITHUB_OUTPUT"
+
+      - id: kv
+        name: Read the Teams webhook from Key Vault
+        if: always() && steps.verdict.outputs.mode != 'promote'
+        uses: ./.github/actions/get-kv-secrets
+        with:
+          vault-uri: ${{ vars.KEY_VAULT_URI }}
+          names: teams-webhook-url
+
+      - id: notify
+        name: Notify Teams
+        if: always() && steps.verdict.outputs.mode != 'promote' && steps.kv.outcome == 'success'
+        uses: ./.github/actions/notify-teams
+        with:
+          title: ${{ steps.msg.outputs.title }}
+          body: ${{ steps.msg.outputs.body }}
+          severity: ${{ steps.msg.outputs.severity }}
+          webhook-url: ${{ steps.kv.outputs.teams-webhook-url }}
+
+      # The OIDC assertion may have expired during the long steps above: log in again before the teardown.
+      - id: relogin
+        name: Azure login again (resource tenant)
+        if: always()
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - id: down
+        name: Scale the backend down
+        if: always()
+        uses: ./.github/actions/backend-down
+        with:
+          namespace: ${{ env.NAMESPACE }}
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          keep-warm: ${{ vars.SENTINEL_KEEP_WARM }}
