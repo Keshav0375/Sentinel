@@ -17,6 +17,7 @@ from azure.core.exceptions import (
     HttpResponseError,
     ResourceNotFoundError,
 )
+from pydantic import SecretStr
 
 from sentinel.config import Settings
 from sentinel.infra import workload_identity
@@ -36,6 +37,8 @@ _VALUES = {
     "langfuse-public-key": "pk-v",
     "langfuse-secret-key": "sk-v",
     "langfuse-base-url": "https://kv.langfuse.example",
+    "anthropic-api-key": "sk-ant-kv",
+    "openai-api-key": "sk-kv",
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -144,10 +147,10 @@ def test_key_vault_contract_names() -> None:
         "langfuse-public-key": "langfuse_public_key",
         "langfuse-secret-key": "langfuse_secret_key",
         "langfuse-base-url": "langfuse_base_url",
+        "anthropic-api-key": "anthropic_api_key",
+        "openai-api-key": "openai_api_key",
     }
-    assert set(KEY_VAULT_SECRETS.values()).isdisjoint(
-        {"anthropic_api_key", "openai_api_key", "github_api_token"}
-    )
+    assert "github_api_token" not in KEY_VAULT_SECRETS.values()
 
 
 async def test_key_vault_skipped_without_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,6 +179,10 @@ async def test_key_vault_maps_secrets_to_settings_and_langfuse_env(
     assert result.langfuse_secret_key is not None
     assert result.langfuse_secret_key.get_secret_value() == "sk-v"
     assert result.langfuse_base_url == "https://kv.langfuse.example"
+    assert isinstance(result.anthropic_api_key, SecretStr)
+    assert result.anthropic_api_key.get_secret_value() == "sk-ant-kv"
+    assert isinstance(result.openai_api_key, SecretStr)
+    assert result.openai_api_key.get_secret_value() == "sk-kv"
     assert env == {
         "LANGFUSE_PUBLIC_KEY": "pk-v",
         "LANGFUSE_SECRET_KEY": "sk-v",
@@ -243,7 +250,9 @@ async def test_unreadable_secret_continues(monkeypatch: pytest.MonkeyPatch) -> N
     assert result.langfuse_public_key is not None
     assert result.langfuse_secret_key is not None
     assert result.langfuse_base_url is not None
-    assert client.get_secret.call_count == 5
+    assert client.get_secret.call_count == len(KEY_VAULT_SECRETS)
+    assert result.anthropic_api_key is not None
+    assert result.openai_api_key is not None
 
 
 async def test_auth_failure_stops_and_keeps_env_values(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -273,16 +282,49 @@ async def test_bad_vault_url_is_not_fatal(monkeypatch: pytest.MonkeyPatch) -> No
     assert log.error.call_args.args[0] == "key_vault_unavailable"
 
 
-async def test_llm_keys_never_read_from_vault(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_llm_keys_from_vault_override_env(monkeypatch: pytest.MonkeyPatch) -> None:
     _, client = _vault(monkeypatch, lambda name: _secret(f"v-{name}"))
     holder, _ = _holder()
     settings = _settings(anthropic_api_key="sk-ant-env", openai_api_key="sk-env")
-    result = await load_key_vault_secrets(settings, holder, environ={})
+    env: dict = {}
+    result = await load_key_vault_secrets(settings, holder, environ=env)
     assert [c.args[0] for c in client.get_secret.call_args_list] == list(KEY_VAULT_SECRETS)
+    assert result.anthropic_api_key is not None
+    assert result.anthropic_api_key.get_secret_value() == "v-anthropic-api-key"
+    assert result.openai_api_key is not None
+    assert result.openai_api_key.get_secret_value() == "v-openai-api-key"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
+
+
+async def test_llm_key_missing_in_vault_keeps_env_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    def get_secret(name: str) -> MagicMock:
+        if name == "anthropic-api-key":
+            raise ResourceNotFoundError("nope")
+        return _all_values(name)
+
+    _vault(monkeypatch, get_secret)
+    log = _logger(monkeypatch)
+    holder, _ = _holder()
+    settings = _settings(anthropic_api_key="sk-ant-env")
+    result = await load_key_vault_secrets(settings, holder, environ={})
     assert result.anthropic_api_key is not None
     assert result.anthropic_api_key.get_secret_value() == "sk-ant-env"
     assert result.openai_api_key is not None
-    assert result.openai_api_key.get_secret_value() == "sk-env"
+    assert result.openai_api_key.get_secret_value() == "sk-kv"
+    log.warning.assert_any_call(
+        "key_vault_secret_missing", secret="anthropic-api-key", field="anthropic_api_key"
+    )
+
+
+async def test_vault_llm_keys_reach_the_router(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.providers.router import provider_credential
+
+    _vault(monkeypatch, _all_values)
+    holder, _ = _holder()
+    result = await load_key_vault_secrets(_settings(), holder, environ={})
+    assert provider_credential("anthropic", result) == "sk-ant-kv"
+    assert provider_credential("openai", result) == "sk-kv"
 
 
 async def test_secret_values_never_logged(monkeypatch: pytest.MonkeyPatch) -> None:

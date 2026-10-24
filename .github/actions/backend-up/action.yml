@@ -1,0 +1,225 @@
+# Bring the Sentinel backend up on the shared AKS cluster (backend task 7.3).
+# Source: architecture backend.md section 8.5 as amended by decisions.md 2026-10-24 (phase 7).
+# Starts the cluster only if it is stopped, renders the azure/k8s manifests bundled with this action at its
+# pinned commit ($GITHUB_ACTION_PATH/../../../azure/k8s) after validating every value, applies them into the
+# namespace, scales to 1 and waits for /health and /ready. It never stops the cluster.
+# The caller's workspace is never read. Caller: azure/login (resource tenant) first.
+name: Sentinel backend-up
+description: >-
+  Start the AKS cluster if needed, apply the azure/k8s manifests bundled with the action and wait until the
+  backend answers /health and /ready.
+
+inputs:
+  namespace:
+    description: Kubernetes namespace (infra-owned).
+    required: false
+    default: sentinel-dev
+  resource-group:
+    description: Resource group of the AKS cluster (infra output).
+    required: true
+  cluster-name:
+    description: AKS cluster name (infra output).
+    required: true
+  image-tag:
+    description: Image tag, sha-<7 hex>.
+    required: true
+  acr-login-server:
+    description: ACR login server, no scheme (infra output).
+    required: true
+  api-tenant-id:
+    description: Identity tenant of the API app registration.
+    required: true
+  api-audience:
+    description: Comma list - API app client-id GUID[,identifier URI].
+    required: true
+  key-vault-url:
+    description: Key Vault URI (infra output).
+    required: true
+  pg-host:
+    description: Postgres server FQDN (infra output).
+    required: true
+  pg-database:
+    description: Database name (infra output).
+    required: true
+  pg-user:
+    description: Entra principal name of the backend (infra output).
+    required: true
+
+outputs:
+  backend-url:
+    description: Base URL of the backend (http://<LoadBalancer IP>); not a secret.
+    value: ${{ steps.url.outputs.backend-url }}
+
+runs:
+  using: composite
+  steps:
+    - id: cluster
+      name: Start the AKS cluster if it is stopped
+      shell: bash
+      env:
+        RESOURCE_GROUP: ${{ inputs.resource-group }}
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+      run: |
+        set -euo pipefail
+        die() { echo "::error::backend-up: $1"; exit 1; }
+        for v in RESOURCE_GROUP CLUSTER_NAME; do
+          [ -n "${!v:-}" ] || die "input for $v is empty"
+        done
+        # az cannot mint new tokens once the GitHub OIDC assertion expires, and a cluster start can outlast it.
+        az account get-access-token --resource 6dae42f8-4368-4678-94ff-3960e28e3630 -o none
+        # Wait out an in-flight start, stop or update (80 x 15 s = 20 min). A failed az call is one attempt;
+        # five in a row is an error.
+        power=""; prov=""; fails=0
+        for _ in $(seq 1 80); do
+          if out="$(az aks show --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" \
+            --query '[powerState.code, provisioningState]' -o tsv)"; then
+            fails=0
+            IFS=$'\t' read -r power prov <<< "$out" || true
+          else
+            fails=$((fails + 1))
+            [ "$fails" -lt 5 ] || die "az aks show failed 5 times in a row"
+            prov=""
+          fi
+          case "$prov" in
+            Succeeded) break;;
+            ''|Creating|Updating|Upgrading|Scaling|Starting|Stopping|Migrating) ;;
+            *) die "cluster provisioning state is '$prov'";;
+          esac
+          echo "::notice::backend-up: cluster provisioning state is '${prov:-unknown}'; waiting"
+          sleep 15
+        done
+        [ "$prov" = "Succeeded" ] || die "cluster provisioning did not settle within 20 min (last '${prov:-unknown}')"
+        case "$power" in
+          Stopped)
+            echo "::notice::backend-up: cluster $CLUSTER_NAME is stopped; starting it"
+            az aks start --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" --only-show-errors
+            ;;
+          Running) ;;
+          *) die "unexpected cluster power state '${power:-none}'";;
+        esac
+    - id: credentials
+      name: Get cluster credentials (kubelogin)
+      shell: bash
+      env:
+        RESOURCE_GROUP: ${{ inputs.resource-group }}
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+      run: |
+        set -euo pipefail
+        if ! command -v kubelogin >/dev/null 2>&1; then
+          bin="${RUNNER_TEMP:?}/sentinel-kube-bin"
+          mkdir -p "$bin"
+          az aks install-cli --install-location "$bin/kubectl" --kubelogin-install-location "$bin/kubelogin" \
+            --only-show-errors
+          echo "$bin" >> "$GITHUB_PATH"
+          export PATH="$bin:$PATH"
+        fi
+        az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" \
+          --overwrite-existing --only-show-errors
+        kubelogin convert-kubeconfig -l azurecli
+    - id: apply
+      name: Render and apply azure/k8s
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        ACR_LOGIN_SERVER: ${{ inputs.acr-login-server }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+        SENTINEL_API_TENANT_ID: ${{ inputs.api-tenant-id }}
+        SENTINEL_API_AUDIENCE: ${{ inputs.api-audience }}
+        KEY_VAULT_URL: ${{ inputs.key-vault-url }}
+        PGHOST: ${{ inputs.pg-host }}
+        PGDATABASE: ${{ inputs.pg-database }}
+        PGUSER: ${{ inputs.pg-user }}
+      run: |
+        set -euo pipefail
+        die() { echo "::error::backend-up: $1"; exit 1; }
+        [ -n "${NAMESPACE:-}" ] || die "input for NAMESPACE is empty"
+        # The manifests bundled with this action at its pinned commit; the caller's workspace is never read.
+        k8s="$(cd "${GITHUB_ACTION_PATH:?}/../../../azure/k8s" 2>/dev/null && pwd)" ||
+          die "bundled manifests not found beside the action (azure/k8s)"
+        [ -f "$k8s/placeholders.txt" ] || die "bundled azure/k8s/placeholders.txt not found"
+        command -v envsubst >/dev/null 2>&1 || die "envsubst not on PATH (install gettext-base)"
+        guid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        uri_re='^api://[A-Za-z0-9][A-Za-z0-9._~/-]*$'
+        label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+        # Every check names the placeholder, never its value. Patterns: azure/k8s/placeholders.txt.
+        has_bad_chars() {
+          case "$1" in
+            *\"*|*\\*|*\$*|*$'\n'*|*$'\r'*) return 0;;
+          esac
+          return 1
+        }
+        check_audience() {
+          local item guid=""
+          case "$1" in ,*|*,|*,,*) die "SENTINEL_API_AUDIENCE has an empty item";; esac
+          IFS=',' read -r -a items <<< "$1"
+          for item in "${items[@]}"; do
+            if [[ "$item" =~ $guid_re ]]; then
+              guid=1
+            elif ! [[ "$item" =~ $uri_re ]]; then
+              die "SENTINEL_API_AUDIENCE item is neither a lowercase GUID nor an api:// URI"
+            fi
+          done
+          [ -n "$guid" ] || die "SENTINEL_API_AUDIENCE must include the API app client-id GUID"
+        }
+        check_value() {
+          local re
+          case "$1" in
+            ACR_LOGIN_SERVER) re="^${label}\.azurecr\.io$";;
+            IMAGE_TAG) re='^sha-[0-9a-f]{7}$';;
+            SENTINEL_API_TENANT_ID) re="$guid_re";;
+            SENTINEL_API_AUDIENCE) check_audience "$2"; return 0;;
+            KEY_VAULT_URL) re='^https://[A-Za-z][A-Za-z0-9-]{1,22}[A-Za-z0-9]\.vault\.azure\.net/?$';;
+            PGHOST) re="^${label}(\.${label})+$";;
+            PGDATABASE) re='^[A-Za-z_][A-Za-z0-9_]{0,62}$';;
+            PGUSER) re='^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$';;
+            *) die "no validation rule for placeholder $1";;
+          esac
+          [[ "$2" =~ $re ]] || die "$1 does not match its pattern (see azure/k8s/placeholders.txt)"
+        }
+        names=()
+        while IFS= read -r line || [ -n "$line" ]; do
+          case "$line" in ''|'#'*) continue;; esac
+          names+=("$line")
+        done < "$k8s/placeholders.txt"
+        vars=""
+        for n in ${names[@]+"${names[@]}"}; do
+          [ -n "${!n:-}" ] || die "no value for placeholder $n"
+          if has_bad_chars "${!n}"; then die "$n contains a quote, backslash, dollar sign or line break"; fi
+          check_value "$n" "${!n}"
+          vars="$vars \${$n}"
+        done
+        out="$(mktemp -d "${RUNNER_TEMP:-/tmp}/sentinel-k8s.XXXXXX")"
+        for f in "$k8s"/*.yaml; do
+          envsubst "$vars" < "$f" > "$out/${f##*/}"
+        done
+        kubectl -n "$NAMESPACE" apply -f "$out"
+        kubectl -n "$NAMESPACE" scale deployment/sentinel-backend --replicas=1
+        if ! kubectl -n "$NAMESPACE" rollout status deployment/sentinel-backend --timeout=600s; then
+          kubectl -n "$NAMESPACE" get pods -o wide || true
+          kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -n 30 || true
+          die "rollout did not finish within 600 s"
+        fi
+    - id: url
+      name: Resolve the backend URL and wait for /health and /ready
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        set -euo pipefail
+        die() { echo "::error::backend-up: $1"; exit 1; }
+        ip=""
+        for _ in $(seq 1 60); do
+          # A transient API error is one failed attempt (60 x 5 s), not a step failure.
+          ip="$(kubectl -n "$NAMESPACE" get svc sentinel-backend \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" || ip=""
+          [ -n "$ip" ] && break
+          sleep 5
+        done
+        [ -n "$ip" ] || die "no LoadBalancer IP after 300 s"
+        url="http://$ip"
+        deadline=$((SECONDS + 600))
+        until curl -fs --max-time 10 -o /dev/null "$url/health" && curl -fs --max-time 10 -o /dev/null "$url/ready"; do
+          [ "$SECONDS" -lt "$deadline" ] || die "$url not healthy and ready within 600 s"
+          sleep 5
+        done
+        echo "backend-url=$url" >> "$GITHUB_OUTPUT"

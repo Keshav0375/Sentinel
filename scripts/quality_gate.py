@@ -69,6 +69,7 @@ MATRIX: dict[str, list[Check]] = {
                 "tests/test_models/",
                 "tests/test_tools/",
                 "tests/test_providers/",
+                "tests/test_scripts/",
                 "tests/test_config.py",
                 "-x",
                 "-q",

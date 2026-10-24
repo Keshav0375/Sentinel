@@ -1,0 +1,88 @@
+# Tear the Sentinel backend down after a run (backend task 7.3).
+# Source: architecture backend.md section 8.5 as amended by decisions.md 2026-10-24 (phase 7).
+# Pod-level scale-down only: delete the Service (releases the LoadBalancer IP) and scale the Deployment to 0.
+# The shared cluster keeps running; it is never powered off here. Skipped entirely when keep-warm is true.
+# The Service is deleted by name; no manifest is read from the caller's workspace.
+# Caller: azure/login (resource tenant) first.
+name: Sentinel backend-down
+description: >-
+  Delete the backend Service and scale the Deployment to 0 unless keep-warm is true. The shared cluster
+  keeps running.
+
+inputs:
+  namespace:
+    description: Kubernetes namespace (infra-owned).
+    required: false
+    default: sentinel-dev
+  resource-group:
+    description: Resource group of the AKS cluster (infra output).
+    required: true
+  cluster-name:
+    description: AKS cluster name (infra output).
+    required: true
+  keep-warm:
+    description: 'true keeps the backend up (pass the SENTINEL_KEEP_WARM repository variable).'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - id: keep-warm
+      name: Keep the backend warm
+      if: inputs.keep-warm == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::notice::backend-down: SENTINEL_KEEP_WARM is true; the backend stays up"
+    - id: cluster
+      name: Check the cluster and get credentials
+      if: inputs.keep-warm != 'true'
+      shell: bash
+      env:
+        RESOURCE_GROUP: ${{ inputs.resource-group }}
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+      run: |
+        set -euo pipefail
+        die() { echo "::error::backend-down: $1"; exit 1; }
+        for v in RESOURCE_GROUP CLUSTER_NAME; do
+          [ -n "${!v:-}" ] || die "input for $v is empty"
+        done
+        # az cannot mint new tokens once the GitHub OIDC assertion expires, so cache the AKS token first.
+        az account get-access-token --resource 6dae42f8-4368-4678-94ff-3960e28e3630 -o none
+        state="$(az aks show --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" \
+          --query powerState.code -o tsv)"
+        if [ "$state" = "Stopped" ]; then
+          echo "::notice::backend-down: cluster $CLUSTER_NAME is stopped; nothing to tear down"
+          echo "stopped=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if ! command -v kubelogin >/dev/null 2>&1; then
+          bin="${RUNNER_TEMP:?}/sentinel-kube-bin"
+          mkdir -p "$bin"
+          az aks install-cli --install-location "$bin/kubectl" --kubelogin-install-location "$bin/kubelogin" \
+            --only-show-errors
+          echo "$bin" >> "$GITHUB_PATH"
+          export PATH="$bin:$PATH"
+        fi
+        az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" \
+          --overwrite-existing --only-show-errors
+        kubelogin convert-kubeconfig -l azurecli
+        echo "stopped=false" >> "$GITHUB_OUTPUT"
+    - id: teardown
+      name: Delete the Service and scale the Deployment to 0
+      if: inputs.keep-warm != 'true' && steps.cluster.outputs.stopped != 'true'
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        set -euo pipefail
+        die() { echo "::error::backend-down: $1"; exit 1; }
+        [ -n "${NAMESPACE:-}" ] || die "input for NAMESPACE is empty"
+        # The Service delete releases the LB IP; the shared cluster keeps running (decisions 2026-10-24).
+        kubectl -n "$NAMESPACE" delete service/sentinel-backend --ignore-not-found
+        if kubectl -n "$NAMESPACE" get deployment/sentinel-backend -o name >/dev/null 2>&1; then
+          kubectl -n "$NAMESPACE" scale deployment/sentinel-backend --replicas=0
+        else
+          echo "::notice::backend-down: no deployment to scale"
+        fi

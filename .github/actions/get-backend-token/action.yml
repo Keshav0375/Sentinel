@@ -1,0 +1,45 @@
+# Mint an Entra bearer token for the Sentinel API (backend task 7.3).
+# Caller: azure/login in the identity tenant (where the API app registration lives).
+name: Sentinel get-backend-token
+description: >-
+  Mint an Entra bearer token for the Sentinel API (masked).
+  Caller: azure/login in the identity tenant first.
+
+inputs:
+  audience:
+    description: >-
+      ONE value: the API app client-id GUID or its identifier URI (never the comma list).
+    required: true
+  tenant:
+    description: Tenant to mint the token in (optional).
+    required: false
+    default: ''
+
+outputs:
+  bearer:
+    description: Entra access token for the API (masked).
+    value: ${{ steps.token.outputs.bearer }}
+
+runs:
+  using: composite
+  steps:
+    - id: token
+      name: Mint the API bearer token
+      shell: bash
+      env:
+        AUDIENCE: ${{ inputs.audience }}
+        TENANT: ${{ inputs.tenant }}
+      run: |
+        set -euo pipefail
+        die() { echo "::error::get-backend-token: $1"; exit 1; }
+        [ -n "${AUDIENCE:-}" ] || die "input for AUDIENCE is empty"
+        case "$AUDIENCE" in *,*) die "audience must be one value, not the comma list";; esac
+        args=(--scope "${AUDIENCE%/}/.default" --query accessToken -o tsv)
+        if [ -n "${TENANT:-}" ]; then
+          args+=(--tenant "$TENANT")
+        fi
+        token="$(az account get-access-token "${args[@]}")"
+        [ -n "$token" ] || die "az returned an empty token"
+        case "$token" in *$'\n'*) die "token is not a single line";; esac
+        echo "::add-mask::$token"
+        echo "bearer=$token" >> "$GITHUB_OUTPUT"

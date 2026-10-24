@@ -1,0 +1,10 @@
+# Allowlist: only the image's build inputs enter the context (never data/, .env, .git, tests/).
+*
+!pyproject.toml
+!poetry.lock
+!scripts/install_locked.py
+!src/
+!alembic/
+!alembic.ini
+**/__pycache__
+**/*.py[cod]
