@@ -1,0 +1,68 @@
+# Read named Sentinel secrets from Key Vault (backend task 7.3).
+# Composite outputs must be static, so one output is declared per secret a GitHub Actions job may read.
+# Excluded on purpose: github-pat (bridge Function only); anthropic-api-key and openai-api-key (pod only,
+# via workload identity). A requested name outside the list fails before any az call.
+# Caller: azure/login (resource tenant) first. Masked outputs are dropped from job outputs: use them in-job.
+name: Sentinel get-kv-secrets
+description: >-
+  Read named secrets from Key Vault into masked step outputs.
+  Caller: azure/login first (resource tenant).
+
+inputs:
+  vault-name:
+    description: Key Vault name (infra output).
+    required: true
+  names:
+    description: Secret names to read (comma, space or newline separated).
+    required: true
+
+outputs:
+  datadog-api-key:
+    description: Datadog API key (masked; empty unless requested).
+    value: ${{ steps.fetch.outputs.datadog-api-key }}
+  datadog-app-key:
+    description: Datadog application key (masked; empty unless requested).
+    value: ${{ steps.fetch.outputs.datadog-app-key }}
+  langfuse-public-key:
+    description: Langfuse public key (masked; empty unless requested).
+    value: ${{ steps.fetch.outputs.langfuse-public-key }}
+  langfuse-secret-key:
+    description: Langfuse secret key (masked; empty unless requested).
+    value: ${{ steps.fetch.outputs.langfuse-secret-key }}
+  langfuse-base-url:
+    description: Langfuse base URL (masked; empty unless requested).
+    value: ${{ steps.fetch.outputs.langfuse-base-url }}
+  teams-webhook-url:
+    description: Teams webhook URL (masked; empty unless requested).
+    value: ${{ steps.fetch.outputs.teams-webhook-url }}
+
+runs:
+  using: composite
+  steps:
+    - id: fetch
+      name: Read the secrets from Key Vault
+      shell: bash
+      env:
+        VAULT_NAME: ${{ inputs.vault-name }}
+        NAMES: ${{ inputs.names }}
+      run: |
+        set -euo pipefail
+        die() { echo "::error::get-kv-secrets: $1"; exit 1; }
+        [ -n "${VAULT_NAME:-}" ] || die "input for VAULT_NAME is empty"
+        allowed=" datadog-api-key datadog-app-key langfuse-public-key langfuse-secret-key"
+        allowed="$allowed langfuse-base-url teams-webhook-url "
+        read -r -a list <<< "$(printf '%s' "$NAMES" | tr ',\n' '  ')"
+        [ "${#list[@]}" -gt 0 ] || die "names is empty"
+        for n in "${list[@]}"; do
+          case "$allowed" in
+            *" $n "*) ;;
+            *) die "no output declared for secret $n";;
+          esac
+        done
+        for n in "${list[@]}"; do
+          value="$(az keyvault secret show --vault-name "$VAULT_NAME" --name "$n" --query value -o tsv)"
+          [ -n "$value" ] || die "secret $n is empty"
+          case "$value" in *$'\n'*) die "secret $n is not a single line";; esac
+          echo "::add-mask::$value"
+          echo "$n=$value" >> "$GITHUB_OUTPUT"
+        done

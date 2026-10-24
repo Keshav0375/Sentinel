@@ -1,0 +1,79 @@
+# Run one SQL statement against Azure PostgreSQL with an Entra token (backend task 7.3).
+#
+# Caller contract: `sql` is ONE statement that returns rows (a SELECT, or INSERT/UPDATE/DELETE ... RETURNING).
+# The action wraps it as WITH r AS (<sql>) SELECT coalesce(jsonb_agg(to_jsonb(r)), '[]'::jsonb) FROM r;
+# so `result` is a one-line JSON array. Values travel ONLY through `vars` (newline separated name=value),
+# become psql -v variables and are referenced in the SQL as :'name'. Never interpolate values into `sql`.
+# The connection is configured through PG* environment variables only; there is no connection string.
+name: Sentinel psql-exec
+description: Run one row-returning SQL statement against Azure PostgreSQL; the result is a JSON array.
+
+inputs:
+  sql:
+    description: One statement that returns rows; values are referenced as :'name' (see vars).
+    required: true
+  pg-token:
+    description: Entra token from get-db-token (masked by the action).
+    required: true
+  pg-host:
+    description: Postgres server FQDN (infra output).
+    required: true
+  pg-database:
+    description: Database name (infra output).
+    required: true
+  pg-user:
+    description: Entra principal name to connect as.
+    required: true
+  vars:
+    description: Newline-separated name=value pairs passed as psql -v variables.
+    required: false
+    default: ''
+
+outputs:
+  result:
+    description: One-line JSON array of the rows the statement returned.
+    value: ${{ steps.query.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - id: query
+      name: Run the SQL statement
+      shell: bash
+      env:
+        SQL: ${{ inputs.sql }}
+        PG_TOKEN: ${{ inputs.pg-token }}
+        PG_HOST: ${{ inputs.pg-host }}
+        PG_DATABASE: ${{ inputs.pg-database }}
+        PG_USER: ${{ inputs.pg-user }}
+        SQL_VARS: ${{ inputs.vars }}
+      run: |
+        set -euo pipefail
+        die() { echo "::error::psql-exec: $1"; exit 1; }
+        for v in SQL PG_TOKEN PG_HOST PG_DATABASE PG_USER; do
+          [ -n "${!v:-}" ] || die "input for $v is empty"
+        done
+        echo "::add-mask::$PG_TOKEN"
+        command -v psql >/dev/null 2>&1 || die "psql not on PATH (install postgresql-client)"
+        shopt -s extglob
+        body="${SQL%%+([[:space:];])}"
+        args=()
+        n=0
+        while IFS= read -r line || [ -n "$line" ]; do
+          n=$((n + 1))
+          line="${line%$'\r'}"
+          [ -z "${line//[[:space:]]/}" ] && continue
+          name="${line%%=*}"
+          if [[ "$line" != *=* || ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            die "vars line $n is not name=value"
+          fi
+          args+=(-v "$line")
+        done <<< "$SQL_VARS"
+        sql_file="$(mktemp "${RUNNER_TEMP:-/tmp}/psql-exec.XXXXXX")"
+        trap 'rm -f "$sql_file"' EXIT
+        printf 'WITH r AS (\n%s\n)\nSELECT coalesce(jsonb_agg(to_jsonb(r)), %s::jsonb) FROM r;\n' \
+          "$body" "'[]'" > "$sql_file"
+        result="$(PGHOST="$PG_HOST" PGDATABASE="$PG_DATABASE" PGUSER="$PG_USER" PGPASSWORD="$PG_TOKEN" \
+          PGSSLMODE=require psql -X -q -t -A -v ON_ERROR_STOP=1 ${args[@]+"${args[@]}"} -f "$sql_file")"
+        case "$result" in *$'\n'*) die "result is not a single line";; esac
+        echo "result=$result" >> "$GITHUB_OUTPUT"

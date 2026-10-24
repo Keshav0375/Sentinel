@@ -1,0 +1,27 @@
+# Mint a short-lived Entra token for Azure PostgreSQL (backend task 7.3).
+# Caller: azure/login (OIDC, resource tenant) immediately before this action.
+name: Sentinel get-db-token
+description: >-
+  Mint a short-lived Entra token for Azure PostgreSQL (masked).
+  Caller: azure/login first (resource tenant).
+
+outputs:
+  pg-token:
+    description: Entra access token for ossrdbms-aad (masked; use it as PGPASSWORD).
+    value: ${{ steps.token.outputs.pg-token }}
+
+runs:
+  using: composite
+  steps:
+    - id: token
+      name: Mint the PostgreSQL Entra token
+      shell: bash
+      run: |
+        set -euo pipefail
+        die() { echo "::error::get-db-token: $1"; exit 1; }
+        token="$(az account get-access-token --resource https://ossrdbms-aad.database.windows.net \
+          --query accessToken -o tsv)"
+        [ -n "$token" ] || die "az returned an empty token"
+        case "$token" in *$'\n'*) die "token is not a single line";; esac
+        echo "::add-mask::$token"
+        echo "pg-token=$token" >> "$GITHUB_OUTPUT"

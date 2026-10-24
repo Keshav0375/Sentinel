@@ -1,0 +1,65 @@
+# Post an Adaptive Card to a Teams webhook (backend task 7.3).
+# The {"type":"message","attachments":[...]} envelope is accepted by both Workflows webhooks and
+# legacy incoming webhooks.
+name: Sentinel notify-teams
+description: Post a titled Adaptive Card to a Teams webhook.
+
+inputs:
+  title:
+    description: Card title.
+    required: true
+  body:
+    description: Card body text.
+    required: true
+  webhook-url:
+    description: Teams webhook URL (masked by the action).
+    required: true
+  severity:
+    description: One of info, warning, critical.
+    required: false
+    default: info
+
+runs:
+  using: composite
+  steps:
+    - id: post
+      name: Post the card to Teams
+      shell: bash
+      env:
+        TITLE: ${{ inputs.title }}
+        BODY: ${{ inputs.body }}
+        SEVERITY: ${{ inputs.severity }}
+        WEBHOOK_URL: ${{ inputs.webhook-url }}
+      run: |
+        set -euo pipefail
+        die() { echo "::error::notify-teams: $1"; exit 1; }
+        for v in TITLE BODY WEBHOOK_URL; do
+          [ -n "${!v:-}" ] || die "input for $v is empty"
+        done
+        echo "::add-mask::$WEBHOOK_URL"
+        case "$SEVERITY" in
+          info) color="Accent";;
+          warning) color="Warning";;
+          critical) color="Attention";;
+          *) die "severity must be info, warning or critical";;
+        esac
+        payload_file="$(mktemp "${RUNNER_TEMP:-/tmp}/teams.XXXXXX")"
+        trap 'rm -f "$payload_file"' EXIT
+        jq -cn --arg title "$TITLE" --arg body "$BODY" --arg sev "$SEVERITY" --arg color "$color" '{
+          type: "message",
+          attachments: [{
+            contentType: "application/vnd.microsoft.card.adaptive",
+            contentUrl: null,
+            content: {
+              type: "AdaptiveCard",
+              version: "1.4",
+              body: [
+                {type: "TextBlock", text: $title, weight: "Bolder", size: "Medium", color: $color, wrap: true},
+                {type: "TextBlock", text: ("Severity: " + $sev), isSubtle: true, spacing: "None", wrap: true},
+                {type: "TextBlock", text: $body, wrap: true}
+              ]
+            }
+          }]
+        }' > "$payload_file"
+        curl -fsS --max-time 20 --retry 3 -H 'Content-Type: application/json' \
+          --data-binary "@$payload_file" -o /dev/null "$WEBHOOK_URL"
