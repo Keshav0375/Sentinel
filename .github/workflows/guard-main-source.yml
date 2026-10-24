@@ -38,9 +38,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ensure the PR source branch is allowed for this target
+        # Passed through env, never inlined: a branch name is attacker-controlled text.
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
         run: |
-          BASE="${{ github.base_ref }}"
-          HEAD="${{ github.head_ref }}"
           echo "PR: $HEAD -> $BASE"
           case "$BASE" in
             main)
@@ -52,6 +54,7 @@ jobs:
           esac
           for pattern in $ALLOWED; do
             # $pattern is deliberately unquoted — `case` glob-matches it.
+            # shellcheck disable=SC2254  # deliberate glob: ALLOWED entries are patterns
             case "$HEAD" in
               $pattern)
                 echo "✅ '$HEAD' -> '$BASE' is allowed (matched '$pattern')."; exit 0 ;;
