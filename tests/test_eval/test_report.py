@@ -9,6 +9,7 @@ import pytest
 
 from sentinel.eval.report import (
     PASS_THRESHOLD,
+    CheckStats,
     DimensionStats,
     EvalReport,
     build_report,
@@ -18,17 +19,24 @@ from sentinel.eval.report import (
     write_markdown,
     write_reports,
 )
-from sentinel.models.eval_result import DimensionScore, EvalDimension, TrajectoryScore
+from sentinel.models.eval_result import (
+    DimensionScore,
+    EvalDimension,
+    GroundTruthCheck,
+    GroundTruthResult,
+    TrajectoryScore,
+)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def _make_score(
     scenario_id: str = "bad_deploy_01",
-    total: float = 4.0,
+    total: float = 0.8,
     dim_score: float | None = None,
     judge_model: str = "test-judge",
     judge_conflict: bool = False,
+    judge_failed: bool = False,
 ) -> TrajectoryScore:
     """Create a TrajectoryScore with uniform dimension scores."""
     s = dim_score if dim_score is not None else total
@@ -41,11 +49,12 @@ def _make_score(
         total_score=total,
         judge_model=judge_model,
         judge_conflict=judge_conflict,
+        judge_failed=judge_failed,
     )
 
 
 def _two_scores() -> list[TrajectoryScore]:
-    return [_make_score("bad_deploy_01", 4.0), _make_score("db_pool_01", 2.0)]
+    return [_make_score("bad_deploy_01", 0.8), _make_score("db_pool_01", 0.4)]
 
 
 # ── build_report ──────────────────────────────────────────────────────────────
@@ -67,22 +76,22 @@ class TestBuildReport:
         assert report.scenarios_run == 2
 
     def test_avg_total_score_is_mean(self) -> None:
-        report = build_report([_make_score("a", 2.0), _make_score("b", 4.0)])
-        assert report.avg_total_score == pytest.approx(3.0)
+        report = build_report([_make_score("a", 0.4), _make_score("b", 0.8)])
+        assert report.avg_total_score == pytest.approx(0.6)
 
     def test_pass_rate_default_threshold(self) -> None:
-        # 4.0 passes, 2.0 fails → 50%
+        # 0.8 passes, 0.4 fails → 50%
         report = build_report(_two_scores())
         assert report.pass_rate == pytest.approx(0.5)
 
     def test_pass_rate_custom_threshold(self) -> None:
-        scores = [_make_score("a", 1.0), _make_score("b", 3.0), _make_score("c", 5.0)]
-        report = build_report(scores, pass_threshold=2.0)
+        scores = [_make_score("a", 0.2), _make_score("b", 0.6), _make_score("c", 1.0)]
+        report = build_report(scores, pass_threshold=0.4)
         assert report.pass_rate == pytest.approx(2 / 3, abs=0.01)
 
     def test_pass_threshold_stored(self) -> None:
-        report = build_report(_two_scores(), pass_threshold=2.5)
-        assert report.pass_threshold == pytest.approx(2.5)
+        report = build_report(_two_scores(), pass_threshold=0.5)
+        assert report.pass_threshold == pytest.approx(0.5)
 
     def test_judge_model_from_first_score(self) -> None:
         scores = [_make_score(judge_model="my-model"), _make_score(judge_model="other")]
@@ -112,17 +121,17 @@ class TestBuildReport:
 
     def test_dimension_avg_computed_correctly(self) -> None:
         # Both scores have dim_score = total (uniform)
-        scores = [_make_score("a", 3.0, dim_score=3.0), _make_score("b", 5.0, dim_score=5.0)]
+        scores = [_make_score("a", 0.6, dim_score=0.6), _make_score("b", 1.0, dim_score=1.0)]
         report = build_report(scores)
         for ds in report.dimension_stats:
-            assert ds.avg_score == pytest.approx(4.0)
+            assert ds.avg_score == pytest.approx(0.8)
 
     def test_dimension_min_max(self) -> None:
-        scores = [_make_score("a", 1.0, dim_score=1.0), _make_score("b", 5.0, dim_score=5.0)]
+        scores = [_make_score("a", 0.2, dim_score=0.2), _make_score("b", 1.0, dim_score=1.0)]
         report = build_report(scores)
         for ds in report.dimension_stats:
-            assert ds.min_score == pytest.approx(1.0)
-            assert ds.max_score == pytest.approx(5.0)
+            assert ds.min_score == pytest.approx(0.2)
+            assert ds.max_score == pytest.approx(1.0)
 
 
 # ── to_json_dict ──────────────────────────────────────────────────────────────
@@ -296,12 +305,12 @@ class TestWriteFunctions:
 
 
 class TestPassThreshold:
-    def test_default_threshold_is_3(self) -> None:
-        assert PASS_THRESHOLD == pytest.approx(3.0)
+    def test_default_threshold_is_0_6(self) -> None:
+        assert PASS_THRESHOLD == pytest.approx(0.6)
 
     def test_threshold_used_in_build_report(self) -> None:
-        score_below = _make_score("a", 2.9)
-        score_above = _make_score("b", 3.0)
+        score_below = _make_score("a", 0.58)
+        score_above = _make_score("b", 0.6)
         report = build_report([score_below, score_above])
         assert report.pass_rate == pytest.approx(0.5)
 
@@ -312,13 +321,13 @@ class TestPassThreshold:
 class TestJudgeConflictExcluded:
     def test_conflicts_are_kept_but_not_aggregated(self) -> None:
         scores = [
-            _make_score("bad_deploy_01", 4.0),
+            _make_score("bad_deploy_01", 0.8),
             _make_score("db_pool_01", 0.0, judge_conflict=True),
         ]
         report = build_report(scores)
         assert report.scenarios_run == 1
         assert report.judge_conflicts == 1
-        assert report.avg_total_score == pytest.approx(4.0)
+        assert report.avg_total_score == pytest.approx(0.8)
         assert report.pass_rate == pytest.approx(1.0)
         assert all(ds.scenario_count == 1 for ds in report.dimension_stats)
         assert len(report.scores) == 2
@@ -326,7 +335,99 @@ class TestJudgeConflictExcluded:
         assert "JUDGE_CONFLICT" in to_markdown(report)
 
     def test_only_conflicts_reports_zero_scenarios(self) -> None:
-        report = build_report([_make_score(total=5.0, judge_conflict=True)])
+        report = build_report([_make_score(total=1.0, judge_conflict=True)])
         assert report.scenarios_run == 0
         assert report.avg_total_score == 0.0
         assert report.judge_conflicts == 1
+
+
+class TestJudgeFailedExcluded:
+    def test_failures_are_kept_but_not_aggregated(self) -> None:
+        scores = [
+            _make_score("a", 0.8),
+            _make_score("b", 0.0, judge_failed=True),
+        ]
+        report = build_report(scores)
+        assert report.scenarios_run == 1
+        assert report.judge_failures == 1
+        assert report.judge_conflicts == 0
+        assert report.avg_total_score == pytest.approx(0.8)
+        assert report.pass_rate == pytest.approx(1.0)
+        assert all(ds.scenario_count == 1 for ds in report.dimension_stats)
+        assert len(report.scores) == 2
+        assert to_json_dict(report)["summary"]["judge_failures"] == 1
+        markdown = to_markdown(report)
+        assert "JUDGE_FAILED" in markdown
+        assert "Judge failures (excluded) | 1" in markdown
+
+    def test_failed_ground_truth_item_still_counts(self) -> None:
+        gt = GroundTruthResult(
+            item_id="x",
+            branch="runtime/01",
+            case="iii",
+            checks=dict.fromkeys(GroundTruthCheck, 1.0),
+        )
+        report = build_report([_make_score(total=0.0, judge_failed=True)], ground_truth=[gt])
+        assert report.items_scored == 1
+        assert all(cs.item_count == 1 for cs in report.check_stats)
+        assert report.scenarios_run == 0
+
+    def test_only_failures_reports_zero_scenarios(self) -> None:
+        report = build_report([_make_score(total=1.0, judge_failed=True)])
+        assert report.scenarios_run == 0
+        assert report.avg_total_score == 0.0
+        assert report.judge_failures == 1
+
+
+class TestScaleDisplay:
+    def test_markdown_shows_0_1_scale(self) -> None:
+        assert "/ 1.00" in to_markdown(build_report(_two_scores()))
+
+
+# ── Ground-truth checks ───────────────────────────────────────────────────────
+
+
+def _gt(item_id: str, value: float, *, conflict: bool = False) -> GroundTruthResult:
+    return GroundTruthResult(
+        item_id=item_id,
+        branch="pass/01",
+        case="i",
+        checks=dict.fromkeys(GroundTruthCheck, value),
+        judge_conflict=conflict,
+    )
+
+
+class TestGroundTruth:
+    def test_check_stats_one_per_check_and_conflicts_excluded(self) -> None:
+        gt = [_gt("a", 1.0), _gt("b", 0.0, conflict=True), _gt("c", 0.0)]
+        report = build_report([], ground_truth=gt)
+        assert report.items_scored == 2
+        assert [cs.check for cs in report.check_stats] == list(GroundTruthCheck)
+        assert all(isinstance(cs, CheckStats) for cs in report.check_stats)
+        assert all(cs.pass_rate == 0.5 and cs.item_count == 2 for cs in report.check_stats)
+        assert len(report.ground_truth) == 3
+
+    def test_no_ground_truth_gives_zero_stats(self) -> None:
+        report = build_report([])
+        assert len(report.check_stats) == 4
+        assert all(cs.item_count == 0 and cs.pass_rate == 0.0 for cs in report.check_stats)
+        assert report.items_scored == 0
+        assert report.dataset_name is None
+
+    def test_json_has_ground_truth_and_run_fields(self) -> None:
+        report = build_report(
+            [_make_score()], ground_truth=[_gt("a", 1.0)], dataset_name="d", run_name="r"
+        )
+        data = to_json_dict(report)
+        assert data["summary"]["dataset"] == "d"
+        assert data["summary"]["run_name"] == "r"
+        assert data["summary"]["items_scored"] == 1
+        assert len(data["ground_truth"]["checks"]) == 4
+        assert data["ground_truth"]["items"][0]["item_id"] == "a"
+        json.dumps(data)
+
+    def test_markdown_has_ground_truth_section(self) -> None:
+        with_gt = to_markdown(build_report([], ground_truth=[_gt("a", 1.0)]))
+        assert "## Ground-Truth Checks" in with_gt
+        assert "| revert_target | 100% | 1 | 1 |" in with_gt
+        assert "## Ground-Truth Checks" not in to_markdown(build_report([]))

@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
-from sentinel.models.eval_result import DimensionScore, EvalDimension, TrajectoryScore
+from sentinel.models.eval_result import (
+    DimensionScore,
+    EvalDimension,
+    GroundTruthCheck,
+    GroundTruthResult,
+    TrajectoryScore,
+)
 
 # ── EvalDimension ─────────────────────────────────────────────────────────────
 
@@ -28,11 +36,11 @@ def test_eval_dimension_count() -> None:
 def test_dimension_score_valid() -> None:
     ds = DimensionScore(
         dimension=EvalDimension.TRIAGE_ACCURACY,
-        score=4.5,
+        score=0.9,
         reasoning="Correctly identified P1 severity and api-gateway as affected service",
     )
     assert ds.dimension is EvalDimension.TRIAGE_ACCURACY
-    assert ds.score == 4.5
+    assert ds.score == 0.9
 
 
 def test_dimension_score_zero() -> None:
@@ -47,10 +55,10 @@ def test_dimension_score_zero() -> None:
 def test_dimension_score_max() -> None:
     ds = DimensionScore(
         dimension=EvalDimension.REMEDIATION_SAFETY,
-        score=5.0,
+        score=1.0,
         reasoning="Only drafted, and the fix matches the ground truth",
     )
-    assert ds.score == 5.0
+    assert ds.score == 1.0
 
 
 def test_dimension_score_below_zero_raises() -> None:
@@ -62,11 +70,11 @@ def test_dimension_score_below_zero_raises() -> None:
         )
 
 
-def test_dimension_score_above_five_raises() -> None:
+def test_dimension_score_above_one_raises() -> None:
     with pytest.raises(ValidationError):
         DimensionScore(
             dimension=EvalDimension.MTTR,
-            score=5.1,
+            score=1.1,
             reasoning="invalid",
         )
 
@@ -76,14 +84,14 @@ def test_dimension_score_above_five_raises() -> None:
 
 def _sample_scores() -> list[DimensionScore]:
     return [
-        DimensionScore(dimension=EvalDimension.TRIAGE_ACCURACY, score=4.0, reasoning="good"),
+        DimensionScore(dimension=EvalDimension.TRIAGE_ACCURACY, score=0.8, reasoning="good"),
         DimensionScore(
-            dimension=EvalDimension.ROOT_CAUSE_CORRECTNESS, score=5.0, reasoning="perfect"
+            dimension=EvalDimension.ROOT_CAUSE_CORRECTNESS, score=1.0, reasoning="perfect"
         ),
-        DimensionScore(dimension=EvalDimension.TOOL_EFFICIENCY, score=3.5, reasoning="ok"),
-        DimensionScore(dimension=EvalDimension.MTTR, score=4.0, reasoning="fast"),
+        DimensionScore(dimension=EvalDimension.TOOL_EFFICIENCY, score=0.7, reasoning="ok"),
+        DimensionScore(dimension=EvalDimension.MTTR, score=0.8, reasoning="fast"),
         DimensionScore(
-            dimension=EvalDimension.REMEDIATION_SAFETY, score=5.0, reasoning="always gated"
+            dimension=EvalDimension.REMEDIATION_SAFETY, score=1.0, reasoning="always gated"
         ),
     ]
 
@@ -101,7 +109,7 @@ def test_trajectory_score_full() -> None:
     assert ts.incident_id == "inc-001"
     assert ts.scenario_id == "bad_deploy_01"
     assert len(ts.dimension_scores) == 5
-    assert ts.total_score == pytest.approx(4.3, abs=0.01)
+    assert ts.total_score == pytest.approx(0.86, abs=0.01)
     assert ts.judge_model == "llama-3.1-8b-instant"
 
 
@@ -113,6 +121,7 @@ def test_trajectory_score_defaults() -> None:
     )
     assert ts.dimension_scores == []
     assert ts.total_score == 0.0
+    assert ts.judge_failed is False
 
 
 def test_trajectory_score_total_out_of_range_raises() -> None:
@@ -120,7 +129,7 @@ def test_trajectory_score_total_out_of_range_raises() -> None:
         TrajectoryScore(
             incident_id="x",
             scenario_id="y",
-            total_score=6.0,
+            total_score=1.2,
             judge_model="m",
         )
 
@@ -131,10 +140,85 @@ def test_trajectory_score_json_round_trip() -> None:
         incident_id="inc-rt",
         scenario_id="scenario-rt",
         dimension_scores=scores,
-        total_score=4.0,
+        total_score=0.8,
         judge_model="llama-3.1-8b-instant",
     )
     reloaded = TrajectoryScore.model_validate_json(ts.model_dump_json())
     assert reloaded.incident_id == ts.incident_id
     assert len(reloaded.dimension_scores) == 5
     assert reloaded.dimension_scores[0].dimension is EvalDimension.TRIAGE_ACCURACY
+
+
+def test_dimension_attributes_section_6_4() -> None:
+    ts = TrajectoryScore(
+        incident_id="i", scenario_id="s", dimension_scores=_sample_scores(), judge_model="m"
+    )
+    assert ts.triage_accuracy == 0.8
+    assert ts.root_cause_correctness == 1.0
+    assert ts.tool_efficiency == 0.7
+    assert ts.mttr == 0.8
+    assert ts.remediation_safety == 1.0
+    assert ts.score_for(EvalDimension.MTTR) == 0.8
+
+
+def test_missing_dimension_reads_zero() -> None:
+    ts = TrajectoryScore(incident_id="i", scenario_id="s", judge_model="m")
+    assert ts.mttr == 0.0
+    assert ts.score_for(EvalDimension.TRIAGE_ACCURACY) == 0.0
+
+
+def test_attributes_not_serialised() -> None:
+    ts = TrajectoryScore(
+        incident_id="i", scenario_id="s", dimension_scores=_sample_scores(), judge_model="m"
+    )
+    dumped = ts.model_dump()
+    assert "triage_accuracy" not in dumped
+    assert "mttr" not in dumped
+
+
+def test_to_eval_score_shape() -> None:
+    ts = TrajectoryScore(
+        incident_id="i",
+        scenario_id="s",
+        dimension_scores=_sample_scores(),
+        total_score=0.86,
+        judge_model="openai/gpt-4.1",
+    )
+    out = ts.to_eval_score()
+    assert set(out) == {"judge_model", "judge_conflict", "judge_failed", "scores", "reasoning"}
+    assert out["judge_model"] == "openai/gpt-4.1"
+    assert out["judge_conflict"] is False
+    assert out["judge_failed"] is False
+    assert out["scores"] == {str(ds.dimension): ds.score for ds in ts.dimension_scores}
+    assert out["reasoning"] == {str(ds.dimension): ds.reasoning for ds in ts.dimension_scores}
+    assert json.loads(json.dumps(out)) == out
+    conflict = TrajectoryScore(
+        incident_id="i", scenario_id="s", judge_model="m", judge_conflict=True
+    )
+    assert conflict.to_eval_score()["judge_conflict"] is True
+    failed = TrajectoryScore(incident_id="i", scenario_id="s", judge_model="m", judge_failed=True)
+    assert failed.to_eval_score()["judge_failed"] is True
+
+
+# ── GroundTruthResult ─────────────────────────────────────────────────────────
+
+
+def test_ground_truth_result_requires_every_check() -> None:
+    checks = dict.fromkeys(GroundTruthCheck, 1.0)
+    del checks[GroundTruthCheck.REVERT_TARGET]
+    with pytest.raises(ValidationError):
+        GroundTruthResult(item_id="i", branch="pass/01", case="i", checks=checks)
+
+
+def test_ground_truth_result_values_are_binary() -> None:
+    bad = dict.fromkeys(GroundTruthCheck, 1.0) | {GroundTruthCheck.FIRED: 0.5}
+    with pytest.raises(ValidationError):
+        GroundTruthResult(item_id="i", branch="pass/01", case="i", checks=bad)
+    ok = GroundTruthResult(
+        item_id="i",
+        branch="pass/01",
+        case="i",
+        checks=dict.fromkeys(GroundTruthCheck, 1.0) | {GroundTruthCheck.FIRED: 0.0},
+    )
+    assert ok.score_for(GroundTruthCheck.FIRED) == 0.0
+    assert ok.score_for(GroundTruthCheck.CLASSIFIED) == 1.0

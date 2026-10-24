@@ -24,26 +24,26 @@ def _sample_report() -> dict[str, Any]:
                 "incident_id": "inc-001",
                 "scenario_id": "bad_deploy_01",
                 "dimension_scores": [
-                    {"dimension": "triage_accuracy", "score": 4.5, "reasoning": "Correct"},
-                    {"dimension": "root_cause_correctness", "score": 3.0, "reasoning": "Partial"},
-                    {"dimension": "tool_efficiency", "score": 4.0, "reasoning": "Good"},
-                    {"dimension": "mttr", "score": 3.5, "reasoning": "OK"},
-                    {"dimension": "remediation_safety", "score": 5.0, "reasoning": "Perfect"},
+                    {"dimension": "triage_accuracy", "score": 0.9, "reasoning": "Correct"},
+                    {"dimension": "root_cause_correctness", "score": 0.6, "reasoning": "Partial"},
+                    {"dimension": "tool_efficiency", "score": 0.8, "reasoning": "Good"},
+                    {"dimension": "mttr", "score": 0.7, "reasoning": "OK"},
+                    {"dimension": "remediation_safety", "score": 1.0, "reasoning": "Perfect"},
                 ],
-                "total_score": 4.0,
+                "total_score": 0.8,
                 "judge_model": "llama-3.3-70b-versatile",
             },
             {
                 "incident_id": "inc-002",
                 "scenario_id": "db_pool_01",
                 "dimension_scores": [
-                    {"dimension": "triage_accuracy", "score": 2.0, "reasoning": "Wrong"},
-                    {"dimension": "root_cause_correctness", "score": 1.5, "reasoning": "Missed"},
-                    {"dimension": "tool_efficiency", "score": 3.0, "reasoning": "OK"},
-                    {"dimension": "mttr", "score": 2.0, "reasoning": "Slow"},
-                    {"dimension": "remediation_safety", "score": 4.0, "reasoning": "Safe"},
+                    {"dimension": "triage_accuracy", "score": 0.4, "reasoning": "Wrong"},
+                    {"dimension": "root_cause_correctness", "score": 0.3, "reasoning": "Missed"},
+                    {"dimension": "tool_efficiency", "score": 0.6, "reasoning": "OK"},
+                    {"dimension": "mttr", "score": 0.4, "reasoning": "Slow"},
+                    {"dimension": "remediation_safety", "score": 0.8, "reasoning": "Safe"},
                 ],
-                "total_score": 2.5,
+                "total_score": 0.5,
                 "judge_model": "llama-3.3-70b-versatile",
             },
         ],
@@ -112,7 +112,7 @@ class TestEvalReportEndpoint:
             data = client.get("/api/eval-report").json()
         for r in data["results"]:
             assert "total_score" in r
-            assert 0.0 <= r["total_score"] <= 5.0
+            assert 0.0 <= r["total_score"] <= 1.0
 
     def test_result_has_judge_model(self, tmp_path: Path) -> None:
         report_file = tmp_path / "eval_report.json"
