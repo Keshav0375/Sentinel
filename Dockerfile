@@ -18,6 +18,11 @@ COPY scripts/install_locked.py scripts/
 # Main group only, hash-checked; torch from the CPU wheel index; then `pip check`.
 RUN /opt/venv/bin/python scripts/install_locked.py --main-only
 
+# Bake the embedding model into a fixed HF cache (same id as Settings.sentinel_embedding_model,
+# loaded the same way as memory/embeddings.py) so the pod never reaches huggingface.co.
+ENV HF_HOME=/opt/hf
+RUN /opt/venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
 
@@ -26,15 +31,19 @@ FROM python:3.12-slim AS runtime
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH=/app/src \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/hf \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
-# Non-root with a fixed numeric UID (the pod can enforce runAsNonRoot); the home holds
-# the sentence-transformers model cache.
+# Non-root with a fixed numeric UID (the pod can enforce runAsNonRoot).
 RUN groupadd --system --gid 10001 sentinel \
  && useradd --system --uid 10001 --gid sentinel --create-home --home-dir /home/sentinel \
     --shell /usr/sbin/nologin sentinel
 
 COPY --from=builder /opt/venv /opt/venv
+# Read-only for the non-root user: the model is only ever read.
+COPY --from=builder /opt/hf /opt/hf
 
 WORKDIR /app
 COPY src/ src/
