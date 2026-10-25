@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
+import importlib.util
 from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
 
+from sentinel.models import alert as alert_module
 from sentinel.models.alert import (
     SIGNAL_TYPES,
     TRUNCATED,
-    AlertPayload,
-    AlertSeverity,
-    AlertSource,
     IncidentAlert,
     IncidentContext,
     IncidentPayload,
@@ -20,109 +19,7 @@ from sentinel.models.alert import (
     PRDetails,
     parse_tags,
 )
-
-# ── AlertSource ───────────────────────────────────────────────────────────────
-
-
-def test_alert_source_values() -> None:
-    assert AlertSource.DATADOG == "datadog"
-    assert AlertSource.PAGERDUTY == "pagerduty"
-
-
-def test_alert_source_from_string() -> None:
-    assert AlertSource("datadog") is AlertSource.DATADOG
-    assert AlertSource("pagerduty") is AlertSource.PAGERDUTY
-
-
-# ── AlertSeverity ─────────────────────────────────────────────────────────────
-
-
-def test_alert_severity_values() -> None:
-    assert AlertSeverity.CRITICAL == "critical"
-    assert AlertSeverity.HIGH == "high"
-    assert AlertSeverity.WARNING == "warning"
-    assert AlertSeverity.LOW == "low"
-    assert AlertSeverity.INFO == "info"
-
-
-# ── AlertPayload ──────────────────────────────────────────────────────────────
-
-
-def _minimal_payload(**overrides: object) -> AlertPayload:
-    defaults: dict[str, object] = {
-        "source": AlertSource.DATADOG,
-        "service": "api-gateway",
-        "metric": "error_rate",
-        "threshold": 0.05,
-        "current_value": 0.34,
-        "severity": AlertSeverity.CRITICAL,
-    }
-    defaults.update(overrides)
-    return AlertPayload(**defaults)  # type: ignore[arg-type]
-
-
-def test_alert_payload_required_fields() -> None:
-    p = _minimal_payload()
-    assert p.source is AlertSource.DATADOG
-    assert p.service == "api-gateway"
-    assert p.metric == "error_rate"
-    assert p.threshold == 0.05
-    assert p.current_value == 0.34
-    assert p.severity is AlertSeverity.CRITICAL
-
-
-def test_alert_payload_defaults_populated() -> None:
-    p = _minimal_payload()
-    assert p.alert_id != ""
-    assert p.timestamp.tzinfo is not None  # timezone-aware
-    assert p.metadata == {}
-
-
-def test_alert_payload_alert_id_unique() -> None:
-    p1 = _minimal_payload()
-    p2 = _minimal_payload()
-    assert p1.alert_id != p2.alert_id
-
-
-def test_alert_payload_explicit_alert_id() -> None:
-    p = _minimal_payload(alert_id="alert-123")
-    assert p.alert_id == "alert-123"
-
-
-def test_alert_payload_metadata_stored() -> None:
-    p = _minimal_payload(metadata={"region": "us-east-1", "env": "prod"})
-    assert p.metadata["region"] == "us-east-1"
-    assert p.metadata["env"] == "prod"
-
-
-def test_alert_payload_explicit_timestamp() -> None:
-    ts = datetime(2026, 5, 10, 3, 0, 1, tzinfo=UTC)
-    p = _minimal_payload(timestamp=ts)
-    assert p.timestamp == ts
-
-
-def test_alert_payload_string_source_coerced() -> None:
-    p = _minimal_payload(source="pagerduty")
-    assert p.source is AlertSource.PAGERDUTY
-
-
-def test_alert_payload_invalid_source_raises() -> None:
-    with pytest.raises(ValidationError):
-        _minimal_payload(source="newrelic")
-
-
-def test_alert_payload_invalid_severity_raises() -> None:
-    with pytest.raises(ValidationError):
-        _minimal_payload(severity="urgent")
-
-
-def test_alert_payload_json_round_trip() -> None:
-    p = _minimal_payload(metadata={"key": "value"})
-    reloaded = AlertPayload.model_validate_json(p.model_dump_json())
-    assert reloaded.alert_id == p.alert_id
-    assert reloaded.service == p.service
-    assert reloaded.metadata == p.metadata
-
+from sentinel.models.pipeline import PipelineInput
 
 # ── IncidentPayload ───────────────────────────────────────────────────────────
 
@@ -285,15 +182,61 @@ def test_pr_sha() -> None:
     assert IncidentAlert(title="t", context=padded).pr_sha == "abc1234"
 
 
-def test_from_phase1_maps_fields() -> None:
-    p = _minimal_payload(service="svc", metadata={})
-    alert = IncidentAlert.from_phase1(p)
-    assert alert.alert_id == p.alert_id
-    assert alert.source == "datadog"
-    assert alert.severity == "critical"
-    assert alert.service == "svc"
-    assert alert.tags.service == "svc"
-    assert alert.timestamp == p.timestamp
-    assert alert.title == f"{p.metric} {p.current_value} (threshold {p.threshold}) on svc"
-    titled = IncidentAlert.from_phase1(_minimal_payload(metadata={"title": " Checkout down "}))
-    assert titled.title == "Checkout down"
+# ── PRDetails.branch (the eval label) ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("deployfail/03", "deployfail/03"),
+        (" runtime/01 ", "runtime/01"),
+        ("a.b_c-D/9", "a.b_c-D/9"),
+        ("x" * 100, "x" * 100),
+    ],
+)
+def test_branch_keeps_a_valid_name(value: str, expected: str) -> None:
+    assert PRDetails(branch=value).branch == expected
+
+
+@pytest.mark.parametrize("value", ["", "  ", "x" * 101, "a b", "run;rm -rf", "ü/01", "a\nb"])
+def test_branch_drops_an_invalid_name_without_rejecting(value: str) -> None:
+    assert PRDetails(branch=value).branch is None
+    payload = IncidentPayload(
+        signal_type="runtime_error",
+        correlation_id=_CID,
+        title="t",
+        context=IncidentContext.model_validate({"pr_details": {"branch": value, "number": 1}}),
+    )
+    assert payload.context.pr_details is not None
+    assert payload.context.pr_details.branch is None
+    assert payload.context.pr_details.number == 1
+
+
+def test_agent_view_drops_only_the_branch() -> None:
+    pr = PRDetails(
+        number=31, sha="abc1234", author="k", branch="deployfail/03", files_changed=["a"]
+    )
+    alert = IncidentAlert(title="t", context=IncidentContext(pr_details=pr))
+    view = alert.agent_view()
+    assert view.context.pr_details is not None
+    assert view.context.pr_details.branch is None
+    assert view.context.pr_details.number == 31
+    assert view.context.pr_details.sha == "abc1234"
+    assert view.context.pr_details.author == "k"
+    assert view.context.pr_details.files_changed == ["a"]
+    assert alert.context.pr_details is not None
+    assert alert.context.pr_details.branch == "deployfail/03"
+    assert "deployfail/03" not in view.model_dump_json()
+    assert "deployfail/03" not in view.model_dump_json(exclude_none=True)
+    bare = IncidentAlert(title="t")
+    assert bare.agent_view() is bare
+    no_branch = IncidentAlert(title="t", context=IncidentContext(pr_details=PRDetails(number=1)))
+    assert no_branch.agent_view() is no_branch
+
+
+def test_phase1_models_are_gone() -> None:
+    for name in ("AlertPayload", "AlertSource", "AlertSeverity"):
+        assert not hasattr(alert_module, name)
+    assert not hasattr(IncidentAlert, "from_phase1")
+    assert not hasattr(PipelineInput, "from_alert")
+    assert importlib.util.find_spec("sentinel.models.log_entry") is None

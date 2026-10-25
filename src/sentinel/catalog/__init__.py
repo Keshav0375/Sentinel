@@ -19,3 +19,9 @@ CATALOG_PATH: Final[Path] = Path(__file__).resolve().parent / "branches.yaml"
 def load_catalog() -> tuple[BranchTruth, ...]:
     """Every catalog entry, in file order (read once: the file never changes at runtime)."""
     return tuple(load_branches(CATALOG_PATH).values())
+
+
+@lru_cache(maxsize=1)
+def catalog_branches() -> frozenset[str]:
+    """Every catalog branch name: the only labels a dataset item may carry (decision 2026-10-25)."""
+    return frozenset(truth.branch for truth in load_catalog())

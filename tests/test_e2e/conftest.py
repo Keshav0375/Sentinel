@@ -39,7 +39,7 @@ from sentinel.agents import orchestrator
 from sentinel.agents.orchestrator import REFLEXION_MAX_LOOPS
 from sentinel.api import auth
 from sentinel.catalog import CATALOG_PATH
-from sentinel.eval.dataset_writer import LangfuseScenarioWriter
+from sentinel.eval.dataset_writer import DATASET_WRITES, LangfuseScenarioWriter
 from sentinel.infra.database import create_pool
 from sentinel.infra.incident_tasks import IncidentTasks
 from sentinel.models.analysis import AnalysisResult
@@ -66,6 +66,7 @@ SHA_B = "4" * 40  # PR 32, runtime/01
 SHA_C = "5" * 40  # PR 33, runtime/01
 OTHER = "6" * 40
 APP_HOST = "test"
+DRAIN_TIMEOUT_S = 30.0
 
 # ── The test database ─────────────────────────────────────────────────────────
 
@@ -279,10 +280,11 @@ def _bearer(key: RSAPrivateKey) -> dict[str, str]:
 
 
 async def drain(tasks: IncidentTasks) -> None:
-    """Wait for every in-flight incident task."""
+    """Wait (bounded) for every in-flight incident task, then for its background dataset write."""
     pending = list(tasks)
     if pending:
-        await asyncio.gather(*pending)
+        await asyncio.wait_for(asyncio.gather(*pending), DRAIN_TIMEOUT_S)
+    assert await DATASET_WRITES.drain(DRAIN_TIMEOUT_S) == []
 
 
 @dataclass

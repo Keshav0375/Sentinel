@@ -14,16 +14,12 @@ import pytest
 from pydantic import ValidationError
 
 from sentinel.models.alert import (
-    AlertPayload,
-    AlertSeverity,
-    AlertSource,
     IncidentAlert,
     IncidentContext,
     IncidentPayload,
     PRDetails,
 )
 from sentinel.models.pipeline import (
-    DEFAULT_SIGNAL_TYPE,
     SIGNAL_TYPES,
     PipelineInput,
     PipelineResult,
@@ -31,18 +27,6 @@ from sentinel.models.pipeline import (
 from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
 
 _REPO = Path(__file__).resolve().parents[2]
-
-
-def _alert(**metadata: Any) -> AlertPayload:
-    return AlertPayload(
-        source=AlertSource.DATADOG,
-        service="sentinel-watchtower",
-        metric="synthetics.http.failed",
-        threshold=1,
-        current_value=3,
-        severity=AlertSeverity.CRITICAL,
-        metadata=metadata,
-    )
 
 
 def _incident_alert() -> IncidentAlert:
@@ -84,45 +68,16 @@ def _common(incident_id: str) -> dict[str, Any]:
 
 def test_signal_types_are_the_two_cases() -> None:
     assert SIGNAL_TYPES == ("deploy_failure", "runtime_error")
-    assert DEFAULT_SIGNAL_TYPE == "runtime_error"
-
-
-def test_from_alert_defaults_to_the_full_pipeline_and_a_fresh_correlation_id() -> None:
-    incident_id = str(uuid.uuid4())
-    request = PipelineInput.from_alert(incident_id, _alert())
-    assert request.incident_id == incident_id
-    assert request.signal_type == "runtime_error"
-    assert uuid.UUID(request.correlation_id).version == 4
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("deploy_failure", "deploy_failure"),
-        ("  DEPLOY_FAILURE ", "deploy_failure"),
-        ("runtime_error", "runtime_error"),
-        ("deploy-failure", "runtime_error"),
-        ("rollback_now", "runtime_error"),
-        (1, "runtime_error"),
-        (None, "runtime_error"),
-    ],
-)
-def test_from_alert_reads_the_signal_type_from_metadata(value: object, expected: str) -> None:
-    request = PipelineInput.from_alert(str(uuid.uuid4()), _alert(signal_type=value))
-    assert request.signal_type == expected
-
-
-def test_from_alert_keeps_a_uuid_correlation_id_and_replaces_anything_else() -> None:
-    correlation_id = str(uuid.uuid4())
-    kept = PipelineInput.from_alert(str(uuid.uuid4()), _alert(correlation_id=correlation_id))
-    assert kept.correlation_id == correlation_id
-    replaced = PipelineInput.from_alert(str(uuid.uuid4()), _alert(correlation_id="corr-1"))
-    assert replaced.correlation_id != "corr-1" and uuid.UUID(replaced.correlation_id)
 
 
 def test_incident_and_correlation_ids_must_be_uuids() -> None:
     with pytest.raises(ValidationError, match="not a UUID"):
-        PipelineInput.from_alert("eval-bad_deploy_01-abc", _alert())
+        PipelineInput(
+            incident_id="eval-bad_deploy_01-abc",
+            alert=_incident_alert(),
+            signal_type="runtime_error",
+            correlation_id=str(uuid.uuid4()),
+        )
     with pytest.raises(ValidationError, match="not a UUID"):
         PipelineInput(
             incident_id=str(uuid.uuid4()),
@@ -141,7 +96,12 @@ def test_incident_and_correlation_ids_must_be_uuids() -> None:
 
 def test_ids_are_normalised() -> None:
     raw = uuid.uuid4()
-    request = PipelineInput.from_alert(raw.hex.upper(), _alert())
+    request = PipelineInput(
+        incident_id=raw.hex.upper(),
+        alert=_incident_alert(),
+        signal_type="runtime_error",
+        correlation_id=str(uuid.uuid4()),
+    )
     assert request.incident_id == str(raw)
 
 
@@ -164,7 +124,12 @@ def test_from_payload_carries_signal_correlation_and_pin() -> None:
 
 
 def test_pinned_sha_none_without_pr_details() -> None:
-    request = PipelineInput.from_alert(str(uuid.uuid4()), _alert())
+    request = PipelineInput(
+        incident_id=str(uuid.uuid4()),
+        alert=_incident_alert(),
+        signal_type="runtime_error",
+        correlation_id=str(uuid.uuid4()),
+    )
     assert request.pinned_sha is None
     blank = PipelineInput(
         incident_id=str(uuid.uuid4()),

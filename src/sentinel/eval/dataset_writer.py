@@ -6,8 +6,9 @@ dataset; this module writes them. When an incident reaches ``rollback_proposed``
 creates one item whose ``input`` is the runner's own ``ScenarioRun`` schema. Rules:
 
 - **Branch label (D1).** ``alert.context.pr_details.branch`` (the PR's ``head.ref``, forwarded
-  by ``scripts/incident_dispatch.py``). No branch, or a blank one: no item, a
-  ``scenario_run_item_skipped`` warning.
+  by ``scripts/incident_dispatch.py``). It must pass ``BRANCH_PATTERN`` (the payload validator
+  drops one that does not) and be a scenario catalog branch, else no item and a
+  ``scenario_run_item_skipped`` warning with a reason (the value is never logged).
 - **PR and sha (D2).** ``pr_number`` is ``pr_details.number``; ``merge_sha`` is the stripped
   ``pr_details.sha``, or None when it is not 7-40 hex.
 - **One incident per item (D3).** ``incidents`` holds exactly the one terminal incident.
@@ -16,11 +17,14 @@ creates one item whose ``input`` is the runner's own ``ScenarioRun`` schema. Rul
 - **R14, narrow exception (D5).** The LLM-written root cause, evidence summary, justification,
   hypothesis, evidence and missing items are exported. Raw clips of tool output are not: the
   escalation's fallback evidence (``tool: output`` clips) is emptied, and an unparsed analysis
-  reply used as the hypothesis (and the root cause) is replaced by :data:`WITHHELD_REPLY`.
+  reply used as the hypothesis (and the root cause) is replaced by :data:`WITHHELD_REPLY`, on
+  every escalation, the resolution-drafted one included.
 - **Trajectory (D6).** The orchestrator's status-only timeline (ok / error:kind), never a
   tool payload and never a span export.
-- **Client (D7).** The LangFuse v3 SDK, in a worker thread (the calls block). The item id is
-  the incident UUID, so a re-write is idempotent. Best effort: a failure is logged, never raised.
+- **Client (D7).** The LangFuse v3 SDK on a daemon thread, started in the background by the
+  orchestrator (:class:`DatasetWrites`, hard ``DATASET_WRITE_TIMEOUT_S``, drained within the
+  shutdown grace). The item id is the incident UUID, so a re-write is idempotent. Best effort:
+  a failure is logged (type and field names only), never raised.
 - **Gating (D8).** :func:`default_writer` is None on the fake LLM or without LangFuse keys.
 """
 
@@ -28,12 +32,16 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, partial
 from typing import Any, Final, Protocol, cast
 
+from langfuse.api.core.api_error import ApiError
 from pydantic import ValidationError
 
+from sentinel.catalog import catalog_branches
 from sentinel.config import Settings
 from sentinel.eval.runner import DATASET_NAME, IncidentRecord, ScenarioRun
 from sentinel.infra.logging import get_logger
@@ -44,8 +52,13 @@ from sentinel.models.reflexion import SuspectDeploy
 
 __all__ = [
     "DATASET_DESCRIPTION",
+    "DATASET_WRITES",
+    "DATASET_WRITE_TIMEOUT_S",
+    "SKIP_NOT_IN_CATALOG",
+    "SKIP_NO_BRANCH",
     "WITHHELD_REPLY",
     "DatasetClient",
+    "DatasetWrites",
     "LangfuseScenarioWriter",
     "ScenarioRunWriter",
     "TerminalRun",
@@ -53,6 +66,7 @@ __all__ = [
     "default_writer",
     "export_result",
     "scenario_run_item",
+    "skip_reason",
     "trajectory",
 ]
 
@@ -65,6 +79,15 @@ DATASET_DESCRIPTION: Final = (
 WITHHELD_REPLY: Final = "[withheld: the analysis reply did not parse; raw replies are not exported]"
 _SHA_RE: Final = re.compile(r"^[0-9a-fA-F]{7,40}$")
 _DEPLOY_RE: Final = re.compile(r"^pr-\d+-[0-9a-fA-F]{7,40}$")
+# Hard bound on one background write (decision 2026-10-25, amended after review).
+DATASET_WRITE_TIMEOUT_S: Final = 10.0
+# Unwinding a cancelled write: it only awaits a future.
+_CANCEL_WAIT_S: Final = 0.5
+SKIP_NO_BRANCH: Final = "no valid pr_details.branch"
+SKIP_NOT_IN_CATALOG: Final = "pr_details.branch is not a scenario catalog branch"
+_HTTP_CONFLICT: Final = 409
+_FIELD_RE: Final = re.compile(r"[a-z_][a-z0-9_]{0,63}")
+_THREAD_NAME: Final = "sentinel-dataset-item"
 
 
 @dataclass(frozen=True)
@@ -146,12 +169,23 @@ def trajectory(run: TerminalRun) -> dict[str, Any]:
     }
 
 
-def scenario_run_item(run: TerminalRun) -> dict[str, Any] | None:
-    """The dataset item's ``input`` (a ``ScenarioRun`` dump); None when there is no branch (D1)."""
+def skip_reason(run: TerminalRun) -> str | None:
+    """Why *run* gets no dataset item (D1), or None when its branch label is usable."""
     details = run.request.alert.context.pr_details
-    branch = details.branch.strip() if details is not None and details.branch else ""
-    if details is None or not branch:
+    if details is None or details.branch is None:
+        return SKIP_NO_BRANCH
+    if details.branch not in catalog_branches():
+        return SKIP_NOT_IN_CATALOG
+    return None
+
+
+def scenario_run_item(run: TerminalRun) -> dict[str, Any] | None:
+    """The dataset item's ``input`` (a ``ScenarioRun`` dump); None when it is skipped (D1)."""
+    if skip_reason(run) is not None:
         return None
+    details = run.request.alert.context.pr_details
+    assert details is not None and details.branch is not None  # skip_reason checked both
+    branch = details.branch
     sha = run.request.alert.pr_sha
     scenario = ScenarioRun(
         branch=branch,
@@ -183,18 +217,21 @@ class LangfuseScenarioWriter:
     async def write(self, run: TerminalRun) -> bool:
         """Create the incident's item; True only when the item call returned."""
         incident_id = run.result.incident_id
+        reason = skip_reason(run)
+        if reason is not None:
+            logger.warning("scenario_run_item_skipped", incident_id=incident_id, reason=reason)
+            return False
         try:
             item = scenario_run_item(run)
         except ValidationError as exc:
             self._failed(incident_id, exc)
             return False
-        if item is None:
-            logger.warning(
-                "scenario_run_item_skipped", incident_id=incident_id, reason="no pr_details.branch"
-            )
+        if item is None:  # unreachable after skip_reason; narrows the type
             return False
         try:
-            await asyncio.to_thread(self._create, incident_id, run.request.correlation_id, item)
+            await _in_daemon_thread(
+                partial(self._create, incident_id, run.request.correlation_id, item)
+            )
         except Exception as exc:
             self._failed(incident_id, exc)
             return False
@@ -207,11 +244,15 @@ class LangfuseScenarioWriter:
         return True
 
     def _failed(self, incident_id: str, exc: Exception) -> None:
+        """Log the failure's type (and a ValidationError's field names), never its message."""
+        extra: dict[str, Any] = {}
+        if isinstance(exc, ValidationError):
+            extra["fields"] = sorted({_field_path(err["loc"]) for err in exc.errors()})
         logger.warning(
             "scenario_run_item_failed",
             incident_id=incident_id,
             error_type=type(exc).__name__,
-            error=str(exc),
+            **extra,
         )
 
     def _create(self, incident_id: str, correlation_id: str, item: dict[str, Any]) -> None:
@@ -220,13 +261,18 @@ class LangfuseScenarioWriter:
         if not self._dataset_ready:
             try:
                 client.create_dataset(name=self._dataset_name, description=DATASET_DESCRIPTION)
-            except Exception as exc:  # already exists, most likely
+                self._dataset_ready = True
+            except Exception as exc:
+                # Ready only when it already exists (409); any other failure retries next write.
+                conflict = isinstance(exc, ApiError) and exc.status_code == _HTTP_CONFLICT
+                self._dataset_ready = conflict
                 logger.info(
-                    "scenario_dataset_create_skipped",
+                    "scenario_dataset_create_skipped"
+                    if conflict
+                    else "scenario_dataset_create_failed",
                     dataset=self._dataset_name,
                     error_type=type(exc).__name__,
                 )
-            self._dataset_ready = True
         client.create_dataset_item(
             dataset_name=self._dataset_name,
             input=item,
@@ -234,6 +280,96 @@ class LangfuseScenarioWriter:
             source_trace_id=incident_trace_id(incident_id),
             metadata={"correlation_id": correlation_id},
         )
+
+
+def _field_path(loc: tuple[int | str, ...]) -> str:
+    """A ValidationError location with every segment that is not a field-name shape as ``*``."""
+    return ".".join(
+        part if isinstance(part, str) and _FIELD_RE.fullmatch(part) else "*" for part in loc
+    )
+
+
+async def _in_daemon_thread(fn: Callable[[], None]) -> None:
+    """Run blocking *fn* on a daemon thread and await it (see D7 in the module doc)."""
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future[None] = loop.create_future()
+
+    def settle(error: Exception | None) -> None:
+        if done.done():
+            return  # the waiting task was cancelled (timeout or shutdown)
+        if error is None:
+            done.set_result(None)
+        else:
+            done.set_exception(error)
+
+    def body() -> None:
+        error: Exception | None = None
+        try:
+            fn()
+        except Exception as exc:  # handed to the awaiting task
+            error = exc
+        try:
+            loop.call_soon_threadsafe(settle, error)
+        except RuntimeError:
+            pass  # the loop is closed: nobody waits any more
+
+    threading.Thread(target=body, name=_THREAD_NAME, daemon=True).start()
+    await done
+
+
+class DatasetWrites:
+    """In-flight background dataset writes: each bounded by *timeout_s*, drained at shutdown."""
+
+    def __init__(self, timeout_s: float = DATASET_WRITE_TIMEOUT_S) -> None:
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        self._timeout_s = timeout_s
+        self._tasks: dict[asyncio.Task[None], str] = {}
+
+    def __len__(self) -> int:
+        return len(self._tasks)
+
+    def start(self, writer: ScenarioRunWriter, run: TerminalRun) -> asyncio.Task[None]:
+        """Start *writer*'s write of *run* in the background; the returned task never raises."""
+        incident_id = run.result.incident_id
+        task = asyncio.create_task(self._write(writer, run), name=f"dataset-item-{incident_id}")
+        self._tasks[task] = incident_id
+        task.add_done_callback(self._done)
+        return task
+
+    def _done(self, task: asyncio.Task[None]) -> None:
+        self._tasks.pop(task, None)
+
+    async def _write(self, writer: ScenarioRunWriter, run: TerminalRun) -> None:
+        incident_id = run.result.incident_id
+        try:
+            async with asyncio.timeout(self._timeout_s):
+                await writer.write(run)
+        except TimeoutError:
+            logger.warning(
+                "scenario_run_item_timeout", incident_id=incident_id, timeout_s=self._timeout_s
+            )
+        except Exception as exc:
+            logger.warning(
+                "scenario_run_item_failed", incident_id=incident_id, error_type=type(exc).__name__
+            )
+
+    async def drain(self, grace_s: float) -> list[str]:
+        """Wait up to *grace_s* for the writes, then cancel the rest; their incident ids."""
+        snapshot = dict(self._tasks)
+        if not snapshot:
+            return []
+        _, pending = await asyncio.wait(snapshot, timeout=max(grace_s, 0.0))
+        for task in pending:
+            logger.warning("scenario_run_item_cancelled_on_shutdown", incident_id=snapshot[task])
+            task.cancel()
+        if pending:
+            await asyncio.wait(pending, timeout=_CANCEL_WAIT_S)
+        return sorted(snapshot[task] for task in pending)
+
+
+# The process's writes; ``main.lifespan`` drains it at shutdown.
+DATASET_WRITES: Final = DatasetWrites()
 
 
 @cache

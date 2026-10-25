@@ -29,9 +29,13 @@ from sentinel import main
 from sentinel.api import auth
 from sentinel.api.auth import require_incident_write
 from sentinel.config import Settings
+from sentinel.eval.dataset_writer import DatasetWrites, TerminalRun
 from sentinel.infra import database, workload_identity
 from sentinel.infra import incident_tasks as tasks_module
 from sentinel.infra.workload_identity import POSTGRES_ENTRA_SCOPE
+from sentinel.models.alert import IncidentAlert
+from sentinel.models.pipeline import PipelineInput, PipelineResult
+from sentinel.models.tools import EscalationContext
 
 TENANT = "11111111-2222-3333-4444-555555555555"
 CLIENT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -479,3 +483,91 @@ async def test_shutdown_logs_cancelled_incident_before_closing_the_pool(
         "pool",
         "credential",
     ]
+
+
+def _terminal_run() -> TerminalRun:
+    incident_id = str(uuid4())
+    request = PipelineInput(
+        incident_id=incident_id,
+        alert=IncidentAlert(title="t"),
+        signal_type="runtime_error",
+        correlation_id=str(uuid4()),
+    )
+    result = PipelineResult(
+        incident_id=incident_id,
+        status="escalated",
+        resolution_type="escalated",
+        root_cause="not sure",
+        confidence=0.4,
+        escalation=EscalationContext(
+            hypothesis="not sure", evidence=["e"], confidence=0.4, missing=["x"]
+        ),
+        reflexion_loops=0,
+        tool_calls_used=0,
+        tokens_used=0,
+    )
+    return TerminalRun(
+        request=request,
+        result=result,
+        timeline=(),
+        suspect=None,
+        raw_hypothesis=False,
+        raw_evidence=False,
+    )
+
+
+async def test_shutdown_drains_a_dataset_write_before_the_traces_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _teardown_harness(monkeypatch)
+    monkeypatch.setenv("SENTINEL_SHUTDOWN_GRACE_S", "5")
+    writes = DatasetWrites()
+    monkeypatch.setattr(main, "DATASET_WRITES", writes)
+
+    class Writer:
+        async def write(self, run: TerminalRun) -> bool:
+            await asyncio.sleep(0.05)
+            events.append("item")
+            return True
+
+    monkeypatch.setattr(
+        main, "_wire_app", lambda _a, _s, _p, _t: writes.start(Writer(), _terminal_run())
+    )
+
+    async with main.lifespan(FastAPI()):
+        pass
+
+    assert events == ["item", "traces", "pool", "credential"]
+    assert len(writes) == 0
+
+
+async def test_shutdown_cancels_a_hanging_dataset_write_within_the_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _teardown_harness(monkeypatch)
+    monkeypatch.setenv("SENTINEL_SHUTDOWN_GRACE_S", "0.2")
+    writes = DatasetWrites(timeout_s=60)
+    monkeypatch.setattr(main, "DATASET_WRITES", writes)
+
+    class Writer:
+        async def write(self, run: TerminalRun) -> bool:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                events.append("write_cancelled")
+                raise
+            return True  # pragma: no cover
+
+    monkeypatch.setattr(
+        main, "_wire_app", lambda _a, _s, _p, _t: writes.start(Writer(), _terminal_run())
+    )
+
+    lifespan = main.lifespan(FastAPI())
+    await lifespan.__aenter__()
+    started = time.monotonic()
+    await lifespan.__aexit__(None, None, None)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2 + 1.0
+    assert events == ["write_cancelled", "traces", "pool", "credential"]
+    assert len(writes) == 0

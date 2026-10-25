@@ -42,8 +42,10 @@ verified against: after the incident row is stored, its ``incident_id`` is set t
 incident (``link_deployment``; a failure is logged, never fatal).
 
 A terminal incident also becomes one LangFuse dataset item (``sentinel-scenario-runs``,
-:mod:`sentinel.eval.dataset_writer`), after it is stored: the PR's head ref labels it, raw
-tool-output clips are stripped (R14), and it is a no-op on the fake LLM or without LangFuse.
+:mod:`sentinel.eval.dataset_writer`), after it is stored, as a tracked background write (hard
+``DATASET_WRITE_TIMEOUT_S``) that never delays the result, drained at shutdown: the PR's head ref
+labels it (a catalog branch only; never shown to an agent), raw tool-output clips are stripped
+(R14), and it is a no-op on the fake LLM or without LangFuse.
 ``resolved_at`` is set when the incident is stored, so ``mttr_seconds`` is the pipeline
 duration.
 
@@ -92,7 +94,13 @@ from sentinel.agents.reverification import (
 )
 from sentinel.agents.triage import TRIAGE_AGENT_NAME, build_triage_agent
 from sentinel.config import Settings
-from sentinel.eval.dataset_writer import ScenarioRunWriter, TerminalRun, default_writer
+from sentinel.eval.dataset_writer import (
+    DATASET_WRITES,
+    DatasetWrites,
+    ScenarioRunWriter,
+    TerminalRun,
+    default_writer,
+)
 from sentinel.exceptions import ToolBudgetExhausted
 from sentinel.infra.logging import get_logger
 from sentinel.infra.tracing import (
@@ -200,11 +208,13 @@ class PipelineDeps:
         pool: The ``deployments`` pool for ``get_deploy_details`` and the rollback-target
             cross-check; None without ``DATABASE_URL`` (the tool reports "unavailable" and
             no rollback can be proposed).
-        persist: Store the incident in episodic memory at the end. False for synthetic
-            runs (eval, scenario scripts): a stored run would be recalled by
+        persist: Store the incident in episodic memory, and write its dataset item, at the
+            end. False for synthetic runs (tests): a stored run would be recalled by
             ``search_past_incidents`` as a past incident of the service.
         dataset_writer: Where the terminal-state LangFuse dataset item goes; None →
             ``default_writer(settings)`` (no-op on the fake LLM or without LangFuse).
+        dataset_writes: Where the background write is tracked; None → the process-wide
+            ``DATASET_WRITES`` the lifespan drains.
     """
 
     settings: Settings
@@ -213,6 +223,7 @@ class PipelineDeps:
     pool: asyncpg.Pool | None = None
     persist: bool = True
     dataset_writer: ScenarioRunWriter | None = None
+    dataset_writes: DatasetWrites | None = None
 
 
 # ── The tool-call budget (§4.6) ───────────────────────────────────────────────
@@ -472,7 +483,7 @@ class _IncidentRun:
         )
         text = _prompt(
             f"Triage incident {self.request.incident_id} on {self.service}.",
-            ("Alert", self.request.alert),
+            ("Alert", self.request.alert.agent_view()),
         )
         routed = await self._call(agent, "triage", text)
         return self._parsed(agent.name, "triage", routed, TriageResult)
@@ -485,7 +496,7 @@ class _IncidentRun:
             instructions=self._instructions[ANALYSIS_AGENT_NAME],
         )
         sections: list[tuple[str, object]] = [
-            ("Alert", self.request.alert),
+            ("Alert", self.request.alert.agent_view()),
             ("Triage", self.triage if self.triage is not None else "unavailable"),
         ]
         lead = (
@@ -746,14 +757,14 @@ class _IncidentRun:
 
     def terminal(self, result: PipelineResult) -> TerminalRun:
         """*result* with what the dataset item needs (D1-D6 of ``eval.dataset_writer``)."""
-        raw = result.escalation is not None and not self.escalation_drafted
+        escalated = result.escalation is not None
         return TerminalRun(
             request=self.request,
             result=result,
             timeline=tuple(self.timeline),
             suspect=self.critique.deploy if self.critique else None,
-            raw_hypothesis=raw and self.unparsed_hypothesis,
-            raw_evidence=raw and self.fallback_evidence,
+            raw_hypothesis=escalated and self.unparsed_hypothesis,
+            raw_evidence=escalated and not self.escalation_drafted and self.fallback_evidence,
         )
 
     def stored(self, result: PipelineResult) -> tuple[Incident, IncidentOutcome]:
@@ -813,19 +824,20 @@ async def _store(run: _IncidentRun, result: PipelineResult) -> None:
         await _link_deployment(run, run.verified_deploy_id)
 
 
-async def _write_dataset_item(run: _IncidentRun, result: PipelineResult) -> None:
-    """Write the terminal-state dataset item, best effort; never raises."""
+def _start_dataset_item(run: _IncidentRun, result: PipelineResult) -> None:
+    """Start the terminal-state dataset write in the background; never raises, never waits."""
     writer = run.deps.dataset_writer or default_writer(run.settings)
     if writer is None:
         return
+    # ``is not None``: an empty DatasetWrites is falsy (it defines __len__).
+    writes = run.deps.dataset_writes if run.deps.dataset_writes is not None else DATASET_WRITES
     try:
-        await writer.write(run.terminal(result))
+        writes.start(writer, run.terminal(result))
     except Exception as exc:
         logger.warning(
             "scenario_run_item_failed",
             incident_id=result.incident_id,
             error_type=type(exc).__name__,
-            error=str(exc),
         )
 
 
@@ -883,7 +895,7 @@ async def run_pipeline(request: PipelineInput, deps: PipelineDeps) -> PipelineRe
         result = run.result(outcome, tokens.total_tokens)
     if deps.persist:
         await _store(run, result)
-        await _write_dataset_item(run, result)
+        _start_dataset_item(run, result)
     logger.info(
         "pipeline_complete",
         incident_id=request.incident_id,

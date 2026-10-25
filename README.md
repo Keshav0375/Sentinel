@@ -354,7 +354,7 @@ _Documented here for interview conversations about production readiness:_
 | Capability | Phase 2 approach |
 |-----------|-----------------|
 | Cloud deployment | Azure Container Apps + Bicep IaC |
-| Database | Cosmos DB (vector + JSON) replacing SQLite |
+| Database | PostgreSQL + pgvector (asyncpg stores, Alembic migrations) |
 | Cache | Redis for short-term memory |
 | Model routing | LiteLLM done (Phase 9) — Kong AI Gateway for token budgets is Phase 2 |
 | Observability | Self-hosted LangFuse for trace dashboards |

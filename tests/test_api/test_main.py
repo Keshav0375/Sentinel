@@ -19,7 +19,7 @@ from sentinel.main import create_app, make_pipeline_fn
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource, IncidentAlert
+from sentinel.models.alert import IncidentAlert
 from sentinel.models.incident import IncidentStatus
 from sentinel.models.pipeline import PipelineInput, PipelineResult
 from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
@@ -29,17 +29,6 @@ from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
 
 def _fake_settings() -> Settings:
     return Settings(anthropic_api_key="sk-ant-test", openai_api_key="sk-test", _env_file=None)
-
-
-def _make_alert(service: str = "api-gateway") -> AlertPayload:
-    return AlertPayload(
-        source=AlertSource.DATADOG,
-        service=service,
-        metric="error_rate",
-        threshold=0.05,
-        current_value=0.34,
-        severity=AlertSeverity.CRITICAL,
-    )
 
 
 def _make_incident_alert(service: str = "api-gateway") -> IncidentAlert:
@@ -149,7 +138,12 @@ _INCIDENT = "4f7c2a5e-8f1d-4f0e-9c4b-2b8e6a1d3c70"
 
 
 def _request(incident_id: str = _INCIDENT) -> PipelineInput:
-    return PipelineInput.from_alert(incident_id, _make_alert())
+    return PipelineInput(
+        incident_id=incident_id,
+        alert=_make_incident_alert(),
+        signal_type="runtime_error",
+        correlation_id="0b6f1c2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e",
+    )
 
 
 def _result(status: str = "rollback_proposed", incident_id: str = _INCIDENT) -> PipelineResult:

@@ -11,8 +11,7 @@ class MemoryStore(Protocol):
 
     Both SemanticMemory (service/runbook lookups) and EpisodicMemory
     (incident similarity search) satisfy this protocol without inheriting
-    from it. Concrete implementations can be swapped — e.g. SQLite → Cosmos
-    DB in Phase 2 — without changing any caller.
+    from it. Concrete implementations can be swapped without changing any caller.
 
     Method signatures use Any because each concrete implementation has
     domain-specific typed methods on top of these four primitives:

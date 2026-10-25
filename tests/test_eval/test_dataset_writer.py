@@ -7,7 +7,10 @@ tests/test_agents/test_orchestrator.py does).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +18,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import asyncpg
 import pytest
+from langfuse.api.core.api_error import ApiError
+from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 from sentinel.agents import orchestrator
@@ -22,8 +27,12 @@ from sentinel.agents.orchestrator import PipelineDeps, run_pipeline
 from sentinel.config import Settings
 from sentinel.eval import dataset_writer
 from sentinel.eval.dataset_writer import (
+    SKIP_NO_BRANCH,
+    SKIP_NOT_IN_CATALOG,
     WITHHELD_REPLY,
+    DatasetWrites,
     LangfuseScenarioWriter,
+    ScenarioRunWriter,
     TerminalRun,
     correlated_deploy,
     default_writer,
@@ -186,10 +195,11 @@ class RecordingWriter:
 
 
 def _deps(
-    writer: RecordingWriter | None = None,
+    writer: ScenarioRunWriter | None = None,
     *,
     persist: bool = True,
     semantic: SemanticMemory | None = None,
+    writes: DatasetWrites | None = None,
 ) -> PipelineDeps:
     return PipelineDeps(
         settings=Settings(_env_file=None, sentinel_fake_llm=True),  # type: ignore[call-arg]
@@ -197,7 +207,13 @@ def _deps(
         episodic_memory=EpisodicMemory(None, MagicMock()),
         persist=persist,
         dataset_writer=writer,
+        dataset_writes=writes,
     )
+
+
+@pytest.fixture
+def writes() -> DatasetWrites:
+    return DatasetWrites()
 
 
 @pytest.fixture(autouse=True)
@@ -325,7 +341,25 @@ async def test_no_branch_skips_and_logs() -> None:
             assert await writer.write(run) is False
         skipped = [e for e in logs if e["event"] == "scenario_run_item_skipped"]
         assert len(skipped) == 1
-        assert skipped[0]["reason"] == "no pr_details.branch"
+        assert skipped[0]["reason"] == SKIP_NO_BRANCH
+    assert client.items == [] and client.datasets == []
+
+
+async def test_a_branch_outside_the_catalog_skips_without_echoing_it() -> None:
+    client = FakeClient()
+    writer = LangfuseScenarioWriter(client=client)
+    for branch, reason in (
+        ("feature/not-a-scenario", SKIP_NOT_IN_CATALOG),
+        ("bad branch;rm", SKIP_NO_BRANCH),
+    ):
+        request = _request(branch=branch)
+        run = _run(request, _rollback_result(request))
+        assert scenario_run_item(run) is None
+        with capture_logs() as logs:
+            assert await writer.write(run) is False
+        skipped = [e for e in logs if e["event"] == "scenario_run_item_skipped"]
+        assert len(skipped) == 1 and skipped[0]["reason"] == reason
+        assert branch not in json.dumps(logs, default=str)
     assert client.items == [] and client.datasets == []
 
 
@@ -436,6 +470,40 @@ async def test_create_dataset_failure_still_writes_the_item() -> None:
     assert len(client.items) == 1
 
 
+async def test_create_dataset_is_retried_after_a_failure() -> None:
+    client = FakeClient()
+    client.create_dataset_error = RuntimeError("down")
+    writer = LangfuseScenarioWriter(client=client)
+    for _ in range(2):
+        request = _request()
+        with capture_logs() as logs:
+            assert await writer.write(_run(request, _rollback_result(request))) is True
+        assert any(e["event"] == "scenario_dataset_create_failed" for e in logs)
+    assert len(client.datasets) == 2
+    assert len(client.items) == 2
+
+
+async def test_a_409_conflict_marks_the_dataset_ready() -> None:
+    client = FakeClient()
+    client.create_dataset_error = ApiError(status_code=409, body="exists")
+    writer = LangfuseScenarioWriter(client=client)
+    for _ in range(2):
+        request = _request()
+        with capture_logs() as logs:
+            assert await writer.write(_run(request, _rollback_result(request))) is True
+        assert not any(e["event"] == "scenario_dataset_create_failed" for e in logs)
+    assert len(client.datasets) == 1
+    assert len(client.items) == 2
+
+    broken = FakeClient()
+    broken.create_dataset_error = ApiError(status_code=500, body="boom")
+    other = LangfuseScenarioWriter(client=broken)
+    for _ in range(2):
+        request = _request()
+        assert await other.write(_run(request, _rollback_result(request))) is True
+    assert len(broken.datasets) == 2
+
+
 async def test_client_failure_is_logged_never_raised() -> None:
     client = FakeClient()
     client.create_item_error = RuntimeError("down")
@@ -446,10 +514,36 @@ async def test_client_failure_is_logged_never_raised() -> None:
         )
     assert written is False
     (failed,) = [e for e in logs if e["event"] == "scenario_run_item_failed"]
-    assert failed["error_type"] == "RuntimeError" and failed["error"] == "down"
+    assert failed["error_type"] == "RuntimeError" and "error" not in failed
     assert failed["incident_id"] == request.incident_id
-    # The item itself is never logged.
-    assert SHA40 not in json.dumps(logs, default=str)
+    # Neither the item nor the exception message is logged.
+    dumped = json.dumps(logs, default=str)
+    assert SHA40 not in dumped and "down" not in dumped
+
+
+async def test_a_validation_failure_logs_field_names_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError) as caught:
+        PRDetails.model_validate({"number": "SECRET-123"})
+    exc = caught.value
+
+    def boom(run: TerminalRun) -> dict[str, Any]:
+        raise exc
+
+    monkeypatch.setattr(dataset_writer, "scenario_run_item", boom)
+    client = FakeClient()
+    request = _request()
+    with capture_logs() as logs:
+        written = await LangfuseScenarioWriter(client=client).write(
+            _run(request, _rollback_result(request))
+        )
+    assert written is False
+    (failed,) = [e for e in logs if e["event"] == "scenario_run_item_failed"]
+    assert failed["error_type"] == "ValidationError"
+    assert failed["fields"] == ["number"]
+    assert "SECRET-123" not in json.dumps(logs, default=str)
+    assert client.items == []
 
 
 def test_default_writer_gating(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -468,12 +562,15 @@ def test_default_writer_gating(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── Through the pipeline ──────────────────────────────────────────────────────
 
 
-async def test_pipeline_writes_one_item_at_the_terminal_state(target_ok: None) -> None:
+async def test_pipeline_writes_one_item_at_the_terminal_state(
+    target_ok: None, writes: DatasetWrites
+) -> None:
     request = _request()
     writer = RecordingWriter()
     with fake_script() as script:
         _happy(script, request)
-        result = await run_pipeline(request, _deps(writer))
+        result = await run_pipeline(request, _deps(writer, writes=writes))
+    assert await writes.drain(5.0) == []
 
     assert result.status == "rollback_proposed"
     (run,) = writer.runs
@@ -483,26 +580,31 @@ async def test_pipeline_writes_one_item_at_the_terminal_state(target_ok: None) -
     assert len(run.timeline) > 0
 
 
-async def test_a_failing_writer_does_not_change_the_result(target_ok: None) -> None:
+async def test_a_failing_writer_does_not_change_the_result(
+    target_ok: None, writes: DatasetWrites
+) -> None:
     request = _request()
     with fake_script() as script, capture_logs() as logs:
         _happy(script, request)
-        result = await run_pipeline(request, _deps(RecordingWriter(error=RuntimeError("boom"))))
+        deps = _deps(RecordingWriter(error=RuntimeError("boom")), writes=writes)
+        result = await run_pipeline(request, deps)
+        assert await writes.drain(5.0) == []
     assert result.status == "rollback_proposed"
     assert any(e["event"] == "scenario_run_item_failed" for e in logs)
 
 
-async def test_persist_false_writes_nothing(target_ok: None) -> None:
+async def test_persist_false_writes_nothing(target_ok: None, writes: DatasetWrites) -> None:
     request = _request()
     writer = RecordingWriter()
     with fake_script() as script:
         _happy(script, request)
-        result = await run_pipeline(request, _deps(writer, persist=False))
+        result = await run_pipeline(request, _deps(writer, persist=False, writes=writes))
+    assert len(writes) == 0 and await writes.drain(5.0) == []
     assert result.status == "rollback_proposed"
     assert writer.runs == []
 
 
-async def test_no_raw_tool_output_reaches_the_item() -> None:
+async def test_no_raw_tool_output_reaches_the_item(writes: DatasetWrites) -> None:
     semantic = MagicMock(spec=SemanticMemory)
     semantic.query = AsyncMock(side_effect=KeyError(MARK))
     request = _request("deploy_failure")
@@ -519,7 +621,8 @@ async def test_no_raw_tool_output_reaches_the_item() -> None:
         )
         script.on("analysis", FakeTurn(output=f"unparsed {REPLY_MARK}"))
         script.on(REFLEXION_AGENT, reflexion_turn(0.3))
-        result = await run_pipeline(request, _deps(writer, semantic=semantic))
+        result = await run_pipeline(request, _deps(writer, semantic=semantic, writes=writes))
+    assert await writes.drain(5.0) == []
 
     assert result.status == "escalated"
     assert result.escalation is not None
@@ -540,12 +643,15 @@ async def test_no_raw_tool_output_reaches_the_item() -> None:
     assert exported["escalation"]["hypothesis"] == WITHHELD_REPLY
 
 
-async def test_trajectory_is_status_only_after_a_scripted_call(target_ok: None) -> None:
+async def test_trajectory_is_status_only_after_a_scripted_call(
+    target_ok: None, writes: DatasetWrites
+) -> None:
     request = _request()
     writer = RecordingWriter()
     with fake_script() as script:
         _happy(script, request)
-        await run_pipeline(request, _deps(writer))
+        await run_pipeline(request, _deps(writer, writes=writes))
+    assert await writes.drain(5.0) == []
 
     (run,) = writer.runs
     traj = trajectory(run)
@@ -557,3 +663,153 @@ async def test_trajectory_is_status_only_after_a_scripted_call(target_ok: None) 
         assert entry["result_summary"] == "ok" or entry["result_summary"].startswith("error")
     text = json.dumps(traj)
     assert "synthetics" not in text and '"logs"' not in text
+
+
+# ── Off the critical path (F2) ────────────────────────────────────────────────
+
+
+class HangingWriter:
+    """A writer that never finishes; records that it was cancelled."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def write(self, run: TerminalRun) -> bool:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return True  # pragma: no cover
+
+
+async def test_a_hanging_writer_does_not_slow_the_pipeline(
+    target_ok: None,
+) -> None:
+    request = _request()
+    writer = HangingWriter()
+    writes = DatasetWrites(timeout_s=30)
+    deps = _deps(writer, writes=writes)
+    with fake_script() as script:
+        _happy(script, request)
+        started = time.monotonic()
+        result = await run_pipeline(request, deps)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0
+    assert result.status == "rollback_proposed"
+    assert len(writes) == 1
+    assert await writes.drain(0) == [request.incident_id]
+    assert writer.cancelled
+    assert len(writes) == 0
+
+
+async def test_the_write_timeout_is_hard() -> None:
+    request = _request()
+    run = _run(request, _rollback_result(request))
+    writes = DatasetWrites(timeout_s=0.05)
+    with capture_logs() as logs:
+        task = writes.start(HangingWriter(), run)
+        await asyncio.wait_for(task, 2)
+    assert any(e["event"] == "scenario_run_item_timeout" for e in logs)
+    assert len(writes) == 0
+
+
+async def test_drain_waits_for_a_finishing_write() -> None:
+    class SlowWriter:
+        def __init__(self) -> None:
+            self.runs: list[TerminalRun] = []
+
+        async def write(self, run: TerminalRun) -> bool:
+            await asyncio.sleep(0.05)
+            self.runs.append(run)
+            return True
+
+    request = _request()
+    writer = SlowWriter()
+    writes = DatasetWrites()
+    writes.start(writer, _run(request, _rollback_result(request)))
+    assert await writes.drain(2.0) == []
+    assert len(writer.runs) == 1
+    assert await writes.drain(2.0) == []  # nothing in flight
+
+
+def test_the_write_timeout_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        DatasetWrites(timeout_s=0)
+
+
+async def test_the_langfuse_write_runs_on_a_daemon_thread() -> None:
+    release = threading.Event()
+    seen: list[bool] = []
+
+    class BlockingClient(FakeClient):
+        def create_dataset_item(self, **kwargs: Any) -> None:
+            seen.append(threading.current_thread().daemon)
+            release.wait(10)
+
+    request = _request()
+    writes = DatasetWrites(timeout_s=0.1)
+    try:
+        task = writes.start(
+            LangfuseScenarioWriter(client=BlockingClient()),
+            _run(request, _rollback_result(request)),
+        )
+        await asyncio.wait_for(task, 2)  # returns: the 0.1 s bound fired
+        assert seen == [True]
+    finally:
+        release.set()
+
+
+# ── F10: a resolution-drafted escalation still withholds an unparsed hypothesis ──
+
+
+async def test_a_resolution_drafted_escalation_withholds_an_unparsed_hypothesis(
+    target_ok: None, writes: DatasetWrites
+) -> None:
+    request = _request("deploy_failure")
+    writer = RecordingWriter()
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", FakeTurn(output=f"unparsed {REPLY_MARK}"))
+        script.on(
+            REFLEXION_AGENT,
+            reflexion_turn(
+                0.85,
+                deploy=SuspectDeploy(commit_sha=SHA, pr_number=PR),
+                supporting_evidence=["checks fail since pr-31"],
+            ),
+        )
+        script.on(
+            "resolution",
+            FakeTurn(
+                tool_calls=[
+                    FakeToolCall(
+                        "format_escalation",
+                        {
+                            "request": {
+                                "hypothesis": f"copied: {REPLY_MARK}",
+                                "evidence": ["checks fail since pr-31"],
+                                "confidence": 0.7,
+                                "missing": ["the runtime config"],
+                            }
+                        },
+                    )
+                ]
+            ),
+            FakeTurn(output="Escalated."),
+        )
+        result = await run_pipeline(request, _deps(writer, writes=writes))
+    assert await writes.drain(5.0) == []
+
+    assert result.status == "escalated"
+    assert REPLY_MARK in result.root_cause
+    (run,) = writer.runs
+    assert run.raw_hypothesis is True and run.raw_evidence is False
+    item = scenario_run_item(run)
+    assert item is not None
+    assert REPLY_MARK not in json.dumps(item)
+    exported = item["incidents"][0]["pipeline_result"]
+    assert exported["root_cause"] == WITHHELD_REPLY
+    assert exported["escalation"]["hypothesis"] == WITHHELD_REPLY
+    assert exported["escalation"]["evidence"] == ["checks fail since pr-31"]

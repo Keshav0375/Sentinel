@@ -290,6 +290,40 @@ async def test_high_confidence_specific_deploy_proposes_the_rollback(
     assert _runs(script, REVERIFICATION_AGENT) == 1
 
 
+async def test_no_agent_prompt_carries_the_branch_label(
+    target_ok: list[TargetDeploy], inputs: list[tuple[str, str]]
+) -> None:
+    """The eval label (pr_details.branch) is dataset metadata; no agent ever reads it."""
+    request = PipelineInput(
+        incident_id=str(uuid.uuid4()),
+        alert=IncidentAlert(
+            title="synthetics.http.failed",
+            severity="critical",
+            service=SERVICE,
+            context=IncidentContext(pr_details=PRDetails(number=PR, sha=SHA, branch="runtime/01")),
+        ),
+        signal_type="runtime_error",
+        correlation_id=str(uuid.uuid4()),
+    )
+    with fake_script() as script:
+        _happy(script, request)
+        result = await run_pipeline(request, _deps())
+
+    assert result.status == "rollback_proposed"
+    assert {name for name, _ in inputs} == {
+        "triage",
+        "analysis",
+        REFLEXION_AGENT,
+        "resolution",
+        REVERIFICATION_AGENT,
+    }
+    assert all("runtime/01" not in text for _, text in inputs)
+    triage_input = next(text for name, text in inputs if name == "triage")
+    assert SHA in triage_input and '"number":42' in triage_input  # pr_details still shown
+    assert request.alert.context.pr_details is not None
+    assert request.alert.context.pr_details.branch == "runtime/01"  # the request is untouched
+
+
 @pytest.mark.parametrize("framing", FRAMINGS)
 async def test_framed_and_inconsistent_replies_still_propose_the_rollback(
     framing: Framing, target_ok: list[TargetDeploy]

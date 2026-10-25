@@ -102,6 +102,8 @@ class TestDashboardRoute:
             html = client.get("/").text
         for gone in ("EventSource", "/events/", "resolve-modal", "inc-bar", "pipeline-flow"):
             assert gone not in html
+        assert "Live Incident" not in html
+        assert "<title>Sentinel — Incident Response</title>" in html
 
     def test_dashboard_offers_no_approval_path(self) -> None:
         """The revert PR on GitHub is the only gate: no approve button, modal or call."""
