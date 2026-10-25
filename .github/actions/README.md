@@ -1,6 +1,6 @@
 # Sentinel composite actions
 
-Seven composite actions that GitHub Actions workflows use to run the backend on the shared AKS cluster
+Eight composite actions that GitHub Actions workflows use to run the backend on the shared AKS cluster
 (backend task 7.3; decisions 2026-10-24). Every step is a plain `run` step, so there is nothing inside an
 action to pin.
 
@@ -23,7 +23,11 @@ action to pin.
 - `get-db-token` - mint a short-lived Entra token for Azure PostgreSQL.
   - Inputs: none. Outputs: `pg-token`.
 - `get-backend-token` - mint an Entra bearer token for the Sentinel API.
-  - Inputs: `audience` (one value), `tenant` (optional). Outputs: `bearer`.
+  - Inputs: `audience` (the comma list; the token is for the first entry, which must be a GUID), `tenant`
+    (optional; every caller passes `vars.AZURE_IDENTITY_TENANT_ID`). Outputs: `bearer`.
+- `resolve-stable-tag` - resolve `sentinel-backend:stable` to its `sha-<7>` tag through the ACR digest; it fails
+  when none matches. Used by the incident and scale workflows.
+  - Inputs: `acr-name`. Outputs: `image-tag`.
 - `notify-teams` - post an Adaptive Card to a Teams webhook. Title and body render as plain text (Adaptive Card
   `TextRun`, and `](` is broken with a zero-width space), so caller-supplied text such as
   `[Approve](https://...)` cannot pose as a link; a bare URL stays visible verbatim. Never pass untrusted text
@@ -46,6 +50,9 @@ Callers in other repos pin an action to a full commit SHA, never to a branch or 
 ```
 
 Workflows inside this repo use the local path, `./.github/actions/<name>`.
+
+Third-party actions in every workflow are pinned to a full commit SHA with a `# vX.Y.Z` comment
+(tests/test_infra/test_workflow_hardening.py).
 
 ## Security invariants
 

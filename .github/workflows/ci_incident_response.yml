@@ -1,0 +1,738 @@
+# The incident response pipeline (backend task 8.3).
+# Source: architecture backend.md section 9.3 as amended by decisions.md 2026-10-24 (phase 7 and phase 8).
+#
+# Triggered by repository_dispatch (incident-alert) from the Datadog bridge. It brings the backend up on the
+# shared AKS cluster, enriches the alert (service row, PR, recent logs), runs the agent pipeline through
+# POST /webhooks/incident, and then either opens a revert PR on Sentinel-deployment or escalates to Teams.
+#
+# HITL: the backend only drafts a RollbackSpec. This workflow opens the revert PR; a human reviews and merges
+# or closes it. Nothing here ever merges, approves or enables auto-merge, and nothing pushes to main.
+#
+# No secret crosses a job output: every job logs in again and reads what it needs inside the job.
+# The mapping of the dispatch to the incident payload lives in scripts/incident_dispatch.py (unit tested).
+name: "[sentinel] incident — response pipeline"
+
+on:
+  repository_dispatch:
+    types: [incident-alert]
+
+permissions:
+  id-token: write
+  contents: read
+
+# One backend at a time. A new pending run in the group cancels an older pending one (burst of 3 alerts or
+# more); that is a known GitHub limit and the contract is binding.
+concurrency:
+  group: sentinel-backend
+  cancel-in-progress: false
+
+env:
+  DD_SITE: us5.datadoghq.com
+  DEPLOYMENT_REPO: Keshav0375/Sentinel-deployment
+  RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+jobs:
+  # ── 1. Backend up ────────────────────────────────────────────────────────
+  ensure-backend-up:
+    name: Ensure backend up
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 35
+    outputs:
+      backend-url: ${{ steps.up.outputs.backend-url }}
+      image-tag: ${{ steps.tag.outputs.image-tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The image the `stable` tag points at, by its immutable sha-<7 hex> tag.
+      - name: Resolve the stable image tag
+        id: tag
+        uses: ./.github/actions/resolve-stable-tag
+        with:
+          acr-name: ${{ vars.ACR_NAME }}
+
+      - name: Bring the backend up
+        id: up
+        uses: ./.github/actions/backend-up
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          image-tag: ${{ steps.tag.outputs.image-tag }}
+          acr-login-server: ${{ vars.ACR_LOGIN_SERVER }}
+          api-tenant-id: ${{ vars.SENTINEL_API_TENANT_ID }}
+          api-audience: ${{ vars.SENTINEL_API_AUDIENCE }}
+          key-vault-url: ${{ vars.KEY_VAULT_URI }}
+          pg-host: ${{ vars.PG_HOST }}
+          pg-database: ${{ vars.PG_DATABASE }}
+          pg-user: ${{ vars.PG_USER_BACKEND }}
+
+  # ── 2. Enrichment (optional context; a failure here never blocks the pipeline) ──
+  fetch-service-info:
+    name: Fetch service info
+    needs: [ensure-backend-up]
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 10
+    outputs:
+      service-metadata: ${{ steps.shape.outputs.result }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Read the service from the alert tags
+        id: tags
+        run: |
+          set -euo pipefail
+          python3 scripts/incident_dispatch.py tags >> "$GITHUB_OUTPUT"
+
+      - if: steps.tags.outputs.service != ''
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Mint the database token
+        id: db
+        if: steps.tags.outputs.service != ''
+        uses: ./.github/actions/get-db-token
+
+      - name: Read the service row
+        id: query
+        if: steps.tags.outputs.service != ''
+        uses: ./.github/actions/psql-exec
+        with:
+          sql: >-
+            SELECT name, team, tier, dependencies, left(runbook, 2000) AS runbook, metadata
+            FROM services WHERE name = :'service'
+          pg-token: ${{ steps.db.outputs.pg-token }}
+          pg-host: ${{ vars.PG_HOST }}
+          pg-database: ${{ vars.PG_DATABASE }}
+          pg-user: ${{ vars.PG_USER_GHA }}
+          vars: |
+            service=${{ steps.tags.outputs.service }}
+
+      - name: Shape the service metadata
+        id: shape
+        if: ${{ !cancelled() }}
+        env:
+          RESULT: ${{ steps.query.outputs.result }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RESULT" ]; then
+            echo "result=null" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=$(jq -c '.[0] // null' <<<"$RESULT")" >> "$GITHUB_OUTPUT"
+          fi
+
+  fetch-pr-details:
+    name: Fetch PR details
+    needs: [ensure-backend-up]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      pr-details: ${{ steps.shape.outputs.result }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Read the PR number from the alert tags
+        id: tags
+        run: |
+          set -euo pipefail
+          python3 scripts/incident_dispatch.py tags >> "$GITHUB_OUTPUT"
+
+      # Public repository read with the workflow token: no login, no variables.
+      - name: Read the merged PR
+        id: shape
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.tags.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PR_NUMBER" ]; then
+            echo "result=null" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/${DEPLOYMENT_REPO}/pulls/${PR_NUMBER}" > "$RUNNER_TEMP/pull.json"
+          gh api --paginate "repos/${DEPLOYMENT_REPO}/pulls/${PR_NUMBER}/files" \
+            --jq '.[].filename' > "$RUNNER_TEMP/files.txt"
+          result=$(python3 scripts/incident_dispatch.py pr-details \
+            --pull "$RUNNER_TEMP/pull.json" --files "$RUNNER_TEMP/files.txt")
+          echo "result=${result}" >> "$GITHUB_OUTPUT"
+
+  fetch-datadog-logs:
+    name: Fetch Datadog logs
+    needs: [ensure-backend-up]
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 10
+    outputs:
+      recent-logs: ${{ steps.shape.outputs.result }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Read the service from the alert tags
+        id: tags
+        run: |
+          set -euo pipefail
+          python3 scripts/incident_dispatch.py tags >> "$GITHUB_OUTPUT"
+
+      - if: steps.tags.outputs.service != ''
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Read the Datadog keys
+        id: kv
+        if: steps.tags.outputs.service != ''
+        uses: ./.github/actions/get-kv-secrets
+        with:
+          vault-uri: ${{ vars.KEY_VAULT_URI }}
+          names: datadog-api-key,datadog-app-key
+
+      - name: Search the error logs of the last 30 minutes
+        id: shape
+        env:
+          SERVICE: ${{ steps.tags.outputs.service }}
+          DD_API_KEY: ${{ steps.kv.outputs.datadog-api-key }}
+          DD_APP_KEY: ${{ steps.kv.outputs.datadog-app-key }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SERVICE" ]; then
+            echo "result=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          jq -n --arg q "service:${SERVICE} status:error" \
+            '{filter: {query: $q, from: "now-30m", to: "now"}, sort: "-timestamp", page: {limit: 50}}' \
+            > "$RUNNER_TEMP/dd_body.json"
+          curl -sS --connect-timeout 10 --max-time 30 --fail-with-body -X POST \
+            "https://api.${DD_SITE}/api/v2/logs/events/search" \
+            -H "DD-API-KEY: ${DD_API_KEY}" -H "DD-APPLICATION-KEY: ${DD_APP_KEY}" \
+            -H 'Content-Type: application/json' \
+            --data-binary @"$RUNNER_TEMP/dd_body.json" -o "$RUNNER_TEMP/dd.json"
+          result=$(python3 scripts/incident_dispatch.py logs --response "$RUNNER_TEMP/dd.json")
+          echo "result=${result}" >> "$GITHUB_OUTPUT"
+
+  # ── 3. The agent pipeline ────────────────────────────────────────────────
+  run-agent-pipeline:
+    name: Run agent pipeline
+    needs: [ensure-backend-up, fetch-service-info, fetch-pr-details, fetch-datadog-logs]
+    if: ${{ !cancelled() && needs.ensure-backend-up.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 20
+    env:
+      BACKEND_URL: ${{ needs.ensure-backend-up.outputs.backend-url }}
+      POLL_INTERVAL_SECONDS: "15"
+      POLL_TIMEOUT_SECONDS: "600"
+      POLL_NOT_FOUND_GRACE_SECONDS: "60"
+    outputs:
+      incident-id: ${{ steps.run.outputs.incident_id }}
+      resolution-type: ${{ steps.run.outputs.resolution_type }}
+      root-cause: ${{ steps.run.outputs.root_cause }}
+      confidence: ${{ steps.run.outputs.confidence }}
+      target-deploy: ${{ steps.run.outputs.target_deploy }}
+      evidence-summary: ${{ steps.run.outputs.evidence_summary }}
+      missing: ${{ steps.run.outputs.missing }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Map the dispatch to the incident payload
+        id: payload
+        env:
+          SERVICE_METADATA: ${{ needs.fetch-service-info.outputs.service-metadata }}
+          PR_DETAILS: ${{ needs.fetch-pr-details.outputs.pr-details }}
+          RECENT_LOGS: ${{ needs.fetch-datadog-logs.outputs.recent-logs }}
+        run: |
+          set -euo pipefail
+          python3 scripts/incident_dispatch.py payload > "$RUNNER_TEMP/payload.json"
+
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_GHA_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_IDENTITY_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Mint the backend token
+        id: token
+        uses: ./.github/actions/get-backend-token
+        with:
+          audience: ${{ vars.SENTINEL_API_AUDIENCE }}
+          tenant: ${{ vars.AZURE_IDENTITY_TENANT_ID }}
+
+      # Only a true deadline (the backend still answering 200 in progress) degrades to an escalation;
+      # auth (401/403), other 4xx, a long 404 or a 5xx at the deadline fail the job as a fault.
+      - name: Submit the incident and wait for the result
+        id: run
+        env:
+          BEARER: ${{ steps.token.outputs.bearer }}
+        run: |
+          set -euo pipefail
+          uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          code=$(curl -sS --connect-timeout 10 --max-time 30 -o "$RUNNER_TEMP/ack.json" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${BEARER}" -H 'Content-Type: application/json' \
+            --data-binary @"$RUNNER_TEMP/payload.json" "${BACKEND_URL}/webhooks/incident") || code=000
+          if [ "$code" != "202" ]; then
+            echo "::error::POST /webhooks/incident answered HTTP ${code}"
+            exit 1
+          fi
+          incident_id=$(jq -r '.incident_id // empty' "$RUNNER_TEMP/ack.json")
+          if ! [[ "$incident_id" =~ $uuid_re ]]; then
+            echo "::error::the webhook acknowledgement carries no incident id"
+            exit 1
+          fi
+          echo "incident_id=${incident_id}" >> "$GITHUB_OUTPUT"
+          deadline=$((SECONDS + POLL_TIMEOUT_SECONDS))
+          not_found_since=""
+          timed_out=0
+          while true; do
+            code=$(curl -sS --connect-timeout 10 --max-time 15 -o "$RUNNER_TEMP/incident.json" -w '%{http_code}' \
+              -H "Authorization: Bearer ${BEARER}" "${BACKEND_URL}/incidents/${incident_id}") || code=000
+            case "$code" in
+              200)
+                not_found_since=""
+                status=$(jq -r '.status // empty' "$RUNNER_TEMP/incident.json" 2>/dev/null || true)
+                case "$status" in rollback_proposed | escalated) break ;; *) ;; esac
+                ;;
+              404)
+                [ -n "$not_found_since" ] || not_found_since=$SECONDS
+                if [ $((SECONDS - not_found_since)) -ge "$POLL_NOT_FOUND_GRACE_SECONDS" ]; then
+                  echo "::error::backend fault: incident ${incident_id} not found for ${POLL_NOT_FOUND_GRACE_SECONDS} s"
+                  exit 1
+                fi
+                ;;
+              000 | 5[0-9][0-9]) not_found_since="" ;;
+              *)
+                echo "::error::backend fault: GET /incidents/${incident_id} answered HTTP ${code}"
+                exit 1
+                ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              if [ "$code" = "200" ]; then timed_out=1; break; fi
+              echo "::error::backend fault: GET /incidents/${incident_id} answered HTTP ${code} at the deadline"
+              exit 1
+            fi
+            sleep "$POLL_INTERVAL_SECONDS"
+          done
+          if [ "$timed_out" = "1" ]; then
+            echo "::warning::pipeline timeout: escalating without a result"
+            python3 scripts/incident_dispatch.py result >> "$GITHUB_OUTPUT"
+          else
+            python3 scripts/incident_dispatch.py result --incident "$RUNNER_TEMP/incident.json" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── 4a. Rollback branch ──────────────────────────────────────────────────
+  generate-pr-content:
+    name: Generate PR content
+    needs: [ensure-backend-up, run-agent-pipeline]
+    if: >-
+      ${{ !cancelled() && needs.run-agent-pipeline.result == 'success' &&
+      needs.run-agent-pipeline.outputs.resolution-type == 'rollback' }}
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 10
+    env:
+      BACKEND_URL: ${{ needs.ensure-backend-up.outputs.backend-url }}
+      INCIDENT_ID: ${{ needs.run-agent-pipeline.outputs.incident-id }}
+    outputs:
+      pr-content: ${{ steps.generate.outputs.pr-content }}
+      target-sha: ${{ steps.generate.outputs.target-sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_GHA_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_IDENTITY_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Mint the backend token
+        id: token
+        uses: ./.github/actions/get-backend-token
+        with:
+          audience: ${{ vars.SENTINEL_API_AUDIENCE }}
+          tenant: ${{ vars.AZURE_IDENTITY_TENANT_ID }}
+
+      - name: Draft the PR title and description
+        id: generate
+        env:
+          BEARER: ${{ steps.token.outputs.bearer }}
+        run: |
+          set -euo pipefail
+          uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          sha_re='^[0-9a-f]{7,40}$'
+          if ! [[ "$INCIDENT_ID" =~ $uuid_re ]]; then
+            echo "::error::the incident id is not a UUID"
+            exit 1
+          fi
+          code=$(curl -sS --connect-timeout 10 --max-time 30 -o "$RUNNER_TEMP/spec.json" -w '%{http_code}' \
+            -H "Authorization: Bearer ${BEARER}" \
+            "${BACKEND_URL}/incidents/${INCIDENT_ID}/rollback-spec") || code=000
+          if [ "$code" != "200" ]; then
+            echo "::error::GET rollback-spec answered HTTP ${code}"
+            exit 1
+          fi
+          target=$(jq -r '.target_deploy.commit_sha // empty' "$RUNNER_TEMP/spec.json")
+          if ! [[ "$target" =~ $sha_re ]]; then
+            echo "::error::the rollback spec carries no valid target commit"
+            exit 1
+          fi
+          code=$(curl -sS --connect-timeout 10 --max-time 120 -o "$RUNNER_TEMP/content.json" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${BEARER}" -H 'Content-Type: application/json' \
+            --data-binary @"$RUNNER_TEMP/spec.json" "${BACKEND_URL}/generate/pr-content") || code=000
+          if [ "$code" != "200" ]; then
+            echo "::error::POST generate/pr-content answered HTTP ${code}"
+            exit 1
+          fi
+          if [ -z "$(jq -r '.title // empty' "$RUNNER_TEMP/content.json")" ]; then
+            echo "::error::the generated PR title is empty"
+            exit 1
+          fi
+          echo "pr-content=$(jq -c '{title, description}' "$RUNNER_TEMP/content.json")" >> "$GITHUB_OUTPUT"
+          echo "target-sha=${target}" >> "$GITHUB_OUTPUT"
+
+  # The only job that holds REVERT_PR_PAT (checkout fetch + the create step). It writes the PR outputs as soon as
+  # the PR exists; the DB record is a separate job, so a record failure never hides the PR.
+  create-rollback-pr:
+    name: Create rollback PR
+    needs: [run-agent-pipeline, generate-pr-content]
+    if: ${{ !cancelled() && needs.generate-pr-content.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      pr-url: ${{ steps.create.outputs.pr_url }}
+      pr-number: ${{ steps.create.outputs.pr_number }}
+    steps:
+      - name: Check out Sentinel-deployment
+        id: checkout-deployment
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          repository: Keshav0375/Sentinel-deployment
+          ref: main
+          token: ${{ secrets.REVERT_PR_PAT }}
+          path: deployment
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Revert the deploy on a branch and open the PR
+        id: create
+        working-directory: deployment
+        env:
+          GH_TOKEN: ${{ secrets.REVERT_PR_PAT }}
+          TARGET_SHA: ${{ needs.generate-pr-content.outputs.target-sha }}
+          PR_CONTENT: ${{ needs.generate-pr-content.outputs.pr-content }}
+          INCIDENT_ID: ${{ needs.run-agent-pipeline.outputs.incident-id }}
+        run: |
+          set -euo pipefail
+          uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          sha_re='^[0-9a-f]{7,40}$'
+          url_re='^https://github\.com/Keshav0375/Sentinel-deployment/pull/[0-9]+$'
+          emit() {
+            if ! [[ "$1" =~ $url_re ]]; then
+              echo "::error::the PR url is not a Sentinel-deployment pull request"
+              exit 1
+            fi
+            echo "pr_number=${1##*/}" >> "$GITHUB_OUTPUT"
+            echo "pr_url=$1" >> "$GITHUB_OUTPUT"
+          }
+          if ! [[ "$TARGET_SHA" =~ $sha_re ]]; then
+            echo "::error::the target commit is not a hex SHA"
+            exit 1
+          fi
+          if ! [[ "$INCIDENT_ID" =~ $uuid_re ]]; then
+            echo "::error::the incident id is not a UUID"
+            exit 1
+          fi
+          branch="revert-${TARGET_SHA}"
+          # A re-run reuses the open PR for this revert instead of opening a second one.
+          url=$(gh pr list --repo "$DEPLOYMENT_REPO" --head "$branch" --state open --json url --jq '.[0].url // empty')
+          if [ -n "$url" ]; then
+            echo "::notice::reusing the open revert PR ${url}"
+            emit "$url"
+            exit 0
+          fi
+          full=$(git rev-parse --verify "${TARGET_SHA}^{commit}")
+          git merge-base --is-ancestor "$full" HEAD
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          parents=$(git rev-list --parents -n 1 "$full" | wc -w)
+          if [ "$parents" -gt 2 ]; then
+            git revert --no-edit -m 1 "$full"
+          else
+            git revert --no-edit "$full"
+          fi
+          # The PAT reaches git only through this process's environment, never .git/config.
+          basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::${basic}"
+          # Only our own revert-* branch is ever force-pushed (a re-run with no open PR replaces what it left).
+          GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}" \
+            git push --force-with-lease origin "HEAD:refs/heads/${branch}"
+          title=$(jq -r .title <<<"$PR_CONTENT" | tr '\n' ' ')
+          {
+            jq -r .description <<<"$PR_CONTENT"
+            printf '\n\n---\nDrafted by Sentinel for incident %s. Workflow run: %s\n' "$INCIDENT_ID" "$RUN_URL"
+          } > "$RUNNER_TEMP/pr_body.md"
+          url=$(gh pr create --repo "$DEPLOYMENT_REPO" --base main --head "$branch" \
+            --title "$title" --body-file "$RUNNER_TEMP/pr_body.md" | tail -n 1)
+          emit "$url"
+
+  record-rollback-pr:
+    name: Record rollback PR
+    needs: [run-agent-pipeline, create-rollback-pr]
+    if: ${{ !cancelled() && needs.create-rollback-pr.outputs.pr-url != '' }}
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Mint the database token
+        id: db
+        uses: ./.github/actions/get-db-token
+
+      - name: Record the PR on the incident
+        id: record
+        uses: ./.github/actions/psql-exec
+        with:
+          sql: >-
+            UPDATE incidents SET pr_number = :'pr_number'::int, pr_url = :'pr_url'
+            WHERE id = :'incident_id'::uuid RETURNING id
+          pg-token: ${{ steps.db.outputs.pg-token }}
+          pg-host: ${{ vars.PG_HOST }}
+          pg-database: ${{ vars.PG_DATABASE }}
+          pg-user: ${{ vars.PG_USER_GHA }}
+          vars: |
+            pr_number=${{ needs.create-rollback-pr.outputs.pr-number }}
+            pr_url=${{ needs.create-rollback-pr.outputs.pr-url }}
+            incident_id=${{ needs.run-agent-pipeline.outputs.incident-id }}
+
+      - name: Check exactly one row was updated
+        id: check
+        env:
+          RESULT: ${{ steps.record.outputs.result }}
+        run: |
+          set -euo pipefail
+          if [ "$(jq 'length' <<<"$RESULT")" != "1" ]; then
+            echo "::error::the incident row was not updated"
+            exit 1
+          fi
+
+  notify-rollback:
+    name: Notify rollback
+    needs: [run-agent-pipeline, create-rollback-pr]
+    if: ${{ !cancelled() && needs.create-rollback-pr.outputs.pr-url != '' }}
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Read the Teams webhook
+        id: kv
+        uses: ./.github/actions/get-kv-secrets
+        with:
+          vault-uri: ${{ vars.KEY_VAULT_URI }}
+          names: teams-webhook-url
+
+      - uses: ./.github/actions/notify-teams
+        with:
+          severity: warning
+          title: "Sentinel — revert PR #${{ needs.create-rollback-pr.outputs.pr-number }} opened: review and merge"
+          webhook-url: ${{ steps.kv.outputs.teams-webhook-url }}
+          body: |
+            PR: ${{ needs.create-rollback-pr.outputs.pr-url }}
+            incident: ${{ needs.run-agent-pipeline.outputs.incident-id }}
+            root cause: ${{ needs.run-agent-pipeline.outputs.root-cause }}
+            confidence: ${{ needs.run-agent-pipeline.outputs.confidence }}
+            reverted deploy: ${{ needs.run-agent-pipeline.outputs.target-deploy }}
+            evidence: ${{ needs.run-agent-pipeline.outputs.evidence-summary }}
+            Merging the PR deploys the revert; closing it declines it.
+            run: ${{ env.RUN_URL }}
+
+  # ── 4b. Escalation branch ────────────────────────────────────────────────
+  notify-escalation:
+    name: Notify escalation
+    needs: [run-agent-pipeline]
+    if: >-
+      ${{ !cancelled() && needs.run-agent-pipeline.result == 'success' &&
+      needs.run-agent-pipeline.outputs.resolution-type == 'escalated' }}
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Read the Teams webhook
+        id: kv
+        uses: ./.github/actions/get-kv-secrets
+        with:
+          vault-uri: ${{ vars.KEY_VAULT_URI }}
+          names: teams-webhook-url
+
+      - uses: ./.github/actions/notify-teams
+        with:
+          severity: critical
+          title: "Sentinel — incident escalated: needs human review"
+          webhook-url: ${{ steps.kv.outputs.teams-webhook-url }}
+          body: |
+            incident: ${{ needs.run-agent-pipeline.outputs.incident-id }}
+            hypothesis: ${{ needs.run-agent-pipeline.outputs.root-cause }}
+            evidence: ${{ needs.run-agent-pipeline.outputs.evidence-summary }}
+            confidence: ${{ needs.run-agent-pipeline.outputs.confidence }}
+            missing: ${{ needs.run-agent-pipeline.outputs.missing }}
+            run: ${{ env.RUN_URL }}
+
+  # ── 5. Always: tear down and summarise ───────────────────────────────────
+  teardown-backend:
+    name: Tear down backend
+    needs: [ensure-backend-up, run-agent-pipeline, notify-rollback, notify-escalation]
+    if: always()
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: ./.github/actions/backend-down
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          keep-warm: ${{ vars.SENTINEL_KEEP_WARM }}
+
+  summary:
+    name: Summary
+    needs: [ensure-backend-up, run-agent-pipeline, create-rollback-pr, record-rollback-pr, teardown-backend]
+    if: always()
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Read the service from the alert tags
+        id: tags
+        run: |
+          set -euo pipefail
+          python3 scripts/incident_dispatch.py tags >> "$GITHUB_OUTPUT"
+
+      - name: Work out the outcome
+        id: outcome
+        env:
+          ENSURE_RESULT: ${{ needs.ensure-backend-up.result }}
+          PIPELINE_RESULT: ${{ needs.run-agent-pipeline.result }}
+          CREATE_RESULT: ${{ needs.create-rollback-pr.result }}
+          RECORD_RESULT: ${{ needs.record-rollback-pr.result }}
+          RESOLUTION_TYPE: ${{ needs.run-agent-pipeline.outputs.resolution-type }}
+          EVIDENCE: ${{ needs.run-agent-pipeline.outputs.evidence-summary }}
+          INCIDENT_ID: ${{ needs.run-agent-pipeline.outputs.incident-id }}
+          PR_URL: ${{ needs.create-rollback-pr.outputs.pr-url }}
+          SERVICE: ${{ steps.tags.outputs.service }}
+        run: |
+          set -euo pipefail
+          python3 scripts/incident_dispatch.py summary \
+            --dd-event-file "$RUNNER_TEMP/dd_event.json" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Read the Datadog key and the Teams webhook
+        id: kv
+        uses: ./.github/actions/get-kv-secrets
+        with:
+          vault-uri: ${{ vars.KEY_VAULT_URI }}
+          names: datadog-api-key,teams-webhook-url
+
+      # The event never carries a deploy_status tag, so the deploy-failure monitor cannot match it.
+      - name: Post the Datadog event
+        env:
+          DD_API_KEY: ${{ steps.kv.outputs.datadog-api-key }}
+        run: |
+          set -euo pipefail
+          curl -sS --connect-timeout 10 --max-time 30 --fail-with-body -X POST \
+            "https://api.${DD_SITE}/api/v1/events" \
+            -H "DD-API-KEY: ${DD_API_KEY}" -H 'Content-Type: application/json' \
+            --data-binary @"$RUNNER_TEMP/dd_event.json" -o /dev/null
+
+      - name: Tell Teams the outcome
+        id: notify
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/notify-teams
+        with:
+          severity: ${{ (steps.outcome.outcome == 'success' && steps.outcome.outputs.severity) || 'critical' }}
+          title: >-
+            ${{ (steps.outcome.outcome == 'success' && steps.outcome.outputs.resolution) &&
+            format('Sentinel — incident summary: {0}', steps.outcome.outputs.resolution) ||
+            format('Sentinel — incident {0}: workflow fault',
+            needs.run-agent-pipeline.outputs.incident-id || 'unknown') }}
+          webhook-url: ${{ steps.kv.outputs.teams-webhook-url }}
+          body: |
+            ${{ steps.outcome.outputs.outcome || 'the outcome step failed; see the workflow run' }}
+            incident: ${{ needs.run-agent-pipeline.outputs.incident-id }}
+            signal_type: ${{ github.event.client_payload.signal_type }}
+            correlation_id: ${{ github.event.client_payload.correlation_id }}
+            service: ${{ steps.tags.outputs.service }}
+            root cause: ${{ needs.run-agent-pipeline.outputs.root-cause }}
+            confidence: ${{ needs.run-agent-pipeline.outputs.confidence }}
+            run: ${{ env.RUN_URL }}

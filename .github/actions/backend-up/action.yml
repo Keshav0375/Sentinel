@@ -152,6 +152,8 @@ runs:
           local item guid=""
           case "$1" in ,*|*,|*,,*) die "SENTINEL_API_AUDIENCE has an empty item";; esac
           IFS=',' read -r -a items <<< "$1"
+          # The first item is the API app client-id GUID (get-backend-token mints the token for it).
+          [[ "${items[0]}" =~ $guid_re ]] || die "SENTINEL_API_AUDIENCE must start with the API app client-id GUID"
           for item in "${items[@]}"; do
             if [[ "$item" =~ $guid_re ]]; then
               guid=1

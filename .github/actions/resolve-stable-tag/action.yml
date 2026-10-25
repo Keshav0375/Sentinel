@@ -1,0 +1,39 @@
+# Resolve sentinel-backend:stable to its sha-<7 hex> tag through the ACR digest.
+# Caller: azure/login in the resource tenant first.
+name: Sentinel resolve-stable-tag
+description: >-
+  Resolve sentinel-backend:stable to its sha-<7 hex> tag through the ACR digest.
+  Caller: azure/login in the resource tenant first.
+
+inputs:
+  acr-name:
+    description: ACR name (vars.ACR_NAME).
+    required: true
+
+outputs:
+  image-tag:
+    description: The sha-<7 hex> tag that stable points at.
+    value: ${{ steps.resolve.outputs.image-tag }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      name: Resolve stable to its sha- tag
+      shell: bash
+      env:
+        ACR_NAME: ${{ inputs.acr-name }}
+      run: |
+        set -euo pipefail
+        die() { echo "::error::resolve-stable-tag: $1"; exit 1; }
+        [ -n "${ACR_NAME:-}" ] || die "input acr-name is empty"
+        digest="$(az acr repository show --name "$ACR_NAME" --image sentinel-backend:stable \
+          --query digest -o tsv --only-show-errors)" || die "sentinel-backend:stable not found in ACR"
+        [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "the stable digest is malformed"
+        tags="$(az acr manifest list-metadata --registry "$ACR_NAME" --name sentinel-backend \
+          --query "[?digest=='${digest}'].tags[]" -o tsv --only-show-errors)" ||
+          die "could not list the sentinel-backend manifests"
+        tag="$(printf '%s\n' "$tags" | tr '\t' '\n' | grep -E '^sha-[0-9a-f]{7}$' | sort | head -n 1)" || tag=""
+        [ -n "$tag" ] || die "stable has no sha-<7 hex> tag"
+        echo "::notice::resolve-stable-tag: stable is $tag"
+        echo "image-tag=$tag" >> "$GITHUB_OUTPUT"

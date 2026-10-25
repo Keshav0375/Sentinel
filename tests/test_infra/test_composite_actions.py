@@ -31,6 +31,7 @@ ACTIONS = (
     "get-kv-secrets",
     "notify-teams",
     "psql-exec",
+    "resolve-stable-tag",
 )
 
 KV_OUTPUTS = {
@@ -78,6 +79,7 @@ EXPECTED_INPUTS: dict[str, dict[str, tuple[bool, str | None]]] = {
         "webhook-url": (True, None),
         "severity": (False, "info"),
     },
+    "resolve-stable-tag": {"acr-name": (True, None)},
     "psql-exec": {
         "sql": (True, None),
         "pg-token": (True, None),
@@ -96,6 +98,7 @@ EXPECTED_OUTPUTS: dict[str, set[str]] = {
     "get-kv-secrets": KV_OUTPUTS,
     "notify-teams": set(),
     "psql-exec": {"result"},
+    "resolve-stable-tag": {"image-tag"},
 }
 
 SECRET_OUTPUTS: dict[str, set[str]] = {
@@ -167,6 +170,13 @@ case "$1 $2" in
 esac
 exit 0
 """
+# `az acr repository show` answers $STUB_DIGEST (exit 3 with STUB_SHOW_FAIL);
+# `manifest list-metadata` answers $STUB_TAGS.
+AZ_RESOLVE = (
+    'case "$*" in *"repository show"*) [ -z "${STUB_SHOW_FAIL:-}" ] || exit 3;'
+    " printf '%s\\n' \"$STUB_DIGEST\";;"
+    ' *"manifest list-metadata"*) printf \'%s\\n\' "$STUB_TAGS";; *) exit 9;; esac'
+)
 KUBECTL_BODY = r"""
 case "$*" in
   *" apply "*)
@@ -299,7 +309,7 @@ def _need(tool: str) -> None:
 # --- static contract ---
 
 
-def test_actions_dir_holds_the_seven() -> None:
+def test_actions_dir_holds_the_eight() -> None:
     found = {p.parent.name for p in ACTIONS_DIR.glob("*/action.yml")}
     assert found == set(ACTIONS)
     assert (ACTIONS_DIR / "README.md").is_file()
@@ -643,11 +653,89 @@ def test_get_backend_token_scope_and_tenant(tmp_path: Path, tenant: str) -> None
     assert "::add-mask::bearer-xyz" in run.stdout
 
 
-def test_get_backend_token_rejects_comma_list(tmp_path: Path) -> None:
+GUID = "00000000-0000-0000-0000-000000000002"
+
+
+@pytest.mark.parametrize(
+    "audience", [f"{GUID},api://{GUID}/sentinel-backend-sentinel-dev", f" {GUID} , api://x"]
+)
+def test_get_backend_token_uses_first_entry_of_list(tmp_path: Path, audience: str) -> None:
     run = _run_step(
-        "get-backend-token", "token", {"audience": "a,b"}, tmp_path, {"az": "echo bearer-xyz"}
+        "get-backend-token",
+        "token",
+        {"audience": audience, "tenant": "tid-1"},
+        tmp_path,
+        {"az": "echo bearer-xyz"},
+    )
+    assert run.returncode == 0, run.stdout
+    assert f"--scope {GUID}/.default" in run.log[0]
+    assert "--tenant tid-1" in run.log[0]
+    assert "api://" not in run.log[0]
+
+
+@pytest.mark.parametrize("audience", [f"api://{GUID}/x,{GUID}", "a,b", f",{GUID}", "not-a-guid"])
+def test_get_backend_token_rejects_non_guid_first(tmp_path: Path, audience: str) -> None:
+    run = _run_step(
+        "get-backend-token", "token", {"audience": audience}, tmp_path, {"az": "echo bearer-xyz"}
     )
     assert run.returncode != 0
+    assert run.log == []
+
+
+def _resolve(
+    tmp_path: Path, digest: str, tags: str, acr: str = "sentinelacr", **env: str
+) -> StepRun:
+    return _run_step(
+        "resolve-stable-tag",
+        "resolve",
+        {"acr-name": acr},
+        tmp_path,
+        {"az": AZ_RESOLVE},
+        {"STUB_DIGEST": digest, "STUB_TAGS": tags, **env},
+    )
+
+
+STABLE_DIGEST = "sha256:" + "a" * 64
+
+
+def test_resolve_stable_tag_picks_sha_tag_of_stable_digest(tmp_path: Path) -> None:
+    run = _resolve(tmp_path, STABLE_DIGEST, "stable\tsha-1234567\tlatest")
+    assert run.returncode == 0, run.stdout
+    assert run.outputs == {"image-tag": "sha-1234567"}
+    assert run.log
+    assert all("--only-show-errors" in line for line in run.log)
+
+
+def test_resolve_stable_tag_picks_first_sorted_when_several(tmp_path: Path) -> None:
+    run = _resolve(tmp_path, STABLE_DIGEST, "sha-bbbbbbb\tstable\tsha-aaaaaaa")
+    assert run.returncode == 0, run.stdout
+    assert run.outputs == {"image-tag": "sha-aaaaaaa"}
+
+
+def test_resolve_stable_tag_fails_without_sha_tag(tmp_path: Path) -> None:
+    run = _resolve(tmp_path, STABLE_DIGEST, "stable")
+    assert run.returncode != 0
+    assert "stable has no sha-" in run.stdout
+    assert run.outputs == {}
+
+
+def test_resolve_stable_tag_rejects_malformed_digest(tmp_path: Path) -> None:
+    run = _resolve(tmp_path, "sha256:XYZ", "sha-1234567")
+    assert run.returncode != 0
+    assert "malformed" in run.stdout
+    assert len(run.log) == 1
+
+
+def test_resolve_stable_tag_fails_when_stable_missing(tmp_path: Path) -> None:
+    run = _resolve(tmp_path, STABLE_DIGEST, "sha-1234567", STUB_SHOW_FAIL="1")
+    assert run.returncode != 0
+    assert "not found in ACR" in run.stdout
+
+
+def test_resolve_stable_tag_rejects_empty_acr_name(tmp_path: Path) -> None:
+    run = _resolve(tmp_path, STABLE_DIGEST, "sha-1234567", acr="")
+    assert run.returncode != 0
+    assert "input acr-name is empty" in run.stdout
     assert run.log == []
 
 
@@ -918,6 +1006,11 @@ def test_backend_up_fails_without_bundled_manifests(tmp_path: Path) -> None:
             "api://00000000-0000-0000-0000-000000000001/sentinel-backend-sentinel-dev",
             "SENTINEL_API_AUDIENCE",
         ),
+        (
+            "api-audience",
+            "api://x/y,00000000-0000-0000-0000-000000000002",
+            "SENTINEL_API_AUDIENCE",
+        ),
         ("api-audience", "00000000-0000-0000-0000-000000000002,", "SENTINEL_API_AUDIENCE"),
         (
             "api-audience",
@@ -962,6 +1055,13 @@ def test_backend_up_accepts_value_variants(tmp_path: Path) -> None:
     configmap = (Path(f"{tmp_path / 'stub.log'}.rendered") / "configmap.yaml").read_text()
     assert "https://kv-sentinel-test.vault.azure.net" in configmap
     assert "00000000-0000-0000-0000-000000000002" in configmap
+
+
+def test_backend_up_accepts_guid_first_list(tmp_path: Path) -> None:
+    _need("envsubst")
+    audience = "00000000-0000-0000-0000-000000000002,api://x/y"
+    run = _apply(tmp_path, {**SAMPLE_UP_INPUTS, "api-audience": audience})
+    assert run.returncode == 0, run.stdout
 
 
 def _cluster(tmp_path: Path, *lines: str) -> StepRun:

@@ -24,13 +24,16 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 
-from sentinel.api.incidents import make_incidents_router
+from sentinel.api.incidents import make_incidents_router, rollback_spec_of
 from sentinel.infra.database import create_pool
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import IncidentAlert
 from sentinel.models.incident import TimelineEntry
+from sentinel.models.memory import IncidentRow
+from sentinel.models.pipeline import PipelineResult
+from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
 
 T0 = datetime(2026, 10, 1, tzinfo=UTC)
 
@@ -260,6 +263,7 @@ _HELD = str(uuid.uuid4())
         f"/incidents/{_HELD}",
         f"/incidents/{_HELD}/trajectory",
         f"/incidents/{_HELD}/deploy",
+        f"/incidents/{_HELD}/rollback-spec",
     ],
 )
 async def test_every_route_is_503_without_a_database(path: str) -> None:
@@ -610,3 +614,184 @@ async def test_deploy_unknown_incident_is_404(episodic: EpisodicMemory, pool: as
 
     assert response.status_code == 404
     assert "not found" in response.json()["detail"]
+
+
+# ── GET /incidents/{id}/rollback-spec ─────────────────────────────────────────
+
+
+def _spec(incident_id: str) -> RollbackSpec:
+    return RollbackSpec(
+        incident_id=incident_id,
+        root_cause="bad deploy pr-12",
+        evidence_summary="5xx after deploy",
+        confidence=0.9,
+        justification="revert pr-12",
+        target_deploy=TargetDeploy(pr_number=12, commit_sha="a1b2c3d", deployed_at=T0),
+    )
+
+
+def _rollback_result(incident_id: str) -> dict[str, Any]:
+    return PipelineResult(
+        incident_id=incident_id,
+        status="rollback_proposed",
+        resolution_type="rollback",
+        root_cause="bad deploy pr-12",
+        confidence=0.9,
+        rollback_spec=_spec(incident_id),
+        reflexion_loops=0,
+        tool_calls_used=3,
+        tokens_used=100,
+    ).model_dump(mode="json")
+
+
+def _escalated_result(incident_id: str) -> dict[str, Any]:
+    return PipelineResult(
+        incident_id=incident_id,
+        status="escalated",
+        resolution_type="escalated",
+        root_cause="unclear",
+        confidence=0.4,
+        escalation=EscalationContext(
+            hypothesis="unclear", evidence=["no deploy"], confidence=0.4, missing=["deploy record"]
+        ),
+        reflexion_loops=0,
+        tool_calls_used=3,
+        tokens_used=100,
+    ).model_dump(mode="json")
+
+
+def _row(**kw: Any) -> IncidentRow:
+    values: dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "alert_id": "alert-1",
+        "severity": "P1",
+        "service": "payment-service",
+        "status": "rollback_proposed",
+    } | kw
+    return IncidentRow(**values)
+
+
+def test_rollback_spec_of_returns_the_spec() -> None:
+    incident_id = str(uuid.uuid4())
+    row = _row(id=incident_id, trajectory={"pipeline_result": _rollback_result(incident_id)})
+
+    assert rollback_spec_of(row) == _spec(incident_id)
+
+
+@pytest.mark.parametrize("status", ["escalated", "in_progress"])
+def test_rollback_spec_of_is_none_unless_rollback_proposed(status: str) -> None:
+    incident_id = str(uuid.uuid4())
+    row = _row(
+        id=incident_id,
+        status=status,
+        trajectory={"pipeline_result": _rollback_result(incident_id)},
+    )
+
+    assert rollback_spec_of(row) is None
+
+
+@pytest.mark.parametrize(
+    "trajectory",
+    [None, [], {"x": 1}, {"pipeline_result": []}, "escalated"],
+)
+def test_rollback_spec_of_is_none_without_a_spec(trajectory: Any) -> None:
+    incident_id = str(uuid.uuid4())
+    if trajectory == "escalated":
+        trajectory = {"pipeline_result": _escalated_result(incident_id)}
+
+    assert rollback_spec_of(_row(id=incident_id, trajectory=trajectory)) is None
+
+
+def test_rollback_spec_of_rejects_an_invalid_spec() -> None:
+    incident_id = str(uuid.uuid4())
+    result = _rollback_result(incident_id)
+    result["rollback_spec"]["confidence"] = 2.0
+
+    assert rollback_spec_of(_row(id=incident_id, trajectory={"pipeline_result": result})) is None
+
+
+def test_rollback_spec_of_rejects_another_incidents_spec() -> None:
+    incident_id = str(uuid.uuid4())
+    result = _rollback_result(str(uuid.uuid4()))
+
+    assert rollback_spec_of(_row(id=incident_id, trajectory={"pipeline_result": result})) is None
+
+
+async def test_rollback_spec_returns_the_drafted_spec(
+    episodic: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    incident_id = str(uuid.uuid4())
+    await _insert_incident(
+        pool,
+        id=incident_id,
+        status="rollback_proposed",
+        created_at=T0,
+        trajectory={"pipeline_result": _rollback_result(incident_id)},
+    )
+
+    response = await _get(
+        _app(ShortTermMemory(), episodic), f"/incidents/{incident_id}/rollback-spec"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert RollbackSpec.model_validate(body) == _spec(incident_id)
+    assert body["target_deploy"]["commit_sha"] == "a1b2c3d"
+    assert body["resolution_type"] == "rollback"
+
+
+async def test_rollback_spec_of_an_escalated_incident_is_404(
+    episodic: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    incident_id = str(uuid.uuid4())
+    await _insert_incident(
+        pool,
+        id=incident_id,
+        status="escalated",
+        created_at=T0,
+        trajectory={"pipeline_result": _escalated_result(incident_id)},
+    )
+
+    response = await _get(
+        _app(ShortTermMemory(), episodic), f"/incidents/{incident_id}/rollback-spec"
+    )
+
+    assert response.status_code == 404
+    assert "no rollback spec" in response.json()["detail"]
+
+
+async def test_rollback_spec_without_a_trajectory_is_404(
+    episodic: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    incident_id = await _insert_incident(pool, status="rollback_proposed", created_at=T0)
+
+    response = await _get(
+        _app(ShortTermMemory(), episodic), f"/incidents/{incident_id}/rollback-spec"
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("incident_id", [str(uuid.uuid4()), "not-a-uuid"])
+async def test_rollback_spec_unknown_id_is_404(
+    episodic: EpisodicMemory, pool: asyncpg.Pool, incident_id: str
+) -> None:
+    response = await _get(
+        _app(ShortTermMemory(), episodic), f"/incidents/{incident_id}/rollback-spec"
+    )
+
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+async def test_rollback_spec_of_an_in_flight_incident_is_404(
+    episodic: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    live = str(uuid.uuid4())
+    stm = ShortTermMemory()
+    stm.create(live, _alert())
+    stm.update_context(live, result=_rollback_result(live))
+
+    response = await _get(_app(stm, episodic), f"/incidents/{live}/rollback-spec")
+
+    assert response.status_code == 404

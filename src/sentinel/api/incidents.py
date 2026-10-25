@@ -1,28 +1,35 @@
 """Incident query endpoints (backend.md §3.2) — ``GET /incidents``, ``/incidents/{id}``,
-``/incidents/{id}/trajectory``, ``/incidents/{id}/deploy``.
+``/incidents/{id}/trajectory``, ``/incidents/{id}/deploy``, ``/incidents/{id}/rollback-spec``.
 
 An incident is served from the ``incidents`` table when it has a row; otherwise, if
 short-term memory still holds it, as an in-flight row with ``status: "in_progress"`` (its
 live timeline in ``trajectory``, shaped like a stored one); otherwise 404. No database (or
 a failed query) is 503 on every route. An unknown incident is 404, and so is a known one
-with no linked ``deployments`` row on ``/deploy``.
+with no linked ``deployments`` row on ``/deploy``. ``/rollback-spec`` is the RollbackSpec the
+pipeline drafted, read from ``trajectory.pipeline_result.rollback_spec`` of a stored
+``rollback_proposed`` row; every other case (in flight, escalated, no spec) is 404.
 
 No auth here: the app mounts this router behind the Entra bearer dependency (task 5.5).
 """
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, JsonValue, ValidationError
 
 from sentinel.exceptions import SentinelMemoryError
+from sentinel.infra.logging import get_logger
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import IncidentAlert
-from sentinel.models.incident import TimelineEntry
+from sentinel.models.incident import IncidentStatus, TimelineEntry
 from sentinel.models.memory import DeploymentRow, IncidentRow
+from sentinel.models.tools import RollbackSpec
+
+logger = get_logger("sentinel.api.incidents")
 
 IN_PROGRESS: Final = "in_progress"
 _DEFAULT_LIMIT: Final = 50  # EpisodicMemory.list_incidents' default
@@ -67,6 +74,38 @@ def _in_flight_row(context: dict[str, Any]) -> IncidentRow:
     )
 
 
+def rollback_spec_of(row: IncidentRow) -> RollbackSpec | None:
+    """The RollbackSpec a stored ``rollback_proposed`` row carries, else None.
+
+    Read from ``trajectory.pipeline_result.rollback_spec``. An invalid spec, or one for
+    another incident, is logged and treated as absent.
+    """
+    if row.status != IncidentStatus.ROLLBACK_PROPOSED.value:
+        return None
+    trajectory = row.trajectory
+    if not isinstance(trajectory, dict):
+        return None
+    pipeline_result = trajectory.get("pipeline_result")
+    if not isinstance(pipeline_result, dict):
+        return None
+    raw = pipeline_result.get("rollback_spec")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        spec = RollbackSpec.model_validate(raw)
+    except ValidationError:
+        logger.warning("rollback_spec_invalid", incident_id=row.id)
+        return None
+    try:
+        matches = uuid.UUID(spec.incident_id) == uuid.UUID(row.id)
+    except ValueError:
+        matches = False
+    if not matches:
+        logger.warning("rollback_spec_incident_mismatch", incident_id=row.id)
+        return None
+    return spec
+
+
 def _unavailable(exc: SentinelMemoryError) -> HTTPException:
     return HTTPException(status_code=503, detail=str(exc))
 
@@ -86,7 +125,7 @@ def make_incidents_router(
             tables, the source of every stored incident.
 
     Returns:
-        ``APIRouter`` with the four ``GET /incidents*`` routes registered under no prefix
+        ``APIRouter`` with the five ``GET /incidents*`` routes registered under no prefix
         and no auth dependency (the caller mounts it at the root, behind auth).
     """
     router = APIRouter()
@@ -179,5 +218,26 @@ def make_incidents_router(
                 detail=f"No deployment is linked to incident {incident_id!r}.",
             )
         return deploy
+
+    @router.get("/incidents/{incident_id}/rollback-spec", response_model=RollbackSpec)
+    async def get_rollback_spec(  # pyright: ignore[reportUnusedFunction]
+        incident_id: str,
+    ) -> RollbackSpec:
+        """The RollbackSpec the pipeline drafted.
+
+        404 when the incident is unknown, in flight, escalated or has no spec.
+        """
+        try:
+            row = await episodic_memory.get_incident_row(incident_id)
+        except SentinelMemoryError as exc:
+            raise _unavailable(exc) from exc
+        if row is None:
+            raise _not_found(incident_id)
+        spec = rollback_spec_of(row)
+        if spec is None:
+            raise HTTPException(
+                status_code=404, detail=f"Incident {incident_id!r} has no rollback spec."
+            )
+        return spec
 
     return router
