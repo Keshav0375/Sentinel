@@ -1,0 +1,6 @@
+# Local gate tooling only — nothing here is deployed. The Function apps ship
+# modules/functions/src/requirements.txt.
+#   python3.12 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+# Pinned to the same ruff as Sentinel-deployment: 0.16 widened the default rule
+# set, so an unpinned install changes what the gate means.
+ruff==0.16.10

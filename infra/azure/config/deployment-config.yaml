@@ -1,0 +1,102 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# Sentinel deployment configuration
+#
+# ── Why this file exists ─────────────────────────────────────────────────────
+# `workflow_dispatch` accepts at most 10 inputs. The stack has roughly forty
+# knobs. So the split is not a stylistic preference, it is forced:
+#
+#     THE FORM  carries shape and intent   — which deployment, which components,
+#                                            apply or destroy
+#     THIS FILE carries size and detail    — SKUs, counts, retention, quotas
+#
+# The better half of the accident: config in git is reviewable. A SKU change
+# arrives as a diff with an author and a date, instead of as something someone
+# typed into a form six weeks ago and cannot recall.
+#
+# ── A deployment absent from `deployments:` is completely valid ──────────────
+# It inherits `defaults:` entirely. That is what makes `deployment: demo1` plus
+# `apply` a complete instruction with no file edit — this file is for EXCEPTIONS,
+# not for enrolment. Add a block only when a deployment must differ.
+#
+# ── Read by Terraform, not by a script ───────────────────────────────────────
+#     locals {
+#       all = yamldecode(file("${path.root}/azure/config/deployment-config.yaml"))
+#       cfg = merge(local.all.defaults, try(local.all.deployments[var.deployment], {}))
+#     }
+#
+# `merge` is shallow, so a deployment overriding `database:` replaces the whole
+# block rather than merging into it. State every key you need in an override.
+# ═════════════════════════════════════════════════════════════════════════════
+
+defaults:
+  # Region. Must have an abbreviation in modules/naming — an unmapped region
+  # fails the plan rather than producing a malformed name.
+  location: canadacentral
+
+  # Which components this deployment gets. These are not independent: `functions`
+  # and `event_grid` are a mutually dependent pair, and `functions` also needs
+  # `keyvault` for its secret references. Task 6.4 enforces the dependency graph
+  # with preconditions that fail in seconds, rather than letting a provider error
+  # four hundred lines into a plan explain it.
+  components:
+    - keyvault
+    - database
+    - functions
+    - event_grid
+    - app_service
+    - namespace
+
+  database:
+    # shared    — a database plus an Entra role on the PLATFORM server. One
+    #             server's compute serves every deployment. Cheap; a runaway
+    #             query in one deployment can slow another.
+    # dedicated — its own flexible server in this deployment's resource group.
+    #             Full isolation, its own VM against the same grant, ~8 minutes
+    #             to create, and one more server that must be started before any
+    #             plan can run.
+    mode: shared
+    sku: B_Standard_B1ms
+    storage_mb: 32768
+
+  # The deployment's slice of the SHARED cluster. A quota here is not optional:
+  # with one cluster, an unbounded namespace can exhaust the node and take every
+  # other deployment down with it. The quota is what makes sharing acceptable
+  # rather than merely cheap.
+  namespace:
+    cpu_request: "250m"
+    cpu_limit: "1"
+    memory_request: 512Mi
+    memory_limit: 2Gi
+
+  app_service:
+    sku: F1 # Free tier. always_on is unavailable and 32-bit workers are forced.
+
+  keyvault:
+    # 7 is the Azure minimum. Higher values make destroy -> recreate of the same
+    # deployment name impossible without a purge, and purge is precisely the
+    # right the deploy identity holds so that cycle works.
+    soft_delete_retention_days: 7
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Per-deployment overrides. Everything here is optional.
+# ═════════════════════════════════════════════════════════════════════════════
+deployments:
+  # The primary deployment. Inherits defaults entirely — kept as an explicit
+  # entry only so the file documents which names are in use.
+  sentinel: {}
+
+  # A scratch deployment for exercising the destroy -> recreate cycle. Minimal
+  # component set so it applies in a couple of minutes.
+  demo1:
+    components:
+      - keyvault
+      - database
+
+  # Illustrates a dedicated database. Not currently deployed — note that a
+  # dedicated server consumes its own compute against the same subscription
+  # grant, and the regional ceiling is 6 vCPU with an AKS node already using 2.
+  perf:
+    database:
+      mode: dedicated
+      sku: B_Standard_B2s
+      storage_mb: 65536

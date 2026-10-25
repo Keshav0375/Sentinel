@@ -1,0 +1,77 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pause / Resume — stop what bills compute, without deleting anything.
+#
+# The logic lives in scripts/pause.sh, not inline. Three reasons: the gate's
+# shellcheck glob covers scripts/*.sh so it gets linted properly, a hundred-line
+# `run:` block is not reviewable, and a script runs locally where a workflow step
+# does not. (Inline, it also hung actionlint's shell parser outright.)
+#
+# ── Runs as gha-ops, deliberately ────────────────────────────────────────────
+# This is the most frequently run operation here, so it must not require the
+# identity that can delete the subscription. `gha-ops` holds a custom role with
+# ten explicit actions — read, start, stop — and no wildcard anywhere. It cannot
+# create and it cannot delete, which is a property you can test rather than trust.
+#
+# ── Pause is not free, and the summary says so ───────────────────────────────
+# Stopping ends the compute charge, which dominates. Disks, storage, the AKS load
+# balancer and ACR's daily charge continue. Only destroy is zero.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "Sentinel — Pause / Resume"
+
+# `scope` is free text here — `platform`, `all`, or a deployment name — so it
+# goes into the title verbatim. This is the most frequently dispatched workflow
+# in the repo; an undifferentiated list of it is the least useful.
+run-name: "Sentinel - ${{ inputs.action }} for ${{ inputs.scope }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'pause = stop compute · resume = start it again'
+        type: choice
+        required: true
+        default: pause
+        options: [pause, resume]
+      scope:
+        description: >-
+          platform = the shared cluster and database (affects EVERY deployment) · all = everything ·
+          or a single deployment name
+        type: string
+        required: true
+        default: platform
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: infra-pause
+  cancel-in-progress: false
+
+jobs:
+  pause-resume:
+    name: Pause or Resume
+    runs-on: ubuntu-latest
+
+    # gha-ops federates only on this subject. A pull request cannot present it.
+    environment: ops
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_OPS }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Pause or resume
+        env:
+          ACTION: ${{ inputs.action }}
+          SCOPE: ${{ inputs.scope }}
+        # `bash` rather than direct execution — the exec bit does not survive a
+        # Windows checkout, and the failure is CI-only.
+        run: bash ./scripts/pause.sh --action "${ACTION}" --scope "${SCOPE}"

@@ -1,0 +1,16 @@
+# Local run values. CI passes these as -var flags instead (C5: never TF_VAR_*).
+#
+# `layer` has no default deliberately — it decides whether a run manages the
+# shared platform or one deployment, and defaulting that is how someone applies
+# the wrong one.
+layer           = "platform"
+subscription_id = "<your-subscription-id>"
+
+pg_admin_object_id      = "<az ad signed-in-user show --query id -o tsv>"
+pg_admin_principal_name = "<your-upn>"
+
+# Deployment layer only. gha-app's PRINCIPAL id (not its client id), printed by
+# scripts/bootstrap-identities.sh. Omit it and the App Service grant is skipped.
+# gha_app_object_id = "<az identity show -g rg-sentinel-bootstrap -n gha-app --query principalId -o tsv>"
+# The grant is made only in this one <deployment>-<environment> workspace.
+# gha_app_target = "sentinel-dev"
