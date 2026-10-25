@@ -69,6 +69,7 @@ TOKEN_WITH = {
 }
 PAT = "${{ secrets.REVERT_PR_PAT }}"
 PR_URL_SET = "needs.create-rollback-pr.outputs.pr-url != ''"
+PREFLIGHT_GATE = "needs.preflight.outputs.configured == 'true'"
 
 
 def _stub(bin_dir: Path, name: str, body: str) -> None:
@@ -164,7 +165,7 @@ def test_header() -> None:
 
 
 def test_dag_needs_graph() -> None:
-    expected = {
+    graph = {
         "ensure-backend-up": set(),
         "fetch-service-info": {"ensure-backend-up"},
         "fetch-pr-details": {"ensure-backend-up"},
@@ -194,6 +195,9 @@ def test_dag_needs_graph() -> None:
             "teardown-backend",
         },
     }
+    # Every job also needs the preflight, which needs nothing.
+    expected = {"preflight": set()}
+    expected.update({job_id: {"preflight", *deps} for job_id, deps in graph.items()})
 
     assert {job_id: _needs(job) for job_id, job in JOBS.items()} == expected
 
@@ -212,8 +216,8 @@ def test_branches_are_exclusive() -> None:
 
 
 def test_teardown_and_summary_always_run() -> None:
-    assert JOBS["teardown-backend"]["if"] == "always()"
-    assert JOBS["summary"]["if"] == "always()"
+    assert JOBS["teardown-backend"]["if"] == f"always() && {PREFLIGHT_GATE}"
+    assert JOBS["summary"]["if"] == f"always() && {PREFLIGHT_GATE}"
     down = _find("teardown-backend", "backend-down")
     assert down["with"]["keep-warm"] == "${{ vars.SENTINEL_KEEP_WARM }}"
 

@@ -45,8 +45,61 @@ env:
   NAMESPACE: sentinel-dev
 
 jobs:
+  # Until the infra CI-identity ticket sets the variables below, every other job is skipped and the run stays
+  # green with a notice. No secrets and no login here; the environment makes environment-level variables visible.
+  preflight:
+    name: Check Azure CI identity
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    environment: sentinel-dev
+    permissions: {}
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        name: Check the Azure CI identity variables
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_GHA_CLIENT_ID: ${{ vars.AZURE_GHA_CLIENT_ID }}
+          AZURE_IDENTITY_TENANT_ID: ${{ vars.AZURE_IDENTITY_TENANT_ID }}
+          ACR_NAME: ${{ vars.ACR_NAME }}
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+          AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+          SENTINEL_API_TENANT_ID: ${{ vars.SENTINEL_API_TENANT_ID }}
+          SENTINEL_API_AUDIENCE: ${{ vars.SENTINEL_API_AUDIENCE }}
+          KEY_VAULT_URI: ${{ vars.KEY_VAULT_URI }}
+          PG_HOST: ${{ vars.PG_HOST }}
+          PG_DATABASE: ${{ vars.PG_DATABASE }}
+          PG_USER_BACKEND: ${{ vars.PG_USER_BACKEND }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_GHA_CLIENT_ID \
+            AZURE_IDENTITY_TENANT_ID ACR_NAME ACR_LOGIN_SERVER AKS_RESOURCE_GROUP AKS_CLUSTER_NAME \
+            SENTINEL_API_TENANT_ID SENTINEL_API_AUDIENCE KEY_VAULT_URI PG_HOST PG_DATABASE PG_USER_BACKEND; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            msg="Azure CI identity not configured — ${GITHUB_WORKFLOW:-this workflow} skipped."
+            msg="$msg See sentinel-brain decisions 2026-10-24 phase 8 'Names the infra CI-identity ticket must create'."
+            echo "::notice::$msg Missing:$missing"
+            {
+              echo "$msg"
+              echo ""
+              echo "Missing variables:$missing"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
   run-quality:
     name: Run Quality Checks
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     steps:
@@ -102,7 +155,8 @@ jobs:
 
   build-and-push:
     name: Build and Push Image
-    needs: run-quality
+    needs: [preflight, run-quality]
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     environment: sentinel-dev
@@ -176,7 +230,8 @@ jobs:
 
   deploy-to-aks:
     name: Deploy to AKS
-    needs: build-and-push
+    needs: [preflight, build-and-push]
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     environment: sentinel-dev
@@ -246,7 +301,8 @@ jobs:
 
   run-tests:
     name: Run Tests Against Live Deployment
-    needs: deploy-to-aks
+    needs: [preflight, deploy-to-aks]
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     environment: sentinel-dev
@@ -397,8 +453,8 @@ jobs:
 
   promote-or-rollback:
     name: Promote or Rollback
-    needs: [run-quality, build-and-push, deploy-to-aks, run-tests]
-    if: always()
+    needs: [preflight, run-quality, build-and-push, deploy-to-aks, run-tests]
+    if: always() && needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     environment: sentinel-dev

@@ -32,9 +32,66 @@ env:
   RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
 jobs:
+  # ── 0. Preflight ─────────────────────────────────────────────────────────
+  # Until the infra CI-identity ticket sets the variables below, every other job is skipped and the run stays
+  # green; the notice and job summary keep an unconfigured alert visible (Teams needs Key Vault, so no ping).
+  # No secrets and no login here; the environment makes environment-level variables visible.
+  preflight:
+    name: Check Azure CI identity
+    runs-on: ubuntu-latest
+    environment: sentinel-dev
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Check the Azure CI identity variables
+        id: check
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_GHA_CLIENT_ID: ${{ vars.AZURE_GHA_CLIENT_ID }}
+          AZURE_IDENTITY_TENANT_ID: ${{ vars.AZURE_IDENTITY_TENANT_ID }}
+          ACR_NAME: ${{ vars.ACR_NAME }}
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+          AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+          SENTINEL_API_TENANT_ID: ${{ vars.SENTINEL_API_TENANT_ID }}
+          SENTINEL_API_AUDIENCE: ${{ vars.SENTINEL_API_AUDIENCE }}
+          KEY_VAULT_URI: ${{ vars.KEY_VAULT_URI }}
+          PG_HOST: ${{ vars.PG_HOST }}
+          PG_DATABASE: ${{ vars.PG_DATABASE }}
+          PG_USER_BACKEND: ${{ vars.PG_USER_BACKEND }}
+          PG_USER_GHA: ${{ vars.PG_USER_GHA }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_GHA_CLIENT_ID \
+            AZURE_IDENTITY_TENANT_ID ACR_NAME ACR_LOGIN_SERVER AKS_RESOURCE_GROUP AKS_CLUSTER_NAME \
+            SENTINEL_API_TENANT_ID SENTINEL_API_AUDIENCE KEY_VAULT_URI PG_HOST PG_DATABASE PG_USER_BACKEND \
+            PG_USER_GHA; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            msg="Azure CI identity not configured — ${GITHUB_WORKFLOW:-this workflow} skipped."
+            msg="$msg See sentinel-brain decisions 2026-10-24 phase 8 'Names the infra CI-identity ticket must create'."
+            echo "::notice::$msg Missing:$missing"
+            {
+              echo "$msg"
+              echo ""
+              echo "Missing variables:$missing"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
   # ── 1. Backend up ────────────────────────────────────────────────────────
   ensure-backend-up:
     name: Ensure backend up
+    needs: [preflight]
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: sentinel-dev
     timeout-minutes: 35
@@ -77,7 +134,8 @@ jobs:
   # ── 2. Enrichment (optional context; a failure here never blocks the pipeline) ──
   fetch-service-info:
     name: Fetch service info
-    needs: [ensure-backend-up]
+    needs: [preflight, ensure-backend-up]
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: sentinel-dev
     timeout-minutes: 10
@@ -136,7 +194,8 @@ jobs:
 
   fetch-pr-details:
     name: Fetch PR details
-    needs: [ensure-backend-up]
+    needs: [preflight, ensure-backend-up]
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -173,7 +232,8 @@ jobs:
 
   fetch-datadog-logs:
     name: Fetch Datadog logs
-    needs: [ensure-backend-up]
+    needs: [preflight, ensure-backend-up]
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: sentinel-dev
     timeout-minutes: 10
@@ -231,8 +291,10 @@ jobs:
   # ── 3. The agent pipeline ────────────────────────────────────────────────
   run-agent-pipeline:
     name: Run agent pipeline
-    needs: [ensure-backend-up, fetch-service-info, fetch-pr-details, fetch-datadog-logs]
-    if: ${{ !cancelled() && needs.ensure-backend-up.result == 'success' }}
+    needs: [preflight, ensure-backend-up, fetch-service-info, fetch-pr-details, fetch-datadog-logs]
+    if: >-
+      ${{ !cancelled() && needs.preflight.outputs.configured == 'true' &&
+      needs.ensure-backend-up.result == 'success' }}
     runs-on: ubuntu-latest
     environment: sentinel-dev
     timeout-minutes: 20
@@ -341,9 +403,10 @@ jobs:
   # ── 4a. Rollback branch ──────────────────────────────────────────────────
   generate-pr-content:
     name: Generate PR content
-    needs: [ensure-backend-up, run-agent-pipeline]
+    needs: [preflight, ensure-backend-up, run-agent-pipeline]
     if: >-
-      ${{ !cancelled() && needs.run-agent-pipeline.result == 'success' &&
+      ${{ !cancelled() && needs.preflight.outputs.configured == 'true' &&
+      needs.run-agent-pipeline.result == 'success' &&
       needs.run-agent-pipeline.outputs.resolution-type == 'rollback' }}
     runs-on: ubuntu-latest
     environment: sentinel-dev
@@ -414,8 +477,10 @@ jobs:
   # the PR exists; the DB record is a separate job, so a record failure never hides the PR.
   create-rollback-pr:
     name: Create rollback PR
-    needs: [run-agent-pipeline, generate-pr-content]
-    if: ${{ !cancelled() && needs.generate-pr-content.result == 'success' }}
+    needs: [preflight, run-agent-pipeline, generate-pr-content]
+    if: >-
+      ${{ !cancelled() && needs.preflight.outputs.configured == 'true' &&
+      needs.generate-pr-content.result == 'success' }}
     runs-on: ubuntu-latest
     environment: sentinel-dev
     timeout-minutes: 10
@@ -503,8 +568,10 @@ jobs:
 
   record-rollback-pr:
     name: Record rollback PR
-    needs: [run-agent-pipeline, create-rollback-pr]
-    if: ${{ !cancelled() && needs.create-rollback-pr.outputs.pr-url != '' }}
+    needs: [preflight, run-agent-pipeline, create-rollback-pr]
+    if: >-
+      ${{ !cancelled() && needs.preflight.outputs.configured == 'true' &&
+      needs.create-rollback-pr.outputs.pr-url != '' }}
     runs-on: ubuntu-latest
     environment: sentinel-dev
     timeout-minutes: 10
@@ -552,8 +619,10 @@ jobs:
 
   notify-rollback:
     name: Notify rollback
-    needs: [run-agent-pipeline, create-rollback-pr]
-    if: ${{ !cancelled() && needs.create-rollback-pr.outputs.pr-url != '' }}
+    needs: [preflight, run-agent-pipeline, create-rollback-pr]
+    if: >-
+      ${{ !cancelled() && needs.preflight.outputs.configured == 'true' &&
+      needs.create-rollback-pr.outputs.pr-url != '' }}
     runs-on: ubuntu-latest
     environment: sentinel-dev
     timeout-minutes: 10
@@ -593,9 +662,10 @@ jobs:
   # ── 4b. Escalation branch ────────────────────────────────────────────────
   notify-escalation:
     name: Notify escalation
-    needs: [run-agent-pipeline]
+    needs: [preflight, run-agent-pipeline]
     if: >-
-      ${{ !cancelled() && needs.run-agent-pipeline.result == 'success' &&
+      ${{ !cancelled() && needs.preflight.outputs.configured == 'true' &&
+      needs.run-agent-pipeline.result == 'success' &&
       needs.run-agent-pipeline.outputs.resolution-type == 'escalated' }}
     runs-on: ubuntu-latest
     environment: sentinel-dev
@@ -634,8 +704,8 @@ jobs:
   # ── 5. Always: tear down and summarise ───────────────────────────────────
   teardown-backend:
     name: Tear down backend
-    needs: [ensure-backend-up, run-agent-pipeline, notify-rollback, notify-escalation]
-    if: always()
+    needs: [preflight, ensure-backend-up, run-agent-pipeline, notify-rollback, notify-escalation]
+    if: always() && needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: sentinel-dev
     timeout-minutes: 15
@@ -658,8 +728,9 @@ jobs:
 
   summary:
     name: Summary
-    needs: [ensure-backend-up, run-agent-pipeline, create-rollback-pr, record-rollback-pr, teardown-backend]
-    if: always()
+    needs:
+      [preflight, ensure-backend-up, run-agent-pipeline, create-rollback-pr, record-rollback-pr, teardown-backend]
+    if: always() && needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: sentinel-dev
     timeout-minutes: 10

@@ -29,8 +29,61 @@ permissions:
   contents: read
 
 jobs:
+  # Until the infra CI-identity ticket sets the variables below, the scale job is skipped and the run (manual or
+  # nightly) stays green with a notice. No secrets and no login here; the environment makes environment-level
+  # variables visible.
+  preflight:
+    name: Check Azure CI identity
+    runs-on: ubuntu-24.04
+    environment: sentinel-dev
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        name: Check the Azure CI identity variables
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ACR_NAME: ${{ vars.ACR_NAME }}
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+          AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+          SENTINEL_API_TENANT_ID: ${{ vars.SENTINEL_API_TENANT_ID }}
+          SENTINEL_API_AUDIENCE: ${{ vars.SENTINEL_API_AUDIENCE }}
+          KEY_VAULT_URI: ${{ vars.KEY_VAULT_URI }}
+          PG_HOST: ${{ vars.PG_HOST }}
+          PG_DATABASE: ${{ vars.PG_DATABASE }}
+          PG_USER_BACKEND: ${{ vars.PG_USER_BACKEND }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID ACR_NAME ACR_LOGIN_SERVER \
+            AKS_RESOURCE_GROUP AKS_CLUSTER_NAME SENTINEL_API_TENANT_ID SENTINEL_API_AUDIENCE KEY_VAULT_URI \
+            PG_HOST PG_DATABASE PG_USER_BACKEND; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            msg="Azure CI identity not configured — ${GITHUB_WORKFLOW:-this workflow} skipped."
+            msg="$msg See sentinel-brain decisions 2026-10-24 phase 8 'Names the infra CI-identity ticket must create'."
+            echo "::notice::$msg Missing:$missing"
+            {
+              echo "$msg"
+              echo ""
+              echo "Missing variables:$missing"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
   scale:
     name: scale
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-24.04
     environment: sentinel-dev
     timeout-minutes: 60

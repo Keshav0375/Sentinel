@@ -109,12 +109,15 @@ def test_permissions_minimal() -> None:
     doc = _doc()
     assert doc["permissions"] == {"id-token": "write", "contents": "read"}
     assert "permissions" not in doc["jobs"]["scale"]
+    assert doc["jobs"]["preflight"]["permissions"] == {}
 
 
 def test_single_scale_job_in_sentinel_dev() -> None:
     doc = _doc()
-    assert list(doc["jobs"]) == ["scale"]
+    assert list(doc["jobs"]) == ["preflight", "scale"]
     job = doc["jobs"]["scale"]
+    assert job["needs"] == "preflight"
+    assert job["if"] == "needs.preflight.outputs.configured == 'true'"
     assert job["environment"] == "sentinel-dev"
     assert job["runs-on"] == "ubuntu-24.04"
     assert job["timeout-minutes"] == 60
