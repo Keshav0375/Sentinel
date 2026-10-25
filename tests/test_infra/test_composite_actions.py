@@ -30,6 +30,7 @@ ACTIONS = (
     "get-db-token",
     "get-kv-secrets",
     "notify-teams",
+    "ops-event",
     "psql-exec",
     "resolve-stable-tag",
 )
@@ -80,6 +81,15 @@ EXPECTED_INPUTS: dict[str, dict[str, tuple[bool, str | None]]] = {
         "severity": (False, "info"),
     },
     "resolve-stable-tag": {"acr-name": (True, None)},
+    "ops-event": {
+        "kind": (True, None),
+        "source-id": (True, None),
+        "state": (False, ""),
+        "ts": (False, ""),
+        "chain": (False, "{}"),
+        "data": (False, "{}"),
+        "token": (False, "${{ github.token }}"),
+    },
     "psql-exec": {
         "sql": (True, None),
         "pg-token": (True, None),
@@ -97,6 +107,7 @@ EXPECTED_OUTPUTS: dict[str, set[str]] = {
     "get-backend-token": {"bearer"},
     "get-kv-secrets": KV_OUTPUTS,
     "notify-teams": set(),
+    "ops-event": {"event-id", "result"},
     "psql-exec": {"result"},
     "resolve-stable-tag": {"image-tag"},
 }
@@ -108,7 +119,11 @@ SECRET_OUTPUTS: dict[str, set[str]] = {
 }
 
 # Inputs whose value is itself a secret: the consuming script must mask them.
-MASKED_INPUT_ENV = {"psql-exec": "PG_TOKEN", "notify-teams": "WEBHOOK_URL"}
+MASKED_INPUT_ENV = {
+    "psql-exec": "PG_TOKEN",
+    "notify-teams": "WEBHOOK_URL",
+    "ops-event": "OPS_LEDGER_TOKEN",
+}
 
 # placeholders.txt name -> backend-up input
 PLACEHOLDER_INPUTS = {
@@ -309,7 +324,7 @@ def _need(tool: str) -> None:
 # --- static contract ---
 
 
-def test_actions_dir_holds_the_eight() -> None:
+def test_actions_dir_holds_the_nine() -> None:
     found = {p.parent.name for p in ACTIONS_DIR.glob("*/action.yml")}
     assert found == set(ACTIONS)
     assert (ACTIONS_DIR / "README.md").is_file()

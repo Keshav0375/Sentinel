@@ -1,0 +1,170 @@
+{
+  "schema": "ops.snapshot.v1",
+  "file": "entity",
+  "generated_at": "2026-10-25T12:00:00Z",
+  "chain_id": "c_4f1d2a9b0c3e5f61",
+  "chain": {
+    "chain_id": "c_4f1d2a9b0c3e5f61",
+    "title": "App deploy pr-61-4f1d2a9 failed at verify",
+    "repo": "Keshav0375/Sentinel-deployment",
+    "status": "failed",
+    "scenario": null,
+    "sha": "4f1d2a9b0c3e5f61728394a5b6c7d8e9f0a1b2c3",
+    "correlation_id": null,
+    "incident_id": null,
+    "pr": null,
+    "run_id": 18800000202,
+    "started_at": "2026-10-25T09:10:00Z",
+    "updated_at": "2026-10-25T09:15:00Z",
+    "ended_at": "2026-10-25T09:15:00Z",
+    "duration_s": 300,
+    "stages": [
+      {
+        "name": "deploy",
+        "status": "failed",
+        "at": "2026-10-25T09:15:00Z",
+        "duration_s": 300,
+        "label": "Failed at verify",
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000202"
+      },
+      {
+        "name": "alert",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "No alert",
+        "url": null
+      },
+      {
+        "name": "agent",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "No agent run",
+        "url": null
+      },
+      {
+        "name": "pr",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "No revert PR",
+        "url": null
+      },
+      {
+        "name": "review",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "No review",
+        "url": null
+      },
+      {
+        "name": "merge",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "Not merged",
+        "url": null
+      }
+    ],
+    "needs_action": {
+      "reason": "failed_no_incident",
+      "since": "2026-10-25T09:15:00Z",
+      "url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000202"
+    },
+    "summary": null,
+    "resolution_type": null,
+    "confidence": null,
+    "eval_total": null,
+    "kinds": [
+      "build.started",
+      "build.succeeded",
+      "deploy.failed",
+      "deploy.started"
+    ],
+    "event_count": 4,
+    "has_trace": false,
+    "has_eval": false
+  },
+  "events": [
+    {
+      "schema": "ops.v1",
+      "event_id": "c09fcc20031affcd4894d67153f96970adfdf3b39ba59343f9e08d3bad4da269",
+      "kind": "build.started",
+      "ts": "2026-10-25T09:10:00Z",
+      "recorded_at": "2026-10-25T09:10:00Z",
+      "source": "gha:Keshav0375/Sentinel-deployment/deploy.yml",
+      "chain": {
+        "sha": "4f1d2a9b0c3e5f61728394a5b6c7d8e9f0a1b2c3",
+        "run_id": 18800000202
+      },
+      "data": {
+        "version": "pr-61-4f1d2a9",
+        "run_url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000202"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "86c3602e4ee26dfa03c6d6ac91a6a25b004319d5b7971c021476c7ceea1a4453",
+      "kind": "build.succeeded",
+      "ts": "2026-10-25T09:12:00Z",
+      "recorded_at": "2026-10-25T09:12:00Z",
+      "source": "gha:Keshav0375/Sentinel-deployment/deploy.yml",
+      "chain": {
+        "sha": "4f1d2a9b0c3e5f61728394a5b6c7d8e9f0a1b2c3",
+        "run_id": 18800000202
+      },
+      "data": {
+        "version": "pr-61-4f1d2a9",
+        "duration_s": 120,
+        "run_url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000202"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "962b7ada3f0aa07435e2ba6e20ba82bd2037c48ef82cb684393bc56cfaaac39d",
+      "kind": "deploy.started",
+      "ts": "2026-10-25T09:12:30Z",
+      "recorded_at": "2026-10-25T09:12:30Z",
+      "source": "gha:Keshav0375/Sentinel-deployment/deploy.yml",
+      "chain": {
+        "sha": "4f1d2a9b0c3e5f61728394a5b6c7d8e9f0a1b2c3",
+        "run_id": 18800000202
+      },
+      "data": {
+        "version": "pr-61-4f1d2a9",
+        "run_url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000202"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "2332dbcec7c121b3988efbacadc5f403efed3af2dad33b8145eaaa0db848ba2a",
+      "kind": "deploy.failed",
+      "ts": "2026-10-25T09:15:00Z",
+      "recorded_at": "2026-10-25T09:15:00Z",
+      "source": "gha:Keshav0375/Sentinel-deployment/deploy.yml",
+      "chain": {
+        "sha": "4f1d2a9b0c3e5f61728394a5b6c7d8e9f0a1b2c3",
+        "run_id": 18800000202
+      },
+      "data": {
+        "version": "pr-61-4f1d2a9",
+        "duration_s": 150,
+        "failed_stage": "verify",
+        "run_url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000202"
+      }
+    }
+  ],
+  "agent": null,
+  "trace": null,
+  "evals": [],
+  "links": [
+    {
+      "kind": "github_run",
+      "label": "Deployment run",
+      "url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000202",
+      "restricted": false
+    }
+  ]
+}

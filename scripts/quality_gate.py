@@ -41,8 +41,8 @@ Check = tuple[str, list[str], bool]
 
 MATRIX: dict[str, list[Check]] = {
     "backend": [
-        ("ruff-lint", ["ruff", "check", "src/", "tests/"], True),
-        ("ruff-format", ["ruff", "format", "--check", "src/", "tests/"], True),
+        ("ruff-lint", ["ruff", "check", "src/", "tests/", "scripts/ops/"], True),
+        ("ruff-format", ["ruff", "format", "--check", "src/", "tests/", "scripts/ops/"], True),
         ("pyright", ["pyright", "src/"], True),
         ("gitleaks", ["gitleaks", "detect", "--no-banner", "--redact"], True),
         # filelock CVE-2026-112940/-112913/-112907: fixed only in filelock 4.2.1, but litellm
@@ -71,6 +71,7 @@ MATRIX: dict[str, list[Check]] = {
                 "tests/test_tools/",
                 "tests/test_providers/",
                 "tests/test_scripts/",
+                "tests/test_ops/",
                 "tests/test_config.py",
                 "-x",
                 "-q",

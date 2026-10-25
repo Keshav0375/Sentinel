@@ -1,0 +1,147 @@
+{
+  "schema": "ops.snapshot.v1",
+  "file": "entity",
+  "generated_at": "2026-10-25T12:00:00Z",
+  "chain_id": "c_0a1b2c3d4e5f6a7b",
+  "chain": {
+    "chain_id": "c_0a1b2c3d4e5f6a7b",
+    "title": "Backend deploy sha-0a1b2c3",
+    "repo": "Keshav0375/Sentinel",
+    "status": "running",
+    "scenario": null,
+    "sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+    "correlation_id": null,
+    "incident_id": null,
+    "pr": null,
+    "run_id": 18800000101,
+    "started_at": "2026-10-25T11:52:00Z",
+    "updated_at": "2026-10-25T11:56:00Z",
+    "ended_at": null,
+    "duration_s": null,
+    "stages": [
+      {
+        "name": "deploy",
+        "status": "running",
+        "at": "2026-10-25T11:56:00Z",
+        "duration_s": null,
+        "label": "Deploying sha-0a1b2c3",
+        "url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101"
+      },
+      {
+        "name": "alert",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "No alert",
+        "url": null
+      },
+      {
+        "name": "agent",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "No agent run",
+        "url": null
+      },
+      {
+        "name": "pr",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "No revert PR",
+        "url": null
+      },
+      {
+        "name": "review",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "No review",
+        "url": null
+      },
+      {
+        "name": "merge",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "Not merged",
+        "url": null
+      }
+    ],
+    "needs_action": null,
+    "summary": null,
+    "resolution_type": null,
+    "confidence": null,
+    "eval_total": null,
+    "kinds": [
+      "build.started",
+      "build.succeeded",
+      "deploy.started"
+    ],
+    "event_count": 3,
+    "has_trace": false,
+    "has_eval": false
+  },
+  "events": [
+    {
+      "schema": "ops.v1",
+      "event_id": "79eed83641654aaa08f9a8a52beafac228b444b7d6118e809fd24b056c2a4510",
+      "kind": "build.started",
+      "ts": "2026-10-25T11:52:00Z",
+      "recorded_at": "2026-10-25T11:52:00Z",
+      "source": "gha:Keshav0375/Sentinel/ci_backend_deployment.yml",
+      "chain": {
+        "sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+        "run_id": 18800000101
+      },
+      "data": {
+        "version": "sha-0a1b2c3",
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "882d39074f15fd25e3553df4a6a22b2d720561bccd7df2269011b2474343adb0",
+      "kind": "build.succeeded",
+      "ts": "2026-10-25T11:55:30Z",
+      "recorded_at": "2026-10-25T11:55:30Z",
+      "source": "gha:Keshav0375/Sentinel/ci_backend_deployment.yml",
+      "chain": {
+        "sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+        "run_id": 18800000101
+      },
+      "data": {
+        "version": "sha-0a1b2c3",
+        "duration_s": 210,
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "e8a565f89371cdb377eb5d892dfc1495f119087e1971021176333e0d0dd89332",
+      "kind": "deploy.started",
+      "ts": "2026-10-25T11:56:00Z",
+      "recorded_at": "2026-10-25T11:56:00Z",
+      "source": "gha:Keshav0375/Sentinel/ci_backend_deployment.yml",
+      "chain": {
+        "sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+        "run_id": 18800000101
+      },
+      "data": {
+        "version": "sha-0a1b2c3",
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101"
+      }
+    }
+  ],
+  "agent": null,
+  "trace": null,
+  "evals": [],
+  "links": [
+    {
+      "kind": "github_run",
+      "label": "Backend deployment run",
+      "url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101",
+      "restricted": false
+    }
+  ]
+}

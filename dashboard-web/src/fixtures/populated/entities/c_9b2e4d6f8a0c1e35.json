@@ -1,0 +1,250 @@
+{
+  "schema": "ops.snapshot.v1",
+  "file": "entity",
+  "generated_at": "2026-10-25T12:00:00Z",
+  "chain_id": "c_9b2e4d6f8a0c1e35",
+  "chain": {
+    "chain_id": "c_9b2e4d6f8a0c1e35",
+    "title": "runtime/07: escalated to a human",
+    "repo": "Keshav0375/Sentinel-deployment",
+    "status": "escalated",
+    "scenario": "runtime/07",
+    "sha": "9b2e4d6f8a0c1e3542a5b6c7d8e9f0a1b2c3d4e5",
+    "correlation_id": "6c1d4e2f-9b3a-4d7c-8f0e-2b3c4d5e6f70",
+    "incident_id": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+    "pr": null,
+    "run_id": 18800000404,
+    "started_at": "2026-10-24T15:00:00Z",
+    "updated_at": "2026-10-24T16:00:00Z",
+    "ended_at": "2026-10-24T15:44:05Z",
+    "duration_s": 2645,
+    "stages": [
+      {
+        "name": "deploy",
+        "status": "succeeded",
+        "at": "2026-10-24T15:00:00Z",
+        "duration_s": 230,
+        "label": "Deployed pr-58-9b2e4d6",
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000404"
+      },
+      {
+        "name": "alert",
+        "status": "succeeded",
+        "at": "2026-10-24T15:40:00Z",
+        "duration_s": null,
+        "label": "runtime_error, P3",
+        "url": null
+      },
+      {
+        "name": "agent",
+        "status": "succeeded",
+        "at": "2026-10-24T15:44:00Z",
+        "duration_s": 210,
+        "label": "Escalated, confidence 0.41",
+        "url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr9b2e4d6f"
+      },
+      {
+        "name": "escalation",
+        "status": "waiting",
+        "at": "2026-10-24T15:44:05Z",
+        "duration_s": null,
+        "label": "Escalated to a human",
+        "url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000405"
+      }
+    ],
+    "needs_action": {
+      "reason": "escalation",
+      "since": "2026-10-24T15:44:05Z",
+      "url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000405"
+    },
+    "summary": "Error rate rose 40 minutes after the deploy and no merged change touches the failing path, so a revert is not justified; a human should check the upstream dependency.",
+    "resolution_type": "escalated",
+    "confidence": 0.41,
+    "eval_total": null,
+    "kinds": [
+      "agent.decided",
+      "agent.started",
+      "alert.received",
+      "deploy.succeeded",
+      "escalation.raised",
+      "eval.scored"
+    ],
+    "event_count": 6,
+    "has_trace": false,
+    "has_eval": true
+  },
+  "events": [
+    {
+      "schema": "ops.v1",
+      "event_id": "ec7d01b65591ded1ab7b298cefaf5d4e5d991a32d77967c697b9136033cd0e50",
+      "kind": "deploy.succeeded",
+      "ts": "2026-10-24T15:00:00Z",
+      "recorded_at": "2026-10-24T15:00:00Z",
+      "source": "gha:Keshav0375/Sentinel-deployment/deploy.yml",
+      "chain": {
+        "sha": "9b2e4d6f8a0c1e3542a5b6c7d8e9f0a1b2c3d4e5",
+        "run_id": 18800000404,
+        "scenario": "runtime/07"
+      },
+      "data": {
+        "version": "pr-58-9b2e4d6",
+        "duration_s": 230,
+        "run_url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000404"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "c47fc0e3a58a13a96ee353dfcc24a283b6c0f1f795b7ae2196f8c2328600fc6b",
+      "kind": "alert.received",
+      "ts": "2026-10-24T15:40:00Z",
+      "recorded_at": "2026-10-24T15:40:00Z",
+      "source": "gha:Keshav0375/Sentinel/ci_incident_response.yml",
+      "chain": {
+        "correlation_id": "6c1d4e2f-9b3a-4d7c-8f0e-2b3c4d5e6f70",
+        "incident_id": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+        "sha": "9b2e4d6f8a0c1e3542a5b6c7d8e9f0a1b2c3d4e5",
+        "scenario": "runtime/07"
+      },
+      "data": {
+        "signal_type": "runtime_error",
+        "severity": "P3",
+        "service": "sentinel-watchtower"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "6aa91a22db8d19583c4fab66fa8157ed2671d52c420401a0c65a2ea05fbe9a1b",
+      "kind": "agent.started",
+      "ts": "2026-10-24T15:40:30Z",
+      "recorded_at": "2026-10-24T15:40:30Z",
+      "source": "gha:Keshav0375/Sentinel/ci_incident_response.yml",
+      "chain": {
+        "correlation_id": "6c1d4e2f-9b3a-4d7c-8f0e-2b3c4d5e6f70",
+        "incident_id": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+        "sha": "9b2e4d6f8a0c1e3542a5b6c7d8e9f0a1b2c3d4e5",
+        "scenario": "runtime/07"
+      },
+      "data": {
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000405"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "f9026e3b6efa2a8f241473e152e465eb849ef21d8f3fcbe4a3341af20dfd01e9",
+      "kind": "agent.decided",
+      "ts": "2026-10-24T15:44:00Z",
+      "recorded_at": "2026-10-24T15:44:00Z",
+      "source": "gha:Keshav0375/Sentinel/ci_incident_response.yml",
+      "chain": {
+        "correlation_id": "6c1d4e2f-9b3a-4d7c-8f0e-2b3c4d5e6f70",
+        "incident_id": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+        "sha": "9b2e4d6f8a0c1e3542a5b6c7d8e9f0a1b2c3d4e5",
+        "scenario": "runtime/07"
+      },
+      "data": {
+        "resolution_type": "escalated",
+        "confidence": 0.41,
+        "root_cause_summary": "Error rate rose 40 minutes after the deploy and no merged change touches the failing path, so a revert is not justified; a human should check the upstream dependency.",
+        "tool_calls": 14,
+        "reflexion_loops": 2,
+        "mttr_s": 240,
+        "models_used": [
+          "claude-sonnet-4-5"
+        ],
+        "langfuse_trace_url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr9b2e4d6f"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "5b721155d6f284a56d6ba85aedc4226caab43b7d091ece9782ad4c6d20a8ccc0",
+      "kind": "escalation.raised",
+      "ts": "2026-10-24T15:44:05Z",
+      "recorded_at": "2026-10-24T15:44:05Z",
+      "source": "gha:Keshav0375/Sentinel/ci_incident_response.yml",
+      "chain": {
+        "correlation_id": "6c1d4e2f-9b3a-4d7c-8f0e-2b3c4d5e6f70",
+        "incident_id": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+        "sha": "9b2e4d6f8a0c1e3542a5b6c7d8e9f0a1b2c3d4e5",
+        "scenario": "runtime/07"
+      },
+      "data": {
+        "summary": "Error rate rose 40 minutes after the deploy and no merged change touches the failing path, so a revert is not justified; a human should check the upstream dependency.",
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000405"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "2fe6c4543a725a18a81bc35c097811bba07b388d4a03836a5236d99d771d70c6",
+      "kind": "eval.scored",
+      "ts": "2026-10-24T16:00:00Z",
+      "recorded_at": "2026-10-24T16:00:00Z",
+      "source": "gha:Keshav0375/Sentinel/ci_validation.yml",
+      "chain": {
+        "correlation_id": "6c1d4e2f-9b3a-4d7c-8f0e-2b3c4d5e6f70",
+        "incident_id": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+        "sha": "9b2e4d6f8a0c1e3542a5b6c7d8e9f0a1b2c3d4e5",
+        "scenario": "runtime/07"
+      },
+      "data": {
+        "case": "iii",
+        "checks": {
+          "fired": 1,
+          "classified": 1,
+          "correlated": 1,
+          "revert_target": 0
+        },
+        "judge_model": "gpt-4.1",
+        "judge_conflict": false,
+        "judge_failed": true,
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000406"
+      }
+    }
+  ],
+  "agent": {
+    "decided_at": "2026-10-24T15:44:00Z",
+    "resolution_type": "escalated",
+    "confidence": 0.41,
+    "root_cause_summary": "Error rate rose 40 minutes after the deploy and no merged change touches the failing path, so a revert is not justified; a human should check the upstream dependency.",
+    "tool_calls": 14,
+    "reflexion_loops": 2,
+    "mttr_s": 240,
+    "models_used": [
+      "claude-sonnet-4-5"
+    ],
+    "langfuse_trace_url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr9b2e4d6f"
+  },
+  "trace": null,
+  "evals": [
+    {
+      "scored_at": "2026-10-24T16:00:00Z",
+      "scenario": "runtime/07",
+      "case": "iii",
+      "checks": {
+        "fired": 1,
+        "classified": 1,
+        "correlated": 1,
+        "revert_target": 0
+      },
+      "judge": null,
+      "total_score": null,
+      "judge_model": "gpt-4.1",
+      "judge_conflict": false,
+      "judge_failed": true,
+      "langfuse_trace_url": null
+    }
+  ],
+  "links": [
+    {
+      "kind": "github_run",
+      "label": "Incident response run",
+      "url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000405",
+      "restricted": false
+    },
+    {
+      "kind": "langfuse",
+      "label": "LangFuse trace",
+      "url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr9b2e4d6f",
+      "restricted": true
+    }
+  ]
+}

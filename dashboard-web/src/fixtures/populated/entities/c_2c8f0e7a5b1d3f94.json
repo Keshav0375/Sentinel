@@ -1,0 +1,504 @@
+{
+  "schema": "ops.snapshot.v1",
+  "file": "entity",
+  "generated_at": "2026-10-25T12:00:00Z",
+  "chain_id": "c_2c8f0e7a5b1d3f94",
+  "chain": {
+    "chain_id": "c_2c8f0e7a5b1d3f94",
+    "title": "deployfail/02: reverted by PR #55",
+    "repo": "Keshav0375/Sentinel-deployment",
+    "status": "reverted",
+    "scenario": "deployfail/02",
+    "sha": "2c8f0e7a5b1d3f9463a7b8c9d0e1f2a3b4c5d6e7",
+    "correlation_id": "7d2e5f3a-0c4b-4e8d-9a1f-3c4d5e6f7081",
+    "incident_id": "c3d4e5f6-a7b8-4c9d-8e1f-2a3b4c5d6e7f",
+    "pr": 55,
+    "run_id": 18800000505,
+    "started_at": "2026-10-23T10:03:00Z",
+    "updated_at": "2026-10-23T11:00:00Z",
+    "ended_at": "2026-10-23T10:31:00Z",
+    "duration_s": 1680,
+    "stages": [
+      {
+        "name": "deploy",
+        "status": "failed",
+        "at": "2026-10-23T10:03:00Z",
+        "duration_s": 95,
+        "label": "Build failed",
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000505"
+      },
+      {
+        "name": "alert",
+        "status": "succeeded",
+        "at": "2026-10-23T10:04:00Z",
+        "duration_s": null,
+        "label": "deploy_failure, P2",
+        "url": null
+      },
+      {
+        "name": "agent",
+        "status": "succeeded",
+        "at": "2026-10-23T10:07:00Z",
+        "duration_s": 160,
+        "label": "Rollback, confidence 0.93",
+        "url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr2c8f0e7a"
+      },
+      {
+        "name": "pr",
+        "status": "succeeded",
+        "at": "2026-10-23T10:08:00Z",
+        "duration_s": null,
+        "label": "Revert PR #55 opened",
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/55"
+      },
+      {
+        "name": "review",
+        "status": "succeeded",
+        "at": "2026-10-23T10:30:00Z",
+        "duration_s": 1320,
+        "label": "Approved by Keshav0375",
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/55"
+      },
+      {
+        "name": "merge",
+        "status": "succeeded",
+        "at": "2026-10-23T10:31:00Z",
+        "duration_s": 60,
+        "label": "Merged",
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/55"
+      }
+    ],
+    "needs_action": null,
+    "summary": "The merge added a dependency pin that does not exist on PyPI, so the build of pr-55-2c8f0e7 failed and the app kept serving the previous slot.",
+    "resolution_type": "rollback",
+    "confidence": 0.93,
+    "eval_total": 0.88,
+    "kinds": [
+      "agent.decided",
+      "agent.started",
+      "alert.received",
+      "build.failed",
+      "eval.scored",
+      "revert_pr.merged",
+      "revert_pr.opened",
+      "revert_pr.review_submitted",
+      "trace.summarized"
+    ],
+    "event_count": 9,
+    "has_trace": true,
+    "has_eval": true
+  },
+  "events": [
+    {
+      "schema": "ops.v1",
+      "event_id": "85f0976c244f568eeddebe7aa38fe62b82674cb0262a2bd04f094f09f7e8f127",
+      "kind": "build.failed",
+      "ts": "2026-10-23T10:03:00Z",
+      "recorded_at": "2026-10-23T10:03:00Z",
+      "source": "gha:Keshav0375/Sentinel-deployment/deploy.yml",
+      "chain": {
+        "sha": "2c8f0e7a5b1d3f9463a7b8c9d0e1f2a3b4c5d6e7",
+        "run_id": 18800000505,
+        "scenario": "deployfail/02"
+      },
+      "data": {
+        "version": "pr-55-2c8f0e7",
+        "duration_s": 95,
+        "failed_stage": "build",
+        "run_url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000505"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "64a1a08bd518d1f6e47a75dd93617e06531a5cdae251d2ce9d96cdcf7d9c339a",
+      "kind": "alert.received",
+      "ts": "2026-10-23T10:04:00Z",
+      "recorded_at": "2026-10-23T10:04:00Z",
+      "source": "gha:Keshav0375/Sentinel/ci_incident_response.yml",
+      "chain": {
+        "correlation_id": "7d2e5f3a-0c4b-4e8d-9a1f-3c4d5e6f7081",
+        "incident_id": "c3d4e5f6-a7b8-4c9d-8e1f-2a3b4c5d6e7f",
+        "sha": "2c8f0e7a5b1d3f9463a7b8c9d0e1f2a3b4c5d6e7",
+        "scenario": "deployfail/02"
+      },
+      "data": {
+        "signal_type": "deploy_failure",
+        "severity": "P2",
+        "service": "sentinel-watchtower"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "aca6e3f4ee122d50951fc66e7c8f5a0300e03ecb07e08918c682ad8e27e80f97",
+      "kind": "agent.started",
+      "ts": "2026-10-23T10:04:20Z",
+      "recorded_at": "2026-10-23T10:04:20Z",
+      "source": "gha:Keshav0375/Sentinel/ci_incident_response.yml",
+      "chain": {
+        "correlation_id": "7d2e5f3a-0c4b-4e8d-9a1f-3c4d5e6f7081",
+        "incident_id": "c3d4e5f6-a7b8-4c9d-8e1f-2a3b4c5d6e7f",
+        "sha": "2c8f0e7a5b1d3f9463a7b8c9d0e1f2a3b4c5d6e7",
+        "scenario": "deployfail/02"
+      },
+      "data": {
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000506"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "4b0ae93dc920925b7848254f7d58d1dc3dd5f192fc487708ee82b901836287fd",
+      "kind": "trace.summarized",
+      "ts": "2026-10-23T10:04:20Z",
+      "recorded_at": "2026-10-23T10:04:20Z",
+      "source": "langfuse",
+      "chain": {
+        "correlation_id": "7d2e5f3a-0c4b-4e8d-9a1f-3c4d5e6f7081",
+        "incident_id": "c3d4e5f6-a7b8-4c9d-8e1f-2a3b4c5d6e7f",
+        "sha": "2c8f0e7a5b1d3f9463a7b8c9d0e1f2a3b4c5d6e7",
+        "scenario": "deployfail/02"
+      },
+      "data": {
+        "trace_id": "tr2c8f0e7a",
+        "langfuse_trace_url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr2c8f0e7a",
+        "total_duration_ms": 160000,
+        "spans": [
+          {
+            "span_id": "s1",
+            "parent_id": null,
+            "name": "incident_pipeline",
+            "kind": "AGENT",
+            "start_ms": 0,
+            "duration_ms": 160000,
+            "status": "ok"
+          },
+          {
+            "span_id": "s2",
+            "parent_id": "s1",
+            "name": "triage_agent",
+            "kind": "AGENT",
+            "start_ms": 500,
+            "duration_ms": 21000,
+            "status": "ok",
+            "input_tokens": 3200,
+            "output_tokens": 410
+          },
+          {
+            "span_id": "s3",
+            "parent_id": "s2",
+            "name": "get_service_metadata",
+            "kind": "TOOL",
+            "start_ms": 4000,
+            "duration_ms": 900,
+            "status": "ok"
+          },
+          {
+            "span_id": "s4",
+            "parent_id": "s1",
+            "name": "analysis_agent",
+            "kind": "AGENT",
+            "start_ms": 22000,
+            "duration_ms": 98000,
+            "status": "ok",
+            "input_tokens": 11800,
+            "output_tokens": 1600
+          },
+          {
+            "span_id": "s5",
+            "parent_id": "s4",
+            "name": "fetch_logs",
+            "kind": "TOOL",
+            "start_ms": 30000,
+            "duration_ms": 6200,
+            "status": "warning"
+          },
+          {
+            "span_id": "s6",
+            "parent_id": "s4",
+            "name": "check_deploy_history",
+            "kind": "TOOL",
+            "start_ms": 40000,
+            "duration_ms": 1800,
+            "status": "ok"
+          },
+          {
+            "span_id": "s7",
+            "parent_id": "s1",
+            "name": "remediation_agent",
+            "kind": "AGENT",
+            "start_ms": 121000,
+            "duration_ms": 38000,
+            "status": "ok",
+            "input_tokens": 5400,
+            "output_tokens": 720
+          }
+        ]
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "a67c5e7f20ebf72b72498c7c556ae998119762793aeaf36ef2580f6fbe85fc30",
+      "kind": "agent.decided",
+      "ts": "2026-10-23T10:07:00Z",
+      "recorded_at": "2026-10-23T10:07:00Z",
+      "source": "gha:Keshav0375/Sentinel/ci_incident_response.yml",
+      "chain": {
+        "correlation_id": "7d2e5f3a-0c4b-4e8d-9a1f-3c4d5e6f7081",
+        "incident_id": "c3d4e5f6-a7b8-4c9d-8e1f-2a3b4c5d6e7f",
+        "sha": "2c8f0e7a5b1d3f9463a7b8c9d0e1f2a3b4c5d6e7",
+        "scenario": "deployfail/02"
+      },
+      "data": {
+        "resolution_type": "rollback",
+        "confidence": 0.93,
+        "root_cause_summary": "The merge added a dependency pin that does not exist on PyPI, so the build of pr-55-2c8f0e7 failed and the app kept serving the previous slot.",
+        "tool_calls": 7,
+        "reflexion_loops": 0,
+        "mttr_s": 180,
+        "models_used": [
+          "claude-sonnet-4-5"
+        ],
+        "langfuse_trace_url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr2c8f0e7a",
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000506"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "46870d616697f5dce8c63c9968d2c2d4f877fc48a1697ba1f232c9ddbad42d05",
+      "kind": "revert_pr.opened",
+      "ts": "2026-10-23T10:08:00Z",
+      "recorded_at": "2026-10-23T10:08:00Z",
+      "source": "reconciler",
+      "chain": {
+        "correlation_id": "7d2e5f3a-0c4b-4e8d-9a1f-3c4d5e6f7081",
+        "incident_id": "c3d4e5f6-a7b8-4c9d-8e1f-2a3b4c5d6e7f",
+        "sha": "2c8f0e7a5b1d3f9463a7b8c9d0e1f2a3b4c5d6e7",
+        "scenario": "deployfail/02",
+        "pr": 55
+      },
+      "data": {
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/55",
+        "state": "open"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "adb924810d7e1cbccf0f16d4e32ebee41df75694a358a7e8d80b6a7633ae079b",
+      "kind": "revert_pr.review_submitted",
+      "ts": "2026-10-23T10:30:00Z",
+      "recorded_at": "2026-10-23T10:30:00Z",
+      "source": "reconciler",
+      "chain": {
+        "correlation_id": "7d2e5f3a-0c4b-4e8d-9a1f-3c4d5e6f7081",
+        "incident_id": "c3d4e5f6-a7b8-4c9d-8e1f-2a3b4c5d6e7f",
+        "sha": "2c8f0e7a5b1d3f9463a7b8c9d0e1f2a3b4c5d6e7",
+        "scenario": "deployfail/02",
+        "pr": 55
+      },
+      "data": {
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/55",
+        "reviewer": "Keshav0375",
+        "review_state": "APPROVED",
+        "waited_s": 1320
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "5e4272cfcf44d94f462ef1b70e9b750e45db288fbbc1ef7b1a01591a9e4b0c2c",
+      "kind": "revert_pr.merged",
+      "ts": "2026-10-23T10:31:00Z",
+      "recorded_at": "2026-10-23T10:31:00Z",
+      "source": "reconciler",
+      "chain": {
+        "correlation_id": "7d2e5f3a-0c4b-4e8d-9a1f-3c4d5e6f7081",
+        "incident_id": "c3d4e5f6-a7b8-4c9d-8e1f-2a3b4c5d6e7f",
+        "sha": "2c8f0e7a5b1d3f9463a7b8c9d0e1f2a3b4c5d6e7",
+        "scenario": "deployfail/02",
+        "pr": 55
+      },
+      "data": {
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/55",
+        "state": "merged",
+        "reviewer": "Keshav0375",
+        "waited_s": 1380
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "8dbaaee9d97c4e3baa67bb61316a335196aa17ed5f45cbf0918d297e080d29dd",
+      "kind": "eval.scored",
+      "ts": "2026-10-23T11:00:00Z",
+      "recorded_at": "2026-10-23T11:00:00Z",
+      "source": "gha:Keshav0375/Sentinel/ci_validation.yml",
+      "chain": {
+        "correlation_id": "7d2e5f3a-0c4b-4e8d-9a1f-3c4d5e6f7081",
+        "incident_id": "c3d4e5f6-a7b8-4c9d-8e1f-2a3b4c5d6e7f",
+        "sha": "2c8f0e7a5b1d3f9463a7b8c9d0e1f2a3b4c5d6e7",
+        "scenario": "deployfail/02"
+      },
+      "data": {
+        "case": "ii",
+        "checks": {
+          "fired": 1,
+          "classified": 1,
+          "correlated": 1,
+          "revert_target": 1
+        },
+        "judge": {
+          "triage_accuracy": 0.9,
+          "root_cause_correctness": 0.95,
+          "tool_efficiency": 0.8,
+          "mttr": 0.85,
+          "remediation_safety": 0.9
+        },
+        "total_score": 0.88,
+        "judge_model": "gpt-4.1",
+        "judge_conflict": false,
+        "judge_failed": false,
+        "langfuse_trace_url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr2c8f0e7a",
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000507"
+      }
+    }
+  ],
+  "agent": {
+    "decided_at": "2026-10-23T10:07:00Z",
+    "resolution_type": "rollback",
+    "confidence": 0.93,
+    "root_cause_summary": "The merge added a dependency pin that does not exist on PyPI, so the build of pr-55-2c8f0e7 failed and the app kept serving the previous slot.",
+    "tool_calls": 7,
+    "reflexion_loops": 0,
+    "mttr_s": 180,
+    "models_used": [
+      "claude-sonnet-4-5"
+    ],
+    "langfuse_trace_url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr2c8f0e7a"
+  },
+  "trace": {
+    "trace_id": "tr2c8f0e7a",
+    "langfuse_trace_url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr2c8f0e7a",
+    "total_duration_ms": 160000,
+    "spans": [
+      {
+        "span_id": "s1",
+        "parent_id": null,
+        "name": "incident_pipeline",
+        "kind": "AGENT",
+        "start_ms": 0,
+        "duration_ms": 160000,
+        "status": "ok",
+        "input_tokens": null,
+        "output_tokens": null
+      },
+      {
+        "span_id": "s2",
+        "parent_id": "s1",
+        "name": "triage_agent",
+        "kind": "AGENT",
+        "start_ms": 500,
+        "duration_ms": 21000,
+        "status": "ok",
+        "input_tokens": 3200,
+        "output_tokens": 410
+      },
+      {
+        "span_id": "s3",
+        "parent_id": "s2",
+        "name": "get_service_metadata",
+        "kind": "TOOL",
+        "start_ms": 4000,
+        "duration_ms": 900,
+        "status": "ok",
+        "input_tokens": null,
+        "output_tokens": null
+      },
+      {
+        "span_id": "s4",
+        "parent_id": "s1",
+        "name": "analysis_agent",
+        "kind": "AGENT",
+        "start_ms": 22000,
+        "duration_ms": 98000,
+        "status": "ok",
+        "input_tokens": 11800,
+        "output_tokens": 1600
+      },
+      {
+        "span_id": "s5",
+        "parent_id": "s4",
+        "name": "fetch_logs",
+        "kind": "TOOL",
+        "start_ms": 30000,
+        "duration_ms": 6200,
+        "status": "warning",
+        "input_tokens": null,
+        "output_tokens": null
+      },
+      {
+        "span_id": "s6",
+        "parent_id": "s4",
+        "name": "check_deploy_history",
+        "kind": "TOOL",
+        "start_ms": 40000,
+        "duration_ms": 1800,
+        "status": "ok",
+        "input_tokens": null,
+        "output_tokens": null
+      },
+      {
+        "span_id": "s7",
+        "parent_id": "s1",
+        "name": "remediation_agent",
+        "kind": "AGENT",
+        "start_ms": 121000,
+        "duration_ms": 38000,
+        "status": "ok",
+        "input_tokens": 5400,
+        "output_tokens": 720
+      }
+    ]
+  },
+  "evals": [
+    {
+      "scored_at": "2026-10-23T11:00:00Z",
+      "scenario": "deployfail/02",
+      "case": "ii",
+      "checks": {
+        "fired": 1,
+        "classified": 1,
+        "correlated": 1,
+        "revert_target": 1
+      },
+      "judge": {
+        "triage_accuracy": 0.9,
+        "root_cause_correctness": 0.95,
+        "tool_efficiency": 0.8,
+        "mttr": 0.85,
+        "remediation_safety": 0.9
+      },
+      "total_score": 0.88,
+      "judge_model": "gpt-4.1",
+      "judge_conflict": false,
+      "judge_failed": false,
+      "langfuse_trace_url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr2c8f0e7a"
+    }
+  ],
+  "links": [
+    {
+      "kind": "github_run",
+      "label": "Deployment run",
+      "url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000505",
+      "restricted": false
+    },
+    {
+      "kind": "github_pr",
+      "label": "Revert PR #55",
+      "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/55",
+      "restricted": false
+    },
+    {
+      "kind": "langfuse",
+      "label": "LangFuse trace",
+      "url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr2c8f0e7a",
+      "restricted": true
+    }
+  ]
+}

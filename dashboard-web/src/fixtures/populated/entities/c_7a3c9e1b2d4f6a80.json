@@ -1,0 +1,237 @@
+{
+  "schema": "ops.snapshot.v1",
+  "file": "entity",
+  "generated_at": "2026-10-25T12:00:00Z",
+  "chain_id": "c_7a3c9e1b2d4f6a80",
+  "chain": {
+    "chain_id": "c_7a3c9e1b2d4f6a80",
+    "title": "runtime/04: revert PR #57 awaiting review",
+    "repo": "Keshav0375/Sentinel-deployment",
+    "status": "awaiting_review",
+    "scenario": "runtime/04",
+    "sha": "7a3c9e1b2d4f6a8091a2b3c4d5e6f708192a3b4c",
+    "correlation_id": "5b0c3f1e-8a2d-4c6b-9e7f-1a2b3c4d5e6f",
+    "incident_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "pr": 57,
+    "run_id": 18800000303,
+    "started_at": "2026-10-25T08:00:00Z",
+    "updated_at": "2026-10-25T08:10:00Z",
+    "ended_at": null,
+    "duration_s": null,
+    "stages": [
+      {
+        "name": "deploy",
+        "status": "succeeded",
+        "at": "2026-10-25T08:00:00Z",
+        "duration_s": 240,
+        "label": "Deployed pr-57-7a3c9e1",
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000303"
+      },
+      {
+        "name": "alert",
+        "status": "succeeded",
+        "at": "2026-10-25T08:06:00Z",
+        "duration_s": null,
+        "label": "runtime_error, P2",
+        "url": "https://us5.datadoghq.com/monitors/1234567"
+      },
+      {
+        "name": "agent",
+        "status": "succeeded",
+        "at": "2026-10-25T08:09:10Z",
+        "duration_s": 170,
+        "label": "Rollback, confidence 0.86",
+        "url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr7a3c9e1b"
+      },
+      {
+        "name": "pr",
+        "status": "succeeded",
+        "at": "2026-10-25T08:10:00Z",
+        "duration_s": null,
+        "label": "Revert PR #57 opened",
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/57"
+      },
+      {
+        "name": "review",
+        "status": "waiting",
+        "at": null,
+        "duration_s": null,
+        "label": "Awaiting review",
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/57"
+      },
+      {
+        "name": "merge",
+        "status": "none",
+        "at": null,
+        "duration_s": null,
+        "label": "Not merged",
+        "url": null
+      }
+    ],
+    "needs_action": {
+      "reason": "pr_awaiting_review",
+      "since": "2026-10-25T08:10:00Z",
+      "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/57"
+    },
+    "summary": "The merged change set the worker pool size to 0 in app/config.py, so every request to /orders timed out after the deploy.",
+    "resolution_type": "rollback",
+    "confidence": 0.86,
+    "eval_total": null,
+    "kinds": [
+      "agent.decided",
+      "agent.started",
+      "alert.received",
+      "deploy.succeeded",
+      "revert_pr.opened"
+    ],
+    "event_count": 5,
+    "has_trace": false,
+    "has_eval": false
+  },
+  "events": [
+    {
+      "schema": "ops.v1",
+      "event_id": "2328b3525bbd76f4e7344d61998faf16aa841769e79057cf28118c5577446cda",
+      "kind": "deploy.succeeded",
+      "ts": "2026-10-25T08:00:00Z",
+      "recorded_at": "2026-10-25T08:00:00Z",
+      "source": "gha:Keshav0375/Sentinel-deployment/deploy.yml",
+      "chain": {
+        "sha": "7a3c9e1b2d4f6a8091a2b3c4d5e6f708192a3b4c",
+        "run_id": 18800000303,
+        "scenario": "runtime/04"
+      },
+      "data": {
+        "version": "pr-57-7a3c9e1",
+        "duration_s": 240,
+        "run_url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000303"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "cb219837e8f2cb8f593ea91b50eaa1083a6cc02a3c4273ff4d1cb6a6d94ebb49",
+      "kind": "alert.received",
+      "ts": "2026-10-25T08:06:00Z",
+      "recorded_at": "2026-10-25T08:06:00Z",
+      "source": "gha:Keshav0375/Sentinel/ci_incident_response.yml",
+      "chain": {
+        "correlation_id": "5b0c3f1e-8a2d-4c6b-9e7f-1a2b3c4d5e6f",
+        "incident_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+        "sha": "7a3c9e1b2d4f6a8091a2b3c4d5e6f708192a3b4c",
+        "scenario": "runtime/04"
+      },
+      "data": {
+        "signal_type": "runtime_error",
+        "severity": "P2",
+        "service": "sentinel-watchtower",
+        "monitor_url": "https://us5.datadoghq.com/monitors/1234567"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "aa6fc55c3cd8941853e3444215ef94e025da21eb54738130d67c8803a5c0c033",
+      "kind": "agent.started",
+      "ts": "2026-10-25T08:06:20Z",
+      "recorded_at": "2026-10-25T08:06:20Z",
+      "source": "gha:Keshav0375/Sentinel/ci_incident_response.yml",
+      "chain": {
+        "correlation_id": "5b0c3f1e-8a2d-4c6b-9e7f-1a2b3c4d5e6f",
+        "incident_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+        "sha": "7a3c9e1b2d4f6a8091a2b3c4d5e6f708192a3b4c",
+        "scenario": "runtime/04"
+      },
+      "data": {
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000304"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "b55bd01745cc6ec07ea0964183f5d64989f33178e3d12979c3652daa9f852705",
+      "kind": "agent.decided",
+      "ts": "2026-10-25T08:09:10Z",
+      "recorded_at": "2026-10-25T08:09:10Z",
+      "source": "gha:Keshav0375/Sentinel/ci_incident_response.yml",
+      "chain": {
+        "correlation_id": "5b0c3f1e-8a2d-4c6b-9e7f-1a2b3c4d5e6f",
+        "incident_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+        "sha": "7a3c9e1b2d4f6a8091a2b3c4d5e6f708192a3b4c",
+        "scenario": "runtime/04"
+      },
+      "data": {
+        "resolution_type": "rollback",
+        "confidence": 0.86,
+        "root_cause_summary": "The merged change set the worker pool size to 0 in app/config.py, so every request to /orders timed out after the deploy.",
+        "tool_calls": 9,
+        "reflexion_loops": 1,
+        "mttr_s": 190,
+        "models_used": [
+          "claude-sonnet-4-5",
+          "gpt-4o-mini"
+        ],
+        "langfuse_trace_url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr7a3c9e1b",
+        "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000304"
+      }
+    },
+    {
+      "schema": "ops.v1",
+      "event_id": "9509b3f2d3bf1753d925c8a0f88b177bc9244a4fa4c28ec57fdb5bf6b73dd182",
+      "kind": "revert_pr.opened",
+      "ts": "2026-10-25T08:10:00Z",
+      "recorded_at": "2026-10-25T08:10:00Z",
+      "source": "reconciler",
+      "chain": {
+        "correlation_id": "5b0c3f1e-8a2d-4c6b-9e7f-1a2b3c4d5e6f",
+        "incident_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+        "sha": "7a3c9e1b2d4f6a8091a2b3c4d5e6f708192a3b4c",
+        "scenario": "runtime/04",
+        "pr": 57
+      },
+      "data": {
+        "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/57",
+        "state": "open"
+      }
+    }
+  ],
+  "agent": {
+    "decided_at": "2026-10-25T08:09:10Z",
+    "resolution_type": "rollback",
+    "confidence": 0.86,
+    "root_cause_summary": "The merged change set the worker pool size to 0 in app/config.py, so every request to /orders timed out after the deploy.",
+    "tool_calls": 9,
+    "reflexion_loops": 1,
+    "mttr_s": 190,
+    "models_used": [
+      "claude-sonnet-4-5",
+      "gpt-4o-mini"
+    ],
+    "langfuse_trace_url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr7a3c9e1b"
+  },
+  "trace": null,
+  "evals": [],
+  "links": [
+    {
+      "kind": "github_run",
+      "label": "Deployment run",
+      "url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000303",
+      "restricted": false
+    },
+    {
+      "kind": "github_pr",
+      "label": "Revert PR #57",
+      "url": "https://github.com/Keshav0375/Sentinel-deployment/pull/57",
+      "restricted": false
+    },
+    {
+      "kind": "langfuse",
+      "label": "LangFuse trace",
+      "url": "https://us.cloud.langfuse.com/project/sentinel-dev/traces/tr7a3c9e1b",
+      "restricted": true
+    },
+    {
+      "kind": "datadog",
+      "label": "Datadog monitor",
+      "url": "https://us5.datadoghq.com/monitors/1234567",
+      "restricted": true
+    }
+  ]
+}

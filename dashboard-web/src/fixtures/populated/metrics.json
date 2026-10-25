@@ -1,0 +1,151 @@
+{
+  "schema": "ops.snapshot.v1",
+  "file": "metrics",
+  "generated_at": "2026-10-25T12:00:00Z",
+  "ranges": {
+    "24h": {
+      "deploys": 3,
+      "deploy_failures": 1,
+      "failure_rate": 0.3333,
+      "builds": 2,
+      "build_failures": 0,
+      "incidents": 1,
+      "mttr_p50_s": 190,
+      "mttr_p90_s": 190,
+      "revert_prs_opened": 1,
+      "revert_prs_merged": 0,
+      "escalations": 0,
+      "eval_runs": 0,
+      "eval_score_mean": null
+    },
+    "7d": {
+      "deploys": 6,
+      "deploy_failures": 2,
+      "failure_rate": 0.3333,
+      "builds": 4,
+      "build_failures": 1,
+      "incidents": 3,
+      "mttr_p50_s": 190,
+      "mttr_p90_s": 234,
+      "revert_prs_opened": 2,
+      "revert_prs_merged": 1,
+      "escalations": 1,
+      "eval_runs": 2,
+      "eval_score_mean": 0.88
+    },
+    "30d": {
+      "deploys": 6,
+      "deploy_failures": 2,
+      "failure_rate": 0.3333,
+      "builds": 4,
+      "build_failures": 1,
+      "incidents": 3,
+      "mttr_p50_s": 190,
+      "mttr_p90_s": 234,
+      "revert_prs_opened": 2,
+      "revert_prs_merged": 1,
+      "escalations": 1,
+      "eval_runs": 2,
+      "eval_score_mean": 0.88
+    },
+    "all": {
+      "deploys": 6,
+      "deploy_failures": 2,
+      "failure_rate": 0.3333,
+      "builds": 4,
+      "build_failures": 1,
+      "incidents": 3,
+      "mttr_p50_s": 190,
+      "mttr_p90_s": 234,
+      "revert_prs_opened": 2,
+      "revert_prs_merged": 1,
+      "escalations": 1,
+      "eval_runs": 2,
+      "eval_score_mean": 0.88
+    }
+  },
+  "current": {
+    "revert_prs_awaiting_review": 1,
+    "oldest_awaiting_since": "2026-10-25T08:10:00Z",
+    "escalations_open": 1,
+    "failed_no_incident": 1
+  },
+  "daily": [
+    {
+      "date": "2026-10-22",
+      "deploys": 1,
+      "deploy_failures": 0,
+      "incidents": 0,
+      "escalations": 0,
+      "revert_prs_merged": 0,
+      "mttr_p50_s": null,
+      "eval_score_mean": null
+    },
+    {
+      "date": "2026-10-23",
+      "deploys": 1,
+      "deploy_failures": 1,
+      "incidents": 1,
+      "escalations": 0,
+      "revert_prs_merged": 1,
+      "mttr_p50_s": 180,
+      "eval_score_mean": 0.88
+    },
+    {
+      "date": "2026-10-24",
+      "deploys": 1,
+      "deploy_failures": 0,
+      "incidents": 1,
+      "escalations": 1,
+      "revert_prs_merged": 0,
+      "mttr_p50_s": 240,
+      "eval_score_mean": null
+    },
+    {
+      "date": "2026-10-25",
+      "deploys": 3,
+      "deploy_failures": 1,
+      "incidents": 1,
+      "escalations": 0,
+      "revert_prs_merged": 0,
+      "mttr_p50_s": 190,
+      "eval_score_mean": null
+    }
+  ],
+  "eval": {
+    "scenarios": [
+      {
+        "scenario": "deployfail/02",
+        "case": "ii",
+        "runs": 1,
+        "last_scored_at": "2026-10-23T11:00:00Z",
+        "last_total_score": 0.88,
+        "mean_total_score": 0.88,
+        "checks_pass_rate": {
+          "fired": 1,
+          "classified": 1,
+          "correlated": 1,
+          "revert_target": 1
+        },
+        "judge_failures": 0,
+        "judge_conflicts": 0
+      },
+      {
+        "scenario": "runtime/07",
+        "case": "iii",
+        "runs": 1,
+        "last_scored_at": "2026-10-24T16:00:00Z",
+        "last_total_score": null,
+        "mean_total_score": null,
+        "checks_pass_rate": {
+          "fired": 1,
+          "classified": 1,
+          "correlated": 1,
+          "revert_target": 0
+        },
+        "judge_failures": 1,
+        "judge_conflicts": 0
+      }
+    ]
+  }
+}
