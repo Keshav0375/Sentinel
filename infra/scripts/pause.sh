@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Pause / resume Sentinel compute.  (task 6.8)
 #
-# Lives here rather than inline in ci_pause.yml for three reasons: the gate lints
+# Lives here rather than inline in infra_pause.yml for three reasons: the gate lints
 # every scripts/*.sh, a hundred-line `run:` block is not reviewable, and a script
 # runs locally where a workflow step does not. Inline, it also hung actionlint's
 # shell parser outright.

@@ -56,7 +56,7 @@ while [ $# -gt 0 ]; do
     # Report the findings, do not set the exit code. For a run whose ACTION
     # already failed: the workflow is red on that job's own result, the cause is
     # in that job's log, and a second red here describes a consequence as if it
-    # were a cause. See the caller in .github/workflows/ci_infra.yml.
+    # were a cause. See the caller in .github/workflows/infra_deploy.yml.
     --advisory)    ADVISORY=1; shift ;;
     -h|--help)     sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;

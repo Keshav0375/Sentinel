@@ -7,9 +7,11 @@
 # treat this repo as the backup. It is not. Keep the filled .env in a password
 # manager.
 #
-#     bash scripts/set-gh-secrets.sh              # push
-#     bash scripts/set-gh-secrets.sh --dry-run    # show what would be pushed
-#     bash scripts/set-gh-secrets.sh --file x.env # a different source file
+# Run from infra/ in the Sentinel monorepo:
+#
+#     cd infra && bash scripts/set-gh-secrets.sh              # push
+#     cd infra && bash scripts/set-gh-secrets.sh --dry-run    # show what would be pushed
+#     cd infra && bash scripts/set-gh-secrets.sh --file x.env # a different source file
 #
 # Invoked through `bash` rather than executed: the exec bit does not survive a
 # Windows checkout, the same reason the workflows call scripts/*.sh that way.
@@ -28,7 +30,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-REPO="Keshav0375/Sentinel-infra"
+REPO="Keshav0375/Sentinel"
 ENVIRONMENT="production"
 ENV_FILE=".env"
 DRY_RUN=0

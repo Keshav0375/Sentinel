@@ -35,7 +35,7 @@
 # the Datadog key rotates, or a different deployment becomes the target.
 #
 # A separate script from set-gh-secrets.sh, which mirrors a whole .env into
-# Sentinel-infra's `production` environment. This one computes most of its
+# Sentinel's `production` environment (infra/ in the monorepo). This one computes most of its
 # values, writes variables as well as secrets, and reads one key from a file
 # that belongs to another repo.
 #

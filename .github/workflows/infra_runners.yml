@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Build the CI runner image and publish it to ACR.  (architecture/infra.md §6.3)
 #
-# Path-filtered to ci-images/** so a Terraform change does not rebuild a ~1 GB
+# Path-filtered to infra/ci-images/** so a Terraform change does not rebuild a ~1 GB
 # image for nothing. ci-images/build-push.sh does the same job by hand; it exists
 # only to break the bootstrap circularity (this workflow needs an ACR that the
 # first apply creates). After the first push this workflow owns every rebuild,
@@ -27,6 +27,10 @@
 # old sha- tag whose manifest is shared with `latest` (an identical rebuild has
 # the same digest) would take `latest` with it. `untag` removes only the
 # reference.
+#
+# Lives in the Sentinel monorepo: jobs run in infra/ (defaults.working-directory);
+# the OIDC subjects are repo:Keshav0375/Sentinel:environment:<env>; `oidc-ready`
+# keeps every Azure job skipped until INFRA_OIDC_READY is true.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: "Runner Image — Build & Deploy to ACR"
@@ -41,7 +45,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'ci-images/**'
+      - 'infra/ci-images/**'
   workflow_dispatch:
     inputs:
       extra_tag:
@@ -76,9 +80,41 @@ env:
   IMAGE_REPO: ci-runner
 
 jobs:
+  # Until the user re-runs infra/scripts/bootstrap-identities.sh for the repo:Keshav0375/Sentinel subjects
+  # and sets INFRA_OIDC_READY, Azure jobs skip green.
+  oidc-ready:
+    name: Check infra OIDC readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        name: Check INFRA_OIDC_READY
+        env:
+          INFRA_OIDC_READY: ${{ vars.INFRA_OIDC_READY }}
+        run: |
+          set -euo pipefail
+          if [ "${INFRA_OIDC_READY:-}" != "true" ]; then
+            msg="Infra OIDC not ready — ${GITHUB_WORKFLOW:-this workflow}: Azure jobs skipped."
+            msg="$msg Re-run infra/scripts/bootstrap-identities.sh, then set repo variable INFRA_OIDC_READY=true."
+            msg="$msg See sentinel-brain decisions 2026-10-25 (monorepo)."
+            echo "::notice::$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
   build-and-push:
     name: Build and Push Runner Image
     runs-on: ubuntu-latest
+    needs: oidc-ready
+    if: needs.oidc-ready.outputs.ready == 'true'
+    defaults:
+      run:
+        working-directory: infra
 
     # Pushing an image is a WRITE, so this uses gha-deploy — and gha-deploy
     # federates only on environment subjects. Without this the job presents a
@@ -87,10 +123,10 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Log in to Azure
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}

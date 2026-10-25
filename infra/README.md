@@ -1,4 +1,6 @@
-# Sentinel-infra
+# Sentinel — infra/
+
+Moved from `Keshav0375/Sentinel-infra` (archived) on 2026-10-25 with full history (git subtree).
 
 Terraform for the Sentinel platform. One root module, **two layers**, eight child modules, three
 CI identities, and four workflows — on a 6-vCPU student subscription that must be able to reach
@@ -88,7 +90,7 @@ construction. A deployment can *use* the cluster and *cannot* change it.
 │                          keyvault · naming · postgresql
 ├── scripts/               the eight below
 ├── ci-images/             CI runner image + its one-time bootstrap push
-└── .github/workflows/     four workflows
+└── ../.github/workflows/infra_*.yml  four workflows (repo root)
 ```
 
 | Script | Runs as | What it is for |
@@ -199,10 +201,10 @@ App Service. See [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md) step 9.
 
 | Workflow | File | Runs as | Trigger |
 |---|---|---|---|
-| **Sentinel Infra — Validate & Plan** | `ci_infra_dry.yml` | `gha-plan` | every push · PRs to `main` · manual |
-| **Sentinel Infra — Deploy** | `ci_infra.yml` | `gha-deploy` | **dispatch only** |
-| **Sentinel — Pause / Resume** | `ci_pause.yml` | `gha-ops` | dispatch |
-| **Runner Image — Build & Deploy to ACR** | `ci_runners.yml` | `gha-deploy` | push to `ci-images/**` · manual |
+| **Sentinel Infra — Validate & Plan** | `infra_validate_plan.yml` | `gha-plan` | every push · PRs to `main` · manual |
+| **Sentinel Infra — Deploy** | `infra_deploy.yml` | `gha-deploy` | **dispatch only** |
+| **Sentinel — Pause / Resume** | `infra_pause.yml` | `gha-ops` | dispatch |
+| **Runner Image — Build & Deploy to ACR** | `infra_runners.yml` | `gha-deploy` | push to `ci-images/**` · manual |
 
 **Deploy is dispatch-only, and that is a consequence rather than a preference.** Push-to-main
 auto-apply cannot survive multi-deployment: a push has no way to know *which* deployment it

@@ -19,7 +19,7 @@
 # pulled successfully and then die with `exec format error` before the first
 # step — a failure that reads like a broken workflow, not a wrong architecture.
 #
-# `docker build` on ubuntu-latest already produces amd64, so ci_runners.yml gets
+# `docker build` on ubuntu-latest already produces amd64, so infra_runners.yml gets
 # it right by default. The hazard is a local build on an Apple Silicon laptop,
 # which silently produces arm64. build-push.sh therefore passes
 # `--platform linux/amd64` explicitly rather than trusting the host.

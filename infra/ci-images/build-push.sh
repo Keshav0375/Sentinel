@@ -4,12 +4,12 @@
 #
 # ── Why this script exists at all ────────────────────────────────────────────
 # It is a bootstrap seam, the same shape as scripts/bootstrap-state.sh.
-# ci_runners.yml automates every subsequent rebuild — but that workflow pulls
+# infra_runners.yml automates every subsequent rebuild — but that workflow pulls
 # ACR credentials that only exist after `terraform apply`, and the FIRST apply
 # wants a runner image that does not exist yet. Someone has to break the loop by
 # hand exactly once. This is that once.
 #
-# After the first push, do not run this: edit ci-images/** and let ci_runners.yml
+# After the first push, do not run this: edit ci-images/** and let infra_runners.yml
 # do it, so the image in ACR always corresponds to a commit on main.
 #
 # Idempotent — re-running just overwrites :latest with an identical build.

@@ -1,5 +1,7 @@
 # Bootstrap — from an empty subscription to a running deployment
 
+Run every command from `infra/` in the Sentinel monorepo.
+
 Everything Terraform cannot do for itself, in the order it has to happen.
 
 > **Two layers, two workspaces.** The **platform** — one registry, one cluster, one database
@@ -122,7 +124,7 @@ reviewer on `destroy`; the others need none.
 assigns it a role:
 
 ```bash
-gh variable set GHA_APP_OBJECT_ID --repo Keshav0375/Sentinel-infra \
+gh variable set GHA_APP_OBJECT_ID --repo Keshav0375/Sentinel \
   --body "$(az identity show -g rg-sentinel-bootstrap -n gha-app --query principalId -o tsv)"
 ```
 
@@ -151,7 +153,7 @@ az login --tenant eae0d3c6-af22-4b70-ad3b-12d625a06139 --allow-no-subscriptions
 $app = "378ccade-dd35-4f92-a71f-4a781fe5ace3"   # sentinel-tf-identity
 
 foreach ($e in @("plan","production","destroy")) {
-  "{`"name`":`"sentinel-tf-env-$e`",`"issuer`":`"https://token.actions.githubusercontent.com`",`"subject`":`"repo:Keshav0375/Sentinel-infra:environment:$e`",`"audiences`":[`"api://AzureADTokenExchange`"]}" |
+  "{`"name`":`"sentinel-tf-env-$e`",`"issuer`":`"https://token.actions.githubusercontent.com`",`"subject`":`"repo:Keshav0375/Sentinel:environment:$e`",`"audiences`":[`"api://AzureADTokenExchange`"]}" |
     Out-File -Encoding utf8 fic.json
   az ad app federated-credential create --id $app --parameters "@fic.json"
 }
@@ -207,7 +209,7 @@ az acr repository show-tags --name <acr> --repository ci-runner -o tsv
 ```
 
 One manual push breaks the circularity — the workflow that builds this image needs an ACR the
-platform apply creates, and runs inside the image it builds. Afterwards `ci_runners.yml` owns
+platform apply creates, and runs inside the image it builds. Afterwards `infra_runners.yml` owns
 every rebuild, which is what keeps the image corresponding to a commit rather than to someone's
 laptop.
 
@@ -276,7 +278,7 @@ The bridge's only credential, used for `repository_dispatch` on the app repo.
 | Repository access | **only** `Keshav0375/Sentinel` |
 | Permissions | **Contents: Read and write** (what `repository_dispatch` requires) — nothing else |
 | Expiry | 90 days |
-| GitHub secret | `DISPATCH_PAT`, an environment secret on `production` in `Sentinel-infra` |
+| GitHub secret | `DISPATCH_PAT`, an environment secret on `production` in `Sentinel` |
 | `.env` key | `DISPATCH_PAT` |
 | Key Vault secret | `github-pat` |
 

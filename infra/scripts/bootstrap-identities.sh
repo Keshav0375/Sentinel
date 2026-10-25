@@ -75,7 +75,8 @@ EXPECTED_SUB="174e25ca-ab82-4671-a913-9c2f66e5924d"
 LOCATION="${LOCATION:-canadacentral}"
 BOOTSTRAP_RG="${BOOTSTRAP_RG:-rg-sentinel-bootstrap}"
 GITHUB_OWNER="${GITHUB_OWNER:-Keshav0375}"
-INFRA_REPO="${INFRA_REPO:-Sentinel-infra}"
+# Monorepo since 2026-10-25: infra lives in Keshav0375/Sentinel under infra/. Rollback to the archived repo: INFRA_REPO=Sentinel-infra.
+INFRA_REPO="${INFRA_REPO:-Sentinel}"
 DEPLOYMENT_REPO="${DEPLOYMENT_REPO:-Sentinel-deployment}"
 OPS_ROLE_NAME="Sentinel Ops Start Stop"
 
@@ -142,10 +143,24 @@ ensure_role() {
 }
 
 ensure_fic() {
-  local identity="$1" name="$2" subject="$3"
-  if az identity federated-credential show --name "${name}" \
-       --identity-name "${identity}" --resource-group "${BOOTSTRAP_RG}" >/dev/null 2>&1; then
-    echo "    fic ${name} exists"
+  local identity="$1" name="$2" subject="$3" current
+  if current="$(az identity federated-credential show --name "${name}" \
+       --identity-name "${identity}" --resource-group "${BOOTSTRAP_RG}" \
+       --query subject -o tsv 2>/dev/null | nocr)" && [ -n "${current}" ]; then
+    if [ "${current}" = "${subject}" ]; then
+      echo "    fic ${name} exists"
+      return
+    fi
+    # Same name, different subject (the 2026-10-25 move from Sentinel-infra to Sentinel). Converge in place.
+    echo "    updating fic ${name}: ${current} -> ${subject}"
+    az identity federated-credential update \
+      --name "${name}" \
+      --identity-name "${identity}" \
+      --resource-group "${BOOTSTRAP_RG}" \
+      --issuer "${ISSUER}" \
+      --subject "${subject}" \
+      --audiences "${AUDIENCE}" \
+      -o none
     return
   fi
   echo "    creating fic ${name} -> ${subject}"
@@ -203,8 +218,8 @@ ensure_fic "gha-plan" "plan-environment" "repo:${GITHUB_OWNER}/${INFRA_REPO}:env
 
 # ── The `pull_request` subject is retired ─────────────────────────────────────
 # It was never presented. Every job that authenticates as gha-plan declares
-# `environment: plan` — run-preflight and run-plan in ci_infra_dry.yml, and
-# verify in ci_infra.yml — and declaring an environment REPLACES the subject
+# `environment: plan` — run-preflight and run-plan in infra_validate_plan.yml, and
+# verify in infra_deploy.yml — and declaring an environment REPLACES the subject
 # with `environment:<name>`. The branch/pull_request form is never sent, so this
 # credential authorised nothing that the estate uses.
 #

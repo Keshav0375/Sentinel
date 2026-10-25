@@ -25,9 +25,9 @@ flowchart TB
         direction TB
         TF["terraform apply"]
         IDP["Identity plane<br/>OIDC app · backend Entra app<br/>api://sentinel-backend · workload identity<br/>Key Vault rotation"]
-        CIINFRA["ci_infra_dry · ci_infra"]
+        CIINFRA["infra_validate_plan · infra_deploy"]
         DESTROY["ci_destroy_infra<br/>full teardown → az group delete"]
-        RUNNERS["ci_runners → CI images"]
+        RUNNERS["infra_runners → CI images"]
     end
 
     subgraph AZURE["☁️ Azure · resource group sentinel-rg · all free tier"]
