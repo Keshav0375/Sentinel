@@ -267,6 +267,16 @@ def test_from_payload_small_context_unchanged() -> None:
     assert alert.pr_sha == "abc1234"
 
 
+def test_pr_details_branch_survives_the_alert() -> None:
+    context = {"pr_details": {"number": 7, "sha": "abc1234", "branch": "runtime/01"}}
+    alert = IncidentAlert.from_payload(_incident(context=context))
+    assert alert.context.pr_details is not None
+    assert alert.context.pr_details.branch == "runtime/01"
+    bare = IncidentAlert.from_payload(_incident(context={"pr_details": {"number": 7}}))
+    assert bare.context.pr_details is not None
+    assert bare.context.pr_details.branch is None
+
+
 def test_pr_sha() -> None:
     assert IncidentAlert(title="t").pr_sha is None
     blank = IncidentContext(pr_details=PRDetails(sha="  "))

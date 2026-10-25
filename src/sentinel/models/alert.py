@@ -88,6 +88,8 @@ class PRDetails(BaseModel):
     number: int | None = None
     sha: str | None = None
     author: str | None = None
+    # The PR's head ref (the scenario branch, e.g. deployfail/03); the eval dataset item's label.
+    branch: str | None = None
     files_changed: list[str] = []
 
 

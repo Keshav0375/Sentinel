@@ -328,7 +328,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pytest tests/test_infra/ tests/test_memory/ tests/test_agents/ tests/test_api/ \
-            tests/test_eval/ -x -q
+            tests/test_eval/ tests/test_e2e/ -x -q
 
       # The bearer is minted in the identity tenant, so log in again there (after the long pytest steps).
       - id: login-identity
