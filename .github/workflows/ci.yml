@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main, release-phase-2]
+    paths-ignore:
+      - "infra/**"
 
 concurrency:
   group: ci-${{ github.ref }}

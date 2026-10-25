@@ -31,7 +31,8 @@ PHASE8 = [
 
 USES_RE = re.compile(r"^\s*(?:-\s+)?uses:\s*(\S+)(.*)$", re.MULTILINE)
 PIN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
-VERSION_COMMENT = re.compile(r"#\s*v\d+\.\d+\.\d+")
+# A two-part tag is accepted for upstreams that publish no patch tag (azure/use-kubelogin: v1.2).
+VERSION_COMMENT = re.compile(r"#\s*v\d+\.\d+(\.\d+)?")
 CURL_RE = re.compile(r"(^|[\s(|;&$])curl\s")
 
 TOKEN_WITH = {
@@ -42,7 +43,7 @@ ACR_WITH = {"acr-name": "${{ vars.ACR_NAME }}"}
 
 
 def _unpinned(text: str) -> list[str]:
-    """The third-party `uses:` values that are not a full SHA with a `# vX.Y.Z` comment."""
+    """The third-party `uses:` values that are not a full SHA with a `# vX.Y[.Z]` comment."""
     bad: list[str] = []
     for match in USES_RE.finditer(text):
         value, rest = match.group(1), match.group(2)
@@ -75,6 +76,10 @@ def test_unpinned_detector_flags_tags() -> None:
 
     assert _unpinned("      - uses: actions/checkout@v4\n") == ["actions/checkout@v4"]
     assert _unpinned(f"      - uses: actions/checkout@{sha}  # v4.4.0\n") == []
+    assert _unpinned(f"      - uses: azure/use-kubelogin@{sha}  # v1.2\n") == []
+    assert _unpinned(f"      - uses: azure/use-kubelogin@{sha}  # v1\n") == [
+        f"azure/use-kubelogin@{sha}"
+    ]
     assert _unpinned(f"        uses: actions/checkout@{sha}\n") == [f"actions/checkout@{sha}"]
     assert _unpinned("      - uses: ./.github/actions/backend-up\n") == []
 

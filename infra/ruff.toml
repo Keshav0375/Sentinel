@@ -1,0 +1,6 @@
+# infra/ keeps ruff's defaults, as it did as Sentinel-infra. Without this file ruff walks up to the
+# backend's pyproject.toml ([tool.ruff] E/F/I/UP at 100 columns) and fails the Functions code.
+line-length = 88
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

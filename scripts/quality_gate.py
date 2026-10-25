@@ -7,7 +7,8 @@ implementation/README.md §7).
 
 Usage (SIBLINGS=../Sentinel-development-project):
     python scripts/quality_gate.py --repo backend [--path .] [--fast] [--json]
-    python scripts/quality_gate.py --repo infra      --path $SIBLINGS/Sentinel-infra
+    python scripts/quality_gate.py --repo infra      --path infra
+        (from the Sentinel root; infra/ is a monorepo subdir)
     python scripts/quality_gate.py --repo deployment --path $SIBLINGS/Sentinel-deployment
 
 Exit code 0 = all required checks passed. Non-zero = at least one required check failed.
@@ -109,7 +110,7 @@ MATRIX: dict[str, list[Check]] = {
         ("tflint", ["tflint", "--recursive"], False),
         ("tfsec", ["tfsec", "."], False),
         # The bootstrap scripts create the state account and the CI identity by running
-        # against a live subscription — the highest-risk files in sentinel-infra and, until
+        # against a live subscription — the highest-risk files in infra/ and, until
         # now, the only ones no gate check ever read. Required, because a green gate that
         # never lints them says nothing about them. It caught CRLF line endings on the first
         # run, which would have failed every script on ubuntu-latest with
@@ -120,7 +121,7 @@ MATRIX: dict[str, list[Check]] = {
             ["shellcheck", "scripts/*.sh", "ci-images/*.sh"],
             True,
         ),
-        # Phase 3 put PYTHON in the infra repo: the Event Grid bridge and the KV
+        # Phase 3 put PYTHON in infra/: the Event Grid bridge and the KV
         # rotator run unattended against live services, and until this entry the
         # gate never imported them, let alone ran their tests — PASS said nothing
         # about 149 lines of handler code (review blocker, 2026-08-23; same
@@ -149,10 +150,12 @@ MATRIX: dict[str, list[Check]] = {
             False,
         ),
         ("tf-test", ["terraform", "-chdir=modules/naming", "test", "-no-color"], False),
-        # sentinel-infra ships 4 workflows (dry / apply / destroy / runners) — lint them here
-        # rather than standalone, so infra task 4.3's gate is the same body CI runs.
-        ("actionlint", ["actionlint"], True),
-        ("yamllint", ["yamllint", ".github/"], False),
+        # infra's workflows live at the monorepo root as .github/workflows/infra_*.yml
+        # (cwd is infra/). Named -infra so IMPLICIT_PATHS['actionlint'] (deployment's
+        # implicit .github/workflows) does not apply. yamllint picks up
+        # infra/.yamllint.yaml from cwd.
+        ("actionlint-infra", ["actionlint", "../.github/workflows/infra_*.yml"], True),
+        ("yamllint-infra", ["yamllint", "../.github/workflows/infra_*.yml"], False),
         ("gitleaks", ["gitleaks", "detect", "--no-banner", "--redact"], True),
     ],
 }

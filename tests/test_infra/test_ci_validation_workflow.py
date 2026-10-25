@@ -32,6 +32,7 @@ PATHS = (
     "alembic.ini",
     "scripts/**",
     ".github/workflows/**",
+    "!.github/workflows/infra_*.yml",
     ".github/actions/**",
 )
 JOBS = ("run-quality", "build-and-test")

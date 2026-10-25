@@ -1,0 +1,576 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Deploy — creates, seeds, and destroys the estate. The only automated writer.
+#
+# ── Dispatch only, and that is a consequence not a preference ────────────────
+# Push-to-main auto-apply cannot survive multi-deployment: a push has no way to
+# know WHICH deployment it means. No identity carries a branch subject any more.
+#
+# ── The environment is the security boundary ─────────────────────────────────
+# Declaring `environment: X` rewrites the OIDC subject to
+# `repo:<owner>/<repo>:environment:X`, replacing the branch form. Those are the
+# only subjects gha-deploy federates on, and GitHub will not mint them for a
+# `pull_request` — so the identity that can empty the subscription is
+# unreachable from a PR by construction, not by a rule someone could
+# misconfigure. Apply and destroy use DIFFERENT environments, so a required
+# reviewer can be attached to destruction alone.
+#
+# ── What changed on 2026-08-30, and why ──────────────────────────────────────
+# A deployment (rg-demo1-dev-cc: a resource group, a Key Vault, and a database
+# on the SHARED Postgres server) was found alive five days after it was believed
+# destroyed. Every exit code in that history was 0. Four defects, four fixes:
+#
+#   the platform could not be destroyed here    ->  scope 'platform' and 'all'
+#     at all, and the platform is ~100% of the        now run, gated behind the
+#     subscription's cost                             destroy environment
+#
+#   nothing enforced destroy ORDER, so a        ->  scripts/lifecycle.sh puts
+#     platform teardown could orphan every            dependents before the
+#     deployment's state                              dependency, always
+#
+#   the empty-workspace check was written as    ->  a non-empty workspace after
+#     `|| echo "::warning::"`, so its failure          destroy is a hard failure
+#     was invisible
+#
+#   NOTHING ever asked Azure what survived      ->  verify-estate.sh, run as the
+#                                                   READ-ONLY identity
+#
+# `refresh-only` was removed by the same change. Its real use — reconciling
+# after a portal edit — is a twice-a-year local operation, and `apply
+# -refresh-only` can DROP resources from state when the API reports them gone,
+# making them invisible to every later destroy. It sat one arrow-key from
+# `destroy` in the same dropdown. See docs/BOOTSTRAP.md for the local one-liner.
+#
+# Lives in the Sentinel monorepo: jobs run in infra/ (defaults.working-directory);
+# the OIDC subjects are repo:Keshav0375/Sentinel:environment:<env>; `oidc-ready`
+# keeps every Azure job skipped until INFRA_OIDC_READY is true.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "Sentinel Infra — Deploy"
+
+# ── Why a run-name ───────────────────────────────────────────────────────────
+# Every dispatch of this workflow used to render in the Actions list as the
+# identical string "Sentinel Infra — Deploy", distinguished only by a run number
+# and a duration. Four runs on 2026-09-12 — two refused, two that emptied the
+# subscription — were indistinguishable at a glance, which is precisely the
+# history you need to read after a destroy.
+#
+# `run-name` is evaluated at DISPATCH time against the `inputs` context, so the
+# title is fixed before any job starts and survives a run that fails in its
+# first step. The scope decides what identifies the target: the platform layer
+# is a singleton, so naming a deployment beside it would be a lie.
+run-name: >-
+  Sentinel Infra - ${{ inputs.action }} for
+  ${{ inputs.scope == 'platform' && 'platform'
+  || inputs.scope == 'all' && format('all of platform and {0}-{1}', inputs.deployment, inputs.environment_name)
+  || format('deployment {0}-{1}', inputs.deployment, inputs.environment_name) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'plan = show the diff and stop · apply = create/update/seed · destroy = tear down'
+        type: choice
+        required: true
+        default: plan
+        options: [plan, apply, destroy]
+      scope:
+        description: >-
+          deployment = one isolated deployment · platform = the shared cluster/registry/database ·
+          all = both, in dependency order
+        type: choice
+        required: true
+        default: deployment
+        options: [deployment, platform, all]
+      deployment:
+        description: 'Deployment name. 2-8 lowercase alphanumeric. Ignored when scope is platform.'
+        type: string
+        required: true
+        default: sentinel
+      environment_name:
+        description: 'Environment within the deployment. The platform layer always uses `plat`.'
+        type: string
+        required: false
+        default: dev
+      confirm:
+        description: >-
+          DESTROY ONLY. Type what matches the scope: deployment -> the deployment name ·
+          platform -> platform · all -> destroy-everything
+        type: string
+        required: false
+        default: ''
+      seed_secrets:
+        description: 'After apply, write the GitHub environment secrets into the Key Vault.'
+        type: boolean
+        required: false
+        default: true
+      target:
+        description: >-
+          Single resource address for -target. PLAN ONLY — a partial apply or destroy leaves
+          state no plan agrees with.
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: infra-apply
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.15.8"
+
+jobs:
+  # Until the user re-runs infra/scripts/bootstrap-identities.sh for the repo:Keshav0375/Sentinel subjects
+  # and sets INFRA_OIDC_READY, Azure jobs skip green.
+  oidc-ready:
+    name: Check infra OIDC readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        name: Check INFRA_OIDC_READY
+        env:
+          INFRA_OIDC_READY: ${{ vars.INFRA_OIDC_READY }}
+        run: |
+          set -euo pipefail
+          if [ "${INFRA_OIDC_READY:-}" != "true" ]; then
+            msg="Infra OIDC not ready — ${GITHUB_WORKFLOW:-this workflow}: Azure jobs skipped."
+            msg="$msg Re-run infra/scripts/bootstrap-identities.sh, then set repo variable INFRA_OIDC_READY=true."
+            msg="$msg See sentinel-brain decisions 2026-10-25 (monorepo)."
+            echo "::notice::$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+  run:
+    name: ${{ inputs.action }} · ${{ inputs.scope }}
+    runs-on: ubuntu-latest
+    needs: oidc-ready
+    if: needs.oidc-ready.outputs.ready == 'true'
+    defaults:
+      run:
+        working-directory: infra
+
+    # Destruction gets its own environment, so its approval rules are its own.
+    environment: ${{ inputs.action == 'destroy' && 'destroy' || 'production' }}
+
+    outputs:
+      vault: ${{ steps.vault.outputs.name }}
+      # Consumed by `verify`. Set only once the guards have let the run through,
+      # so a refusal is distinguishable from an attempt that failed — see the
+      # comment on the verify job.
+      guards_passed: ${{ steps.guards.outputs.passed }}
+
+    steps:
+      # ── Guards, BEFORE authenticating ────────────────────────────────────
+      # A refused run should cost nothing and reach nothing. Checking after
+      # azure/login would mean a token was minted for a run that was never going
+      # to be allowed. lifecycle.sh repeats these so a LOCAL run is guarded too;
+      # this copy exists to fail in two seconds instead of ninety.
+      # -- Redact the administrator's UPN from this public log ---------------
+      # `vars.*` are not masked. `TF_PG_ADMIN_PRINCIPAL_NAME: <upn>` was
+      # therefore printed in the env block of every run, in a PUBLIC repository.
+      # It is not a credential and cannot authenticate anything -- but it is a
+      # real person's university account published beside the tenant it
+      # administers, which is the pair that targets password-spray and consent
+      # phishing. `add-mask` redacts it for the rest of the job, so this costs
+      # no migration of the variable to a secret.
+      #
+      # First step in the job: a mask only applies to output produced AFTER it
+      # is registered, and the runner prints a step's env block as that step
+      # starts.
+      - name: Mask the administrator UPN
+        working-directory: .
+        env:
+          UPN: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
+        run: '[ -z "${UPN}" ] || echo "::add-mask::${UPN}"'
+
+      - name: Check guards
+        id: guards
+        working-directory: .
+        env:
+          ACTION: ${{ inputs.action }}
+          SCOPE: ${{ inputs.scope }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          CONFIRM: ${{ inputs.confirm }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          # A refusal has to be readable from the run PAGE, not from the log. On
+          # 2026-09-12 two dispatches died here on a mistyped `confirm`; the
+          # reason was six scrolls into a collapsed step while the run page
+          # showed a failure in a different job entirely. Everything below
+          # therefore writes the remedy to the step summary as well as the
+          # annotation.
+          note() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+
+          if [ -n "${TARGET}" ] && [ "${ACTION}" != "plan" ]; then
+            note "### Refused — \`target\` is plan-only"
+            note ""
+            note "A partial apply or destroy leaves state that no full plan ever agreed"
+            note "with, which is how a half-destroyed deployment is made."
+            note ""
+            note "Re-dispatch with **action: plan**, or clear \`target\`."
+            echo "::error::target is accepted only with action 'plan'."
+            exit 1
+          fi
+
+          if [ "${ACTION}" != "destroy" ]; then
+            echo "no destroy guards needed for ${ACTION}"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The fallback is a token nobody can type, not the empty string. With
+          # `expected=""` an unrecognised scope would be confirmed by the input's
+          # own default of '' — a gate that opens when its subject is unknown.
+          case "${SCOPE}" in
+            deployment) expected="${DEPLOYMENT}" ;;
+            platform)   expected="platform" ;;
+            all)        expected="destroy-everything" ;;
+            *)          expected="__unrecognised-scope__" ;;
+          esac
+
+          if [ "${CONFIRM}" != "${expected}" ]; then
+            note "### Destroy refused — \`confirm\` does not match"
+            note ""
+            note "**Nothing was touched.** Azure was never authenticated."
+            note ""
+            note "| | |"
+            note "|---|---|"
+            note "| scope requested | \`${SCOPE}\` |"
+            note "| you typed | \`${CONFIRM}\` |"
+            note "| **type exactly** | \`${expected}\` |"
+            note ""
+            note "The token differs per scope deliberately — it names the blast radius,"
+            note "so a token memorised for one scope cannot fire a wider one:"
+            note ""
+            note "| scope | confirm |"
+            note "|---|---|"
+            note "| \`deployment\` | the deployment name — here \`${DEPLOYMENT}\` |"
+            note "| \`platform\` | \`platform\` |"
+            note "| \`all\` | \`destroy-everything\` |"
+            echo "::error::confirm ('${CONFIRM}') does not match. Scope '${SCOPE}' requires exactly: ${expected}"
+            echo "::error::Retype it. This is the only thing standing between a mis-click"
+            echo "::error::and an irreversible action."
+            exit 1
+          fi
+          echo "destroy confirmed for scope ${SCOPE}"
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3.1.2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # The kubernetes provider authenticates by Entra token via kubelogin
+      # rather than a downloaded admin credential. Runners do not ship it.
+      - name: Set up kubelogin
+        uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820  # v1.2
+        with:
+          kubelogin-version: 'v0.1.3'
+
+      # This az session does NOT last the job. azure/login mints it from a
+      # GitHub OIDC assertion that expires within minutes; az keeps working for
+      # ARM (a token minted at login) but cannot reach a NEW resource — AKS for
+      # kubelogin, the Key Vault data plane for seeding — once the assertion is
+      # stale. lifecycle.sh and the seed step therefore re-log in with
+      # scripts/az-refresh.sh first. Run 37399746578 is the failure.
+      - name: Log in to Azure
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The checks a plan structurally cannot make. Here rather than in the PR
+      # preflight because name availability is a POST */action that the plan
+      # identity cannot perform.
+      - name: Preflight
+        if: inputs.action == 'apply'
+        env:
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        run: |
+          # `bash` rather than direct execution — the exec bit does not survive a
+          # Windows checkout, and the failure is CI-only.
+          bash ./scripts/preflight.sh --mode apply \
+            --deployment "${DEPLOYMENT}" \
+            --environment "${ENVIRONMENT_NAME}"
+
+      # ── Wake what the run will touch ─────────────────────────────────────
+      # Stopped is the normal idle state for both, and each fails differently
+      # when asleep: Postgres 400s the refresh with ServerStoppedError, and a
+      # stopped cluster PLANS fine then fails the apply with
+      # OperationNotAllowed. That asymmetry is why this checks rather than
+      # trusting a green plan.
+      #
+      # Destroying a DEPLOYMENT needs the cluster awake too — the kubernetes
+      # provider must authenticate to remove the namespace. Destroying only the
+      # platform does not, and lifecycle.sh has already proved no deployment
+      # exists in that case.
+      - name: Ensure the platform is awake
+        if: inputs.action == 'apply' || (inputs.action == 'destroy' && inputs.scope != 'platform')
+        run: |
+          while IFS=$'\t' read -r name rg; do
+            [ -n "${name}" ] || continue
+            state="$(az postgres flexible-server show -n "${name}" -g "${rg}" --query state -o tsv)"
+            echo "postgres ${name}: ${state}"
+            if [ "${state}" != "Ready" ]; then
+              az postgres flexible-server start -n "${name}" -g "${rg}" -o none
+            fi
+          done <<< "$(az postgres flexible-server list --query "[].[name,resourceGroup]" -o tsv)"
+
+          while IFS=$'\t' read -r name rg; do
+            [ -n "${name}" ] || continue
+            state="$(az aks show -g "${rg}" -n "${name}" --query powerState.code -o tsv)"
+            echo "aks ${name}: ${state}"
+            if [ "${state}" != "Running" ]; then
+              echo "starting (5-10 min)"
+              az aks start -g "${rg}" -n "${name}"
+            fi
+          done <<< "$(az aks list --query "[].[name,resourceGroup]" -o tsv)"
+
+      - name: Initialize
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+        run: terraform init -input=false
+
+      # ── Who may write secrets into the vault ─────────────────────────────
+      # Resolved live rather than stored as a repository variable, because the
+      # identity is recreated by bootstrap-identities.sh and a stale GUID in a
+      # variable would fail as a silent no-grant that surfaces only at seed
+      # time. Empty is tolerated: modules/keyvault skips the grant and the seed
+      # step explains why it cannot write.
+      - name: Resolve the seeder principal
+        id: seeder
+        run: |
+          pid="$(az identity show -g rg-sentinel-bootstrap -n gha-deploy \
+                   --query principalId -o tsv 2>/dev/null || true)"
+          if [ -z "${pid}" ]; then
+            echo "::warning::could not resolve gha-deploy's principal id; the vault grant"
+            echo "::warning::will be skipped and seeding will not be able to write."
+          else
+            echo "seeder principal: ${pid}"
+          fi
+          echo "principal_id=${pid}" >> "$GITHUB_OUTPUT"
+
+      # ── The whole lifecycle, in dependency order ─────────────────────────
+      # One script rather than a job matrix: GitHub does not guarantee matrix
+      # ordering even at max-parallel 1, and the ordering here IS the safety
+      # property. A bash sequence is ordered by construction.
+      #
+      # Inputs travel through `env:` rather than being interpolated into the
+      # command line — `${{ }}` spliced into a `run:` block is the standard
+      # Actions script-injection surface, and `deployment` is a free-text field.
+      - name: Run ${{ inputs.action }}
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          TF_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          TF_LOCATION: ${{ vars.AZURE_LOCATION }}
+          TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
+          TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
+          TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
+          TF_GHA_APP_OBJECT_ID: ${{ vars.GHA_APP_OBJECT_ID }}
+          TF_KV_SEEDER_OBJECT_ID: ${{ steps.seeder.outputs.principal_id }}
+          ACTION: ${{ inputs.action }}
+          SCOPE: ${{ inputs.scope }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+          CONFIRM: ${{ inputs.confirm }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          bash ./scripts/lifecycle.sh \
+            --action "${ACTION}" \
+            --scope "${SCOPE}" \
+            --deployment "${DEPLOYMENT}" \
+            --environment "${ENVIRONMENT_NAME}" \
+            --confirm "${CONFIRM}" \
+            --target "${TARGET}"
+
+      # ── Seed the vault ───────────────────────────────────────────────────
+      # After the apply, over the DATA plane, from GitHub environment secrets.
+      # Terraform writes no secret and that invariant is untouched — the vault is
+      # still created empty; this fills it one step later.
+      - name: Find the vault
+        id: vault
+        if: inputs.action == 'apply' && inputs.scope != 'platform'
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        run: |
+          terraform workspace select "${DEPLOYMENT}-${ENVIRONMENT_NAME}"
+          name="$(terraform output -json names 2>/dev/null | jq -r '.key_vault // empty')"
+          echo "vault: ${name:-<none>}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Seed the vault
+        if: inputs.action == 'apply' && inputs.scope != 'platform' && inputs.seed_secrets
+        env:
+          # For az-refresh.sh only: the identity to re-log az in as.
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          VAULT: ${{ steps.vault.outputs.name }}
+          DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+          DATADOG_APP_KEY: ${{ secrets.DATADOG_APP_KEY }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          # Seeds github-pat, the bridge's GITHUB_TOKEN. The secret is DISPATCH_PAT
+          # because GitHub forbids secret names starting with GITHUB_.
+          GITHUB_PAT: ${{ secrets.DISPATCH_PAT }}
+        run: |
+          if [ -z "${VAULT}" ]; then
+            echo "::warning::no Key Vault in this deployment — nothing to seed"
+            exit 0
+          fi
+          # Both applies have run since azure/login, and the Key Vault data
+          # plane is a resource az has not yet minted a token for — it needs a
+          # live OIDC assertion, which the one from login no longer is.
+          bash ./scripts/az-refresh.sh
+          bash ./scripts/seed-vault.sh --vault "${VAULT}"
+
+      - name: Summary
+        if: always()
+        env:
+          VAULT: ${{ steps.vault.outputs.name }}
+          ACTION: ${{ inputs.action }}
+          SCOPE: ${{ inputs.scope }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+          GH_ENVIRONMENT: ${{ inputs.action == 'destroy' && 'destroy' || 'production' }}
+        run: |
+          {
+            echo "### ${ACTION} · scope \`${SCOPE}\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| deployment | \`${DEPLOYMENT}-${ENVIRONMENT_NAME}\` |"
+            echo "| environment | \`${GH_ENVIRONMENT}\` |"
+            echo "| vault | \`${VAULT:-n/a}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── The referee ─────────────────────────────────────────────────────────────
+  # Runs as gha-PLAN, not gha-deploy, and that is the point: the identity that
+  # checks the estate holds Reader and cannot change what it is checking. A
+  # verifier able to fix its own findings is not a verifier.
+  #
+  # `always()` because a run that failed HALFWAY is exactly when you most need to
+  # know what survived. It cannot mask a failure — `needs` already carries the
+  # run job's result into the workflow's own conclusion.
+  #
+  # ── But `always()` alone is wrong, and cost two hours on 2026-09-12 ────────
+  # A run REFUSED by the guards never touched Azure, yet verify ran anyway,
+  # asserted mode=destroyed, and reported `rg-sentinel-dev-cc still exists` —
+  # two red annotations describing a correct state, on top of the one real
+  # error. The operator read the loudest failure first and went looking for a
+  # stuck resource group that was never supposed to be gone.
+  #
+  # A verifier must only assert an outcome that was actually ATTEMPTED. The
+  # guard's output is that distinction: refused (no output) vs attempted-and-
+  # then-whatever-happened. A crash after the guards still verifies, which is
+  # the case `always()` exists for.
+  verify:
+    name: Verify against Azure
+    needs: [oidc-ready, run]
+    if: >-
+      always()
+      && needs.oidc-ready.outputs.ready == 'true'
+      && inputs.action != 'plan'
+      && needs.run.outputs.guards_passed == 'true'
+    runs-on: ubuntu-latest
+    environment: plan
+    defaults:
+      run:
+        working-directory: infra
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Log in to Azure
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify
+        env:
+          ACTION: ${{ inputs.action }}
+          SCOPE: ${{ inputs.scope }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+          RUN_RESULT: ${{ needs.run.result }}
+        run: |
+          mode="applied"
+          if [ "${ACTION}" = "destroy" ]; then mode="destroyed"; fi
+
+          # -- Advisory when the action itself already failed ----------------
+          # Verify still RUNS in that case -- a half-finished apply is exactly
+          # when you need to know what exists -- but it must not add a second
+          # red mark. On 2026-09-13 an `apply - deployment` died inside its
+          # plan having created nothing, and verify then reported
+          #     FAIL  rg-demo1-dev-cc does not exist
+          # as a hard error. That is a consequence presented as a cause, and it
+          # is the louder of the two, so it is the one the operator chases.
+          #
+          # Nothing is masked: `needs` already carries the run job's failure
+          # into the workflow's conclusion, so the workflow is red either way.
+          advisory=""
+          if [ "${RUN_RESULT}" != "success" ]; then
+            echo "the ${ACTION} failed - verifying in advisory mode"
+            advisory="--advisory"
+          fi
+
+          # shellcheck disable=SC2086  # advisory is one optional flag or empty
+          bash ./scripts/verify-estate.sh \
+            --mode "${mode}" \
+            --scope "${SCOPE}" \
+            --deployment "${DEPLOYMENT}" \
+            --environment "${ENVIRONMENT_NAME}" ${advisory}
+
+      - name: Summary
+        if: always()
+        env:
+          ACTION: ${{ inputs.action }}
+          SCOPE: ${{ inputs.scope }}
+        run: |
+          {
+            echo "### Verification"
+            echo ""
+            if [ "${ACTION}" = "destroy" ] && [ "${SCOPE}" = "all" ]; then
+              echo "Asserted: the subscription holds **only** \`rg-sentinel-bootstrap\`"
+              echo "(Terraform state + the three OIDC identities) and \`NetworkWatcherRG\`."
+              echo ""
+              echo "Both are \$0 — managed identities are free, Network Watcher is free and"
+              echo "Azure recreates it regardless, and the state blobs are a few KB."
+              echo ""
+              echo "**If this job is green, the estate costs nothing.**"
+            fi
+            echo ""
+            echo "See the job log for the per-check breakdown."
+          } >> "$GITHUB_STEP_SUMMARY"

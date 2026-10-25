@@ -1,0 +1,450 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Validate everywhere, plan where a credential exists.
+# architecture/infra.md §7.1 (superseded — see decisions.md 2026-08-24)
+#
+# ── The split is the point ───────────────────────────────────────────────────
+# Federated credentials exist for exactly two subjects, and Azure matches a
+# subject as an exact, case-sensitive string with no wildcard form. So the jobs
+# split by what they actually need:
+#
+#   run-validate  no Azure, no state, no variable values  → EVERY push
+#   run-plan      a real credential + remote state        → PRs and dispatch
+#
+# `terraform validate` needs no variable values and `-backend=false` needs no
+# state, which is what lets run-validate run on a branch that has no credential
+# at all — including before the bootstrap has happened.
+#
+# ── run-plan uses gha-plan, which can change NOTHING ─────────────────────────
+# Reader on the subscription, Storage Blob Data READER on state. That is why the
+# plan runs `-lock=false`: taking a state lock is a blob WRITE, and granting it
+# would have left the read-only identity able to corrupt state. The trade is
+# stated rather than hidden — an unlocked plan racing an apply can go stale.
+#
+# Lives in the Sentinel monorepo: jobs run in infra/ (defaults.working-directory);
+# the OIDC subjects are repo:Keshav0375/Sentinel:environment:<env>; `oidc-ready`
+# keeps every Azure job skipped until INFRA_OIDC_READY is true.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "Sentinel Infra — Validate & Plan"
+
+# This workflow answers to three events, so the title has to say which one it
+# was: a dispatched plan of `demo1-dev` and a PR validation are different
+# questions and used to carry the same name in the Actions list. Each branch
+# names the thing that actually identifies the run.
+#
+# Push runs name the BRANCH, not the commit. `github.event.head_commit.message`
+# is the full commit body and expressions have no `split`, so it rendered a
+# twenty-line message as a run title. The subject is already in the run header.
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+  && format('Sentinel Infra - plan for {0}', inputs.layer == 'platform' && 'platform'
+  || format('deployment {0}-{1}', inputs.deployment, inputs.environment_name))
+  || github.event_name == 'pull_request'
+  && format('Sentinel Infra - validate for PR #{0}', github.event.number)
+  || format('Sentinel Infra - validate for {0}', github.ref_name) }}
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'infra/**'
+      - '.github/workflows/infra_*.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/infra_*.yml'
+  workflow_dispatch:
+    inputs:
+      layer:
+        description: 'Which layer to plan.'
+        type: choice
+        required: true
+        default: platform
+        options: [platform, deployment]
+      deployment:
+        description: 'Deployment name (deployment layer only). 2-8 lowercase alphanumeric.'
+        type: string
+        required: false
+        default: sentinel
+      environment_name:
+        description: 'Environment within the deployment. The platform layer uses `plat`.'
+        type: string
+        required: false
+        default: plat
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-dry-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: "1.15.8"
+
+jobs:
+  # Until the user re-runs infra/scripts/bootstrap-identities.sh for the repo:Keshav0375/Sentinel subjects
+  # and sets INFRA_OIDC_READY, Azure jobs skip green.
+  oidc-ready:
+    name: Check infra OIDC readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        name: Check INFRA_OIDC_READY
+        env:
+          INFRA_OIDC_READY: ${{ vars.INFRA_OIDC_READY }}
+        run: |
+          set -euo pipefail
+          if [ "${INFRA_OIDC_READY:-}" != "true" ]; then
+            msg="Infra OIDC not ready — ${GITHUB_WORKFLOW:-this workflow}: Azure jobs skipped."
+            msg="$msg Re-run infra/scripts/bootstrap-identities.sh, then set repo variable INFRA_OIDC_READY=true."
+            msg="$msg See sentinel-brain decisions 2026-10-25 (monorepo)."
+            echo "::notice::$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+  # ── Preflight ────────────────────────────────────────────────────────────
+  # A plan cannot prove an apply will succeed. This covers what it structurally
+  # cannot see — quota, SKU availability, provider registration, whether the
+  # database is awake. Every check here maps to a failure this project actually
+  # hit.
+  #
+  # Runs under gha-plan, so it gets only the checks Reader can perform. The
+  # name-availability checks are POST */action and live in the deploy workflow
+  # instead; widening this identity to satisfy a checklist was rejected.
+  run-preflight:
+    name: Run Preflight
+    runs-on: ubuntu-latest
+    needs: oidc-ready
+    if: needs.oidc-ready.outputs.ready == 'true'
+    defaults:
+      run:
+        working-directory: infra
+    environment: plan
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Log in to Azure
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Preflight
+        env:
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+        # Invoked through `bash` rather than executed directly. The exec bit does
+        # not survive a Windows checkout — `chmod +x` there is a no-op as far as
+        # git is concerned, and the failure is `Permission denied` in CI only.
+        # The mode bit IS set in the index too; this is the belt to that braces.
+        run: bash ./scripts/preflight.sh --mode plan
+
+  run-validate:
+    name: Run Validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3.1.2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+      # -backend=false is what makes this job credential-free: providers and
+      # modules resolve without ever touching the state storage account, which is
+      # the only thing here that needs an identity.
+      - name: Initialize (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        run: terraform validate -no-color
+
+      # The naming module decides every resource name in the estate, and is the
+      # one part testable properly — pure computation, no provider, no state.
+      - name: Test the naming module
+        run: |
+          terraform -chdir=modules/naming init -backend=false -input=false -no-color
+          terraform -chdir=modules/naming test -no-color
+
+  run-plan:
+    name: Run Plan
+    needs: [oidc-ready, run-validate, run-preflight]
+    if: >-
+      needs.oidc-ready.outputs.ready == 'true'
+      && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+
+    # Declaring an environment REWRITES the OIDC subject to
+    # `repo:<owner>/<repo>:environment:plan`, replacing the branch form entirely.
+    # That is deliberate twice over: it matches gha-plan's federated credential,
+    # and it makes a dispatch work from ANY branch — a branch subject would have
+    # no credential.
+    environment: plan
+
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    steps:
+      # -- Redact the administrator's UPN from this public log ---------------
+      # `vars.*` are not masked. `TF_PG_ADMIN_PRINCIPAL_NAME: <upn>` was
+      # therefore printed in the env block of every run, in a PUBLIC repository.
+      # It is not a credential and cannot authenticate anything -- but it is a
+      # real person's university account published beside the tenant it
+      # administers, which is the pair that targets password-spray and consent
+      # phishing. `add-mask` redacts it for the rest of the job, so this costs
+      # no migration of the variable to a secret.
+      #
+      # First step in the job: a mask only applies to output produced AFTER it
+      # is registered, and the runner prints a step's env block as that step
+      # starts.
+      - name: Mask the administrator UPN
+        working-directory: .
+        env:
+          UPN: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
+        run: '[ -z "${UPN}" ] || echo "::add-mask::${UPN}"'
+
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3.1.2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # The kubernetes provider authenticates by Entra token rather than a
+      # downloaded admin credential, which needs kubelogin on PATH. Runners do
+      # not ship it.
+      - name: Set up kubelogin
+        uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820  # v1.2
+        with:
+          kubelogin-version: 'v0.1.3'
+
+      - name: Log in to Azure
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # A stopped flexible-server ERRORS the plan with `400 ServerStoppedError`:
+      # the provider must refresh the administrators, database and
+      # azure.extensions config, and none of that reads while it is down.
+      #
+      # This job CANNOT start it, and that is by design — gha-plan holds no write
+      # action anywhere. So it checks, and fails with an instruction instead of
+      # letting the plan die four resources deep in a message about
+      # administrators. Starting it is the Pause/Resume workflow's job.
+      - name: Check the database is running
+        continue-on-error: true
+        run: |
+          server="$(az postgres flexible-server list --query "[0].name" -o tsv)"
+          if [ -z "${server}" ]; then
+            echo "no flexible-server found — platform not applied yet, plan will show a create"
+            exit 0
+          fi
+          rg="$(az postgres flexible-server list --query "[0].resourceGroup" -o tsv)"
+          state="$(az postgres flexible-server show -n "${server}" -g "${rg}" --query state -o tsv)"
+          echo "postgres ${server}: ${state}"
+          if [ "${state}" != "Ready" ]; then
+            echo "::warning::${server} is ${state}; the plan will fail with 400 ServerStoppedError."
+            echo "::warning::Start it via the Pause / Resume workflow (action: resume) and re-run."
+          fi
+
+      - name: Initialize
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+        # azure/login authenticates the `az` CLI. It does NOT configure the
+        # azurerm provider or its backend — those read ARM_* from the
+        # environment, which is why every terraform step sets them.
+        run: terraform init -input=false
+
+      - name: Select workspace
+        id: workspace
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          TF_LAYER: ${{ inputs.layer || 'platform' }}
+          TF_DEPLOYMENT: ${{ inputs.deployment || 'sentinel' }}
+          TF_ENVIRONMENT: ${{ inputs.environment_name || 'plat' }}
+        run: |
+          if [ "${TF_LAYER}" = "platform" ]; then
+            ws=platform
+          else
+            ws="${TF_DEPLOYMENT}-${TF_ENVIRONMENT}"
+          fi
+
+          # -- `workspace new` is a blob WRITE, and this identity cannot -------
+          # It creates the state blob and takes a lock. gha-plan holds Storage
+          # Blob Data READER, deliberately -- it is the identity a pull request
+          # can trigger. So `|| terraform workspace new` could never work here;
+          # it only ever succeeded because the workspace already existed.
+          #
+          # A missing workspace is also the NORMAL state, not an error. This
+          # estate is destroyed to zero between demos and lifecycle.sh removes
+          # the workspace as part of reaching zero. On 2026-09-12 a full destroy
+          # did exactly that, and every PR plan afterwards failed with
+          # `403 AuthorizationPermissionMismatch` naming a permission nobody
+          # intended it to have.
+          #
+          # `default` always exists and holds nothing, so planning there needs no
+          # write and still answers the question a PR plan exists to answer:
+          # against an empty estate, what does this configuration build? Every
+          # resource reads as "to create", which is the truth.
+          if terraform workspace select "${ws}" 2>/dev/null; then
+            echo "workspace: ${ws}"
+            echo "empty_state=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::workspace '${ws}' does not exist - nothing is deployed."
+            echo "::notice::Planning against an empty state; every resource reads as 'to create'."
+            terraform workspace select default
+            echo "workspace: default (no ${ws} state)"
+            echo "empty_state=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Values travel through `env:` rather than being interpolated into the
+      # command line: `${{ }}` spliced into a `run:` block is the standard
+      # Actions script-injection surface.
+      #
+      # ── Why -refresh=false, and why that is the SAFE choice ─────────────
+      # The azurerm provider refreshes ACR and AKS by calling
+      #   Microsoft.ContainerRegistry/registries/listCredentials/action
+      #   Microsoft.ContainerService/managedClusters/listClusterUserCredential/action
+      # because `admin_password` and `kube_config` are resource attributes.
+      # Reader grants `*/read` and NO action at all, so a read-only identity
+      # structurally cannot refresh those two types. Found live 2026-08-25.
+      #
+      # The obvious fix — grant gha-plan those two actions — was rejected. Both
+      # return SECRETS: the registry admin password and a cluster admin
+      # kubeconfig. Handing those to the one identity a pull request can trigger
+      # is a much worse trade than anything it buys.
+      #
+      # So the PR plan compares configuration against RECORDED STATE rather than
+      # against live Azure. Stated honestly: it will not show drift someone
+      # introduced through the portal. It still answers the question a PR plan
+      # exists to answer — what does this change do — and the apply job runs
+      # under gha-deploy with a full refresh, so drift surfaces there.
+      #
+      # -lock=false for the same root cause: a state lock is a blob WRITE.
+      - name: Plan
+        id: plan
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          TF_LAYER: ${{ inputs.layer || 'platform' }}
+          TF_DEPLOYMENT: ${{ inputs.deployment || 'sentinel' }}
+          TF_ENVIRONMENT: ${{ inputs.environment_name || 'plat' }}
+          TF_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          TF_LOCATION: ${{ vars.AZURE_LOCATION }}
+          TF_PG_ADMIN_OBJECT_ID: ${{ vars.PG_ADMIN_OBJECT_ID }}
+          TF_PG_ADMIN_PRINCIPAL_NAME: ${{ vars.PG_ADMIN_PRINCIPAL_NAME }}
+          TF_KV_ADMIN_OBJECT_ID: ${{ vars.KV_ADMIN_OBJECT_ID }}
+          TF_GHA_APP_OBJECT_ID: ${{ vars.GHA_APP_OBJECT_ID }}
+        run: |
+          terraform plan -no-color -input=false -lock=false -refresh=false \
+            -var="layer=${TF_LAYER}" \
+            -var="deployment=${TF_DEPLOYMENT}" \
+            -var="environment=${TF_ENVIRONMENT}" \
+            -var="subscription_id=${TF_SUBSCRIPTION_ID}" \
+            -var="location=${TF_LOCATION}" \
+            -var="pg_admin_object_id=${TF_PG_ADMIN_OBJECT_ID}" \
+            -var="pg_admin_principal_name=${TF_PG_ADMIN_PRINCIPAL_NAME}" \
+            -var="kv_admin_object_id=${TF_KV_ADMIN_OBJECT_ID}" \
+            -var="gha_app_object_id=${TF_GHA_APP_OBJECT_ID}"
+
+      # ── State the teardown contract next to the plan ─────────────────────
+      # A plan is a promise about what apply will build. Nothing here previously
+      # said what DESTROY would later be held to, so the two halves of the
+      # lifecycle were reviewed against different standards. These are the exact
+      # assertions scripts/verify-estate.sh makes after a real teardown — printed
+      # here so a reviewer sees the contract at review time rather than
+      # discovering it in a red job.
+      - name: Print the teardown contract
+        if: always()
+        env:
+          TF_LAYER: ${{ inputs.layer || 'platform' }}
+          TF_DEPLOYMENT: ${{ inputs.deployment || 'sentinel' }}
+          TF_ENVIRONMENT: ${{ inputs.environment_name || 'plat' }}
+          EMPTY_STATE: ${{ steps.workspace.outputs.empty_state }}
+        run: |
+          {
+            if [ "${EMPTY_STATE}" = "true" ]; then
+              echo "> **Planned against an empty state.** The target workspace does not"
+              echo "> exist - the estate is currently destroyed - so every resource above"
+              echo "> reads as *to create*. That is the plan for building it from zero,"
+              echo "> not a diff against something running."
+              echo ""
+            fi
+            echo "### Teardown contract"
+            echo ""
+            echo "After \`destroy\`, \`verify-estate.sh\` asserts against **Azure** — not"
+            echo "against Terraform state, which is what a destroy has just finished"
+            echo "editing and therefore cannot be a witness for."
+            echo ""
+            if [ "${TF_LAYER}" = "platform" ]; then
+              echo "- no AKS cluster, Postgres server, or registry named \`*-sentinel-plat*\`"
+              echo "- \`rg-sentinel-plat-cc\` and its \`MC_\` node group are gone"
+            else
+              echo "- \`rg-${TF_DEPLOYMENT}-${TF_ENVIRONMENT}-cc\` is gone"
+              echo "- \`rg-${TF_DEPLOYMENT}-${TF_ENVIRONMENT}-func-cc\` is gone"
+              echo "- no \`${TF_DEPLOYMENT}_${TF_ENVIRONMENT}\` database on the SHARED Postgres server"
+            fi
+            echo "- no soft-deleted Key Vault holding a globally unique name"
+            echo "- the workspace holds zero resources and its state blob is deleted"
+            echo ""
+            echo "With scope \`all\`, one assertion covers everything: the subscription"
+            echo "holds only \`rg-sentinel-bootstrap\` and \`NetworkWatcherRG\`, both \$0."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment plan on the pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        env:
+          PLAN_STDOUT: ${{ steps.plan.outputs.stdout }}
+        with:
+          script: |
+            // GitHub rejects an issue comment over 65536 characters, and a plan
+            // touching every module clears that easily. Truncate and SAY SO — a
+            // silently cut plan is worse than a short one.
+            const LIMIT = 60000;
+            const raw = process.env.PLAN_STDOUT || '(no plan output)';
+            const body = raw.length > LIMIT
+              ? raw.slice(0, LIMIT) + '\n\n... truncated at ' + LIMIT + ' characters. Full plan is in the job log.'
+              : raw;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '### Terraform plan\n\n```terraform\n' + body + '\n```',
+            });

@@ -1,0 +1,31 @@
+# Shell scripts MUST be LF, in the working tree as well as in git.
+#
+# A .sh file with CRLF fails on any Linux runner with
+#   bad interpreter: /usr/bin/env bash^M: no such file or directory
+# and CI runs on ubuntu-latest. Without this, a Windows checkout produces scripts
+# that work locally in Git Bash (which tolerates CRLF) and break in CI — and
+# shellcheck cannot lint them at all, so the gate goes blind on the two files that
+# mutate live Azure.
+*.sh text eol=lf
+
+# Terraform and docs: keep the repo byte-identical across platforms so diffs are
+# about content, not line endings.
+*.tf      text eol=lf
+*.tfvars  text eol=lf
+*.hcl     text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+
+# Dockerfiles are read by the Linux docker daemon; CRLF in a RUN line breaks
+# the shell invocation exactly the way it breaks a .sh file.
+*.Dockerfile text eol=lf
+Dockerfile   text eol=lf
+
+# Function-app sources. Uncovered until 2026-08-24, which meant a Windows checkout
+# produced CRLF and a Linux CI checkout produced LF -- so archive_file hashed two
+# different zips for byte-identical code, and local apply and CI apply would each
+# redeploy what the other had just deployed, forever.
+*.py   text eol=lf
+*.json text eol=lf
+*.txt  text eol=lf

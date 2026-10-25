@@ -41,6 +41,7 @@ PATHS = [
     "Dockerfile",
     "azure/**",
     ".github/workflows/**",
+    "!.github/workflows/infra_*.yml",
     ".github/actions/**",
     "alembic/**",
     "alembic.ini",
