@@ -24,7 +24,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci_backend_deployment.yml"
 ACTIONS_DIR = REPO_ROOT / ".github" / "actions"
 
-JOBS = ("run-quality", "build-and-push", "deploy-to-aks", "run-tests", "promote-or-rollback")
+JOBS = (
+    "preflight",
+    "run-quality",
+    "build-and-push",
+    "deploy-to-aks",
+    "run-tests",
+    "promote-or-rollback",
+)
 
 PATHS = [
     "src/**",
@@ -98,6 +105,8 @@ BACKEND_UP_WITH = {
     "pg-database": "${{ vars.PG_DATABASE }}",
     "pg-user": "${{ vars.PG_USER_BACKEND }}",
 }
+
+PREFLIGHT_GATE = "needs.preflight.outputs.configured == 'true'"
 
 NEW_IMAGE = "acr0.azurecr.io/sentinel-backend:sha-abcdef0"
 
@@ -202,9 +211,13 @@ def test_concurrency_serialises() -> None:
 def test_jobs_and_needs_chain() -> None:
     jobs = _doc()["jobs"]
     assert list(jobs) == list(JOBS)
-    assert jobs["build-and-push"]["needs"] == "run-quality"
-    assert jobs["deploy-to-aks"]["needs"] == "build-and-push"
-    assert jobs["run-tests"]["needs"] == "deploy-to-aks"
+    assert "needs" not in jobs["preflight"]
+    assert jobs["run-quality"]["needs"] == "preflight"
+    assert jobs["build-and-push"]["needs"] == ["preflight", "run-quality"]
+    assert jobs["deploy-to-aks"]["needs"] == ["preflight", "build-and-push"]
+    assert jobs["run-tests"]["needs"] == ["preflight", "deploy-to-aks"]
+    for name in ("run-quality", "build-and-push", "deploy-to-aks", "run-tests"):
+        assert jobs[name]["if"] == PREFLIGHT_GATE, name
     assert set(jobs["promote-or-rollback"]["needs"]) == set(JOBS) - {"promote-or-rollback"}
 
 
@@ -223,11 +236,16 @@ def test_login_jobs_use_environment_and_oidc() -> None:
         if logs_in:
             assert job["environment"] == "sentinel-dev", name
             assert job["permissions"] == {"id-token": "write", "contents": "read"}, name
+        elif name == "preflight":
+            # Reads the (environment-level) variables only: no token, no secrets.
+            no_login.append(name)
+            assert job["environment"] == "sentinel-dev", name
+            assert job["permissions"] == {}, name
         else:
             no_login.append(name)
             assert "environment" not in job, name
             assert "permissions" not in job, name
-    assert no_login == ["run-quality"]
+    assert no_login == ["preflight", "run-quality"]
 
 
 def test_azure_login_inputs() -> None:
@@ -332,7 +350,7 @@ def test_run_tests_smoke_contract() -> None:
 
 def test_promote_if_always() -> None:
     job = _job("promote-or-rollback")
-    assert job["if"] == "always()"
+    assert job["if"] == f"always() && {PREFLIGHT_GATE}"
     assert "mode == 'promote'" in _step(job, "stable")["if"]
     assert "mode == 'promote'" in _step(job, "cleanup")["if"]
     stable = _step(job, "stable")["run"]
