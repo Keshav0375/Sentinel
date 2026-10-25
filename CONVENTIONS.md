@@ -2,9 +2,9 @@
 
 Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](CLAUDE.md).
 
-> Where a Phase-2 `ARCHITECTURE.md` differs from anything here (e.g. asyncpg + pgvector
-> replacing aiosqlite + numpy, scenario branches replacing `data/scenarios/`), **the
-> architecture wins**. This file is the default; the architecture is binding.
+> Where a Phase-2 `ARCHITECTURE.md` differs from anything here (e.g. asyncpg + pgvector, the
+> scenario branches of Sentinel-deployment), **the architecture wins**. This file is the default;
+> the architecture is binding.
 
 ## Tech Stack (do not change without asking)
 
@@ -30,7 +30,7 @@ Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](
 - f-strings over `.format()` or `%`
 
 ### Architecture patterns
-- **Dependency injection** — memory clients, config, generators are injected, never singletons
+- **Dependency injection** — memory clients, config are injected, never singletons
 - **Separation of concerns** — models know nothing of agents; tools nothing of API; agents nothing of storage
 - **Protocol/ABC for abstractions** — `MemoryStore` protocol in `memory/base.py`, swappable impls
 - **No business logic in the API layer** — routes call services/orchestrator, nothing else

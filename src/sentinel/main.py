@@ -3,9 +3,6 @@
 Run with::
 
     uvicorn sentinel.main:app --reload
-
-The app must be launched from the project root so that the ``data`` package
-(scenario files) is importable.
 """
 
 from __future__ import annotations
@@ -25,7 +22,6 @@ from sentinel.agents.orchestrator import ORCHESTRATOR, PipelineDeps, run_pipelin
 from sentinel.api.auth import configure_auth, require_incident_write
 from sentinel.api.config_view import make_config_router
 from sentinel.api.eval_report import make_eval_report_router
-from sentinel.api.events import make_events_router
 from sentinel.api.generate import make_generate_router
 from sentinel.api.health import database_configured, db_readiness, make_health_router
 from sentinel.api.incidents import make_incidents_router
@@ -70,7 +66,6 @@ DEV_OPEN_ROUTES: Final[tuple[str, ...]] = (
     "GET /api/config",
     "GET /api/trajectories",
     "GET /api/eval-report",
-    "GET /events/{incident_id}",
 )
 
 
@@ -251,7 +246,7 @@ def _wire_app(
     # ── LLM + SDK defaults ────────────────────────────────────────────────────
     apply_sdk_defaults(settings)
 
-    # ── Event bus (dashboard SSE) ─────────────────────────────────────────────
+    # ── Event bus ─────────────────────────────────────────────────────────────
     event_bus = EventBus()
 
     # ── Trajectory tracing ────────────────────────────────────────────────────
@@ -306,7 +301,6 @@ def _wire_app(
         dependencies=protected,
     )
     app.include_router(make_dashboard_router(), dependencies=dashboard)
-    app.include_router(make_events_router(event_bus), dependencies=dashboard)
     app.include_router(make_scenarios_router(), dependencies=dashboard)
     app.include_router(make_eval_report_router(), dependencies=dashboard)
     app.include_router(make_config_router(settings), dependencies=dashboard)

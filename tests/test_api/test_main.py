@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -93,14 +92,13 @@ def test_module_level_app_is_fastapi() -> None:
 
 
 @pytest.fixture
-def lifespan_env(pg_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
-    """Point the real lifespan at the test database and a throwaway SQLite file.
+def lifespan_env(pg_dsn: str, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point the real lifespan at the test database.
 
     Global side effects of a full startup (SDK default client, trace processors) are
     stubbed so they cannot leak into other tests.
     """
     monkeypatch.setenv("DATABASE_URL", pg_dsn)
-    monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
     monkeypatch.setenv("SENTINEL_DB_POOL_MIN", "1")
     monkeypatch.setenv("SENTINEL_DB_POOL_MAX", "2")
     monkeypatch.setattr(main, "apply_sdk_defaults", MagicMock())

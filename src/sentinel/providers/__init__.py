@@ -78,7 +78,7 @@ def apply_sdk_defaults(settings: Settings) -> None:
 
     Must be called once at application startup, before any agents are built.
     Centralises the two SDK-global calls that were previously scattered across
-    main.py, run_scenario.py, and eval/runner.py.
+    main.py and eval/runner.py.
 
     - Forces chat-completions API mode (the default 'responses' API is OpenAI-only;
       agents run through LiteLLM on Anthropic too).

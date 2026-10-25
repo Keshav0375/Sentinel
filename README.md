@@ -186,12 +186,12 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 
 - **Multi-agent pipeline** — 5 pipeline agents (Triage, Analysis, Reflexion, Resolution, Reverification) run by a Python orchestrator that enforces every cap in code; a sixth, the PR content generator, writes the revert PR for `/generate/pr-content`
 - **HITL safety gate** — the backend only drafts a rollback spec or an escalation; GitHub Actions opens the revert PR and a human merges or closes it on GitHub. No agent has a tool that acts on the world
-- **Episodic memory** — past incidents embedded and stored in SQLite; similar incidents surface automatically during triage
-- **Semantic memory** — service map, dependency graph, and runbooks loaded from seed data
-- **Live incident dashboard** — real-time SSE stream of agent activity at `http://localhost:8000/`
+- **Episodic memory** — past incidents embedded and stored in Postgres + pgvector; similar incidents surface automatically during triage
+- **Semantic memory** — service map, dependency graph, and runbooks held in Postgres
+- **Scenario catalog dashboard** — the 30 Sentinel-deployment scenario branches, read-only, at `http://localhost:8000/`
 - **Trajectory eval** — LLM-as-judge scores every incident across 6 dimensions (0–5), with a Markdown and JSON report
 - **Eval results dashboard** — browse per-scenario scores at `http://localhost:8000/eval`
-- **10 synthetic scenarios** — 5 failure classes (bad deploy, DB pool, downstream outage, memory leak, config regression)
+- **30 scenario branches** — 10 each of case i (healthy or runtime fault), ii (pipeline failure) and iii (post-deploy fault), in Sentinel-deployment
 
 ---
 
@@ -201,7 +201,7 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 
 - Python 3.12+
 - An Anthropic and/or OpenAI API key (not needed to boot; an incident without one escalates)
-- Docker + docker-compose (optional but recommended)
+- Docker (optional: a local Postgres + pgvector for memory and the DB tests)
 
 ### 1. Clone and configure
 
@@ -212,22 +212,19 @@ cp .env.example .env
 # Edit .env — add ANTHROPIC_API_KEY and OPENAI_API_KEY
 ```
 
-### 2a. Run with Docker
+### 2a. Local Postgres (optional)
 
 ```bash
-docker-compose up --build
+docker run -d --name sentinel-pg -e POSTGRES_PASSWORD=test -p 55432:5432 pgvector/pgvector:pg16
 ```
 
-Dashboard: [http://localhost:8000](http://localhost:8000)
+Set `DATABASE_URL=postgresql://postgres:test@localhost:55432/postgres` in `.env` and run `poetry run alembic upgrade head`. Without `DATABASE_URL` the app still boots; memory reports unavailable.
 
-### 2b. Run without Docker
+### 2b. Run
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-python -m data.seed                # seed service map + runbooks
-uvicorn sentinel.main:app --reload
+poetry install
+poetry run sentinel serve
 ```
 
 Dashboard: [http://localhost:8000](http://localhost:8000)
@@ -244,16 +241,9 @@ SENTINEL_PRIMARY_PROVIDER=openai
 
 The eval judge always runs on the provider the agents do not use.
 
-### 4. Fire a scenario
+### 4. Scenarios
 
-**From the dashboard** — select a scenario from the dropdown and click ⚡ Fire Scenario.
-
-**From the CLI**:
-
-```bash
-python scripts/run_scenario.py bad_deploy_01
-python scripts/run_scenario.py --list   # see all 10 scenarios
-```
+Scenarios are the 30 branches of Sentinel-deployment (`scenarios/branches.yaml`, vendored at `src/sentinel/catalog/branches.yaml`). A human merges a scenario branch's PR; Datadog → bridge → `repository_dispatch` → `ci_incident_response.yml` runs the pipeline. `GET /api/scenarios` (bearer) lists the catalog; the dashboard shows it read-only.
 
 ### 5. Run the eval suite
 
@@ -290,15 +280,14 @@ With `DATABASE_URL` set, each judged score is also stored on its incident (`inci
 | Agent framework | [openai-agents](https://github.com/openai/openai-agents-python) (Agents SDK) |
 | LLM | LiteLLM — Anthropic (default) and OpenAI, a fixed model pair per agent role with automatic fallback (§4.7). |
 | API layer | FastAPI + uvicorn |
-| Memory — episodic | SQLite via aiosqlite + cosine similarity |
-| Memory — semantic | SQLite (service map, runbooks) |
+| Memory — episodic | PostgreSQL + pgvector (asyncpg) |
+| Memory — semantic | PostgreSQL (`services` table) |
 | Embeddings | sentence-transformers `all-MiniLM-L6-v2` (local, 384 dims, zero cost) |
-| Real-time | Server-Sent Events (`EventSource` API) |
 | Models / validation | Pydantic v2 |
 | Config | pydantic-settings |
 | Logging | structlog (JSON) |
 | HTTP client | httpx |
-| Containerisation | Docker + docker-compose |
+| Containerisation | Docker |
 | Linting | ruff |
 | Type checking | pyright |
 | Tests | pytest + pytest-asyncio |
@@ -331,20 +320,15 @@ sentinel/
 ├── src/sentinel/
 │   ├── agents/          # 6 LLM agents + the Python orchestrator
 │   ├── tools/           # Tool implementations (fetch_logs, prepare_rollback_spec, …)
-│   ├── memory/          # Episodic (SQLite + embeddings), semantic, short-term
+│   ├── memory/          # Episodic (Postgres + pgvector), semantic, short-term
 │   ├── eval/            # Rubric, LLM-as-judge, batch runner, report generator
-│   ├── api/             # FastAPI routes (webhooks, SSE, incidents, scenarios)
+│   ├── api/             # FastAPI routes (webhooks, incidents, generate, scenarios)
 │   ├── infra/           # DB, logging, tracing, event bus, dashboard emitter
 │   ├── models/          # Pydantic domain models
-│   ├── generator/       # Synthetic alert + log + deploy data
+│   ├── catalog/         # branches.yaml: the vendored scenario catalog
 │   └── dashboard/       # index.html (live dashboard) + eval.html
-├── data/
-│   ├── scenarios/       # 10 JSON scenario files
-│   └── services/        # service_map.json, dependency_graph.json, runbooks.json
 ├── scripts/
-│   ├── run_scenario.py  # Fire a single scenario from CLI
-│   ├── run_eval.py      # Batch eval across all scenarios
-│   └── demo.py          # Interactive demo runner (coming soon)
+│   ├── run_eval.py      # Score LangFuse scenario runs against branches.yaml
 ├── tests/               # ~1 000 tests across all layers
 └── reports/             # Trajectory JSON, eval_report.json/md
 ```
@@ -357,7 +341,7 @@ sentinel/
 
 **Why HITL at the tool level, not the prompt level?** There is no "execute rollback" tool — only `prepare_rollback_spec` and `format_escalation`, which draft and return. An agent can't bypass the gate by ignoring a prompt instruction: it has no tool that acts, and the revert PR a human merges on GitHub is the only path to a rollback.
 
-**Why SQLite for episodic memory?** Zero infrastructure cost for the MVP. The embedding + cosine similarity approach works well at 10–100 incidents. Phase 2 swaps to Cosmos DB with a vector index for scale.
+**Why Postgres + pgvector for episodic memory?** One database holds services, deployments and incidents, and pgvector's `<=>` replaces in-process cosine similarity (backend.md §5, §13.2).
 
 **Why a separate judge model?** Using a different model family for evaluation avoids self-grading bias. The agents run on `llama-3.3-70b-versatile`; the judge runs on `llama-3.1-8b-instant`. In production, you'd use a different provider entirely.
 

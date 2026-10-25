@@ -30,6 +30,3 @@ review Phase-2 work; `/implement-phase` runs from there and edits this repo from
 - **Green means green** — `python scripts/quality_gate.py --repo backend` reporting
   `INCONCLUSIVE`, or `PASS` with skipped checks, is not a pass. Say what did not run.
 
-> `data/`, `src/sentinel/generator/`, `db.py` and the Phase-1 scripts are **legacy Phase-1
-> code**, still here only so Phase 1 keeps working until Phase 2 replaces it. Backend task 9.1
-> deletes them. Don't build on them.

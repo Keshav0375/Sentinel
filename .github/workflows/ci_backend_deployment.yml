@@ -314,7 +314,6 @@ jobs:
         name: Pytest (unit set)
         env:
           GROQ_API_KEY: "fake-key-for-ci"
-          SENTINEL_DB_PATH: ":memory:"
           TEST_DATABASE_URL: "postgresql://postgres:test@localhost:5432/sentinel"
         run: |
           set -euo pipefail
@@ -325,7 +324,6 @@ jobs:
         name: Pytest (integration set)
         env:
           GROQ_API_KEY: "fake-key-for-ci"
-          SENTINEL_DB_PATH: ":memory:"
           TEST_DATABASE_URL: "postgresql://postgres:test@localhost:5432/sentinel"
         run: |
           set -euo pipefail

@@ -11,7 +11,6 @@ import asyncio
 import re
 import time
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -59,7 +58,6 @@ PROTECTED_REQUESTS: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/scenarios", None),
     ("GET", "/api/trajectories", None),
     ("GET", "/api/eval-report", None),
-    ("GET", "/events/inc-x", None),
     ("GET", "/incidents", None),
     ("GET", "/incidents/inc-x", None),
     ("GET", "/incidents/inc-x/trajectory", None),
@@ -75,7 +73,6 @@ EXPECTED_DEV_OPEN = {
     "GET /api/config",
     "GET /api/trajectories",
     "GET /api/eval-report",
-    "GET /events/{incident_id}",
 }
 
 # ── Helpers / fixtures ────────────────────────────────────────────────────────
@@ -133,12 +130,11 @@ def _auth(token: str) -> dict[str, str]:
 
 
 @pytest.fixture(autouse=True)
-def boot_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[dict[str, MagicMock]]:
+def boot_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, MagicMock]]:
     """Real lifespan with the embedding model, trace processors, SDK defaults and Azure stubbed."""
     monkeypatch.setattr(main, "EmbeddingClient", MagicMock())
     monkeypatch.setattr(main, "install_trace_processors", MagicMock())
     monkeypatch.setattr(main, "apply_sdk_defaults", MagicMock())
-    monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
     azure = {"credential": MagicMock(), "secret_client": MagicMock()}
     monkeypatch.setattr(workload_identity, "DefaultAzureCredential", azure["credential"])
     monkeypatch.setattr(workload_identity, "SecretClient", azure["secret_client"])
@@ -262,7 +258,7 @@ def test_dev_flag_logs_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_dashboard_js_uses_only_dev_open_routes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every URL the dashboard JS calls is in the dev-open set, except the protected webhook."""
+    """Every URL the dashboard JS calls is a dev-open GET; it POSTs nothing."""
     index_html = main._DASHBOARD_HTML.read_text(encoding="utf-8")
     eval_html = main._EVAL_HTML.read_text(encoding="utf-8")
     gets: set[str] = set()
@@ -273,33 +269,39 @@ def test_dashboard_js_uses_only_dev_open_routes(monkeypatch: pytest.MonkeyPatch)
                 posts.add(url)
             else:
                 gets.add(f"GET {url}")
-        if re.findall(r"new EventSource\(`(/events/)", html):
-            gets.add("GET /events/{incident_id}")
     assert gets == {
         "GET /api/scenarios",
         "GET /api/config",
         "GET /api/trajectories",
         "GET /api/eval-report",
-        "GET /events/{incident_id}",
     }
     assert gets <= EXPECTED_DEV_OPEN
-    assert posts == {"/webhooks/incident"}
+    assert posts == set()
+    assert "EventSource" not in index_html
+    assert "EventSource" not in eval_html
 
     monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")
     app = main.create_app()
     with TestClient(app):
         assert _route_auth(app)["POST /webhooks/incident"] is True
-    assert "SENTINEL_DEV_OPEN_DASHBOARD" in index_html
 
 
-def test_no_azure_or_sqlite_at_boot_without_config(
-    boot_env: dict[str, MagicMock], tmp_path: Path
-) -> None:
+def test_no_azure_at_boot_without_config(boot_env: dict[str, MagicMock]) -> None:
     with TestClient(main.create_app()) as client:
         assert client.get("/health").status_code == 200
     assert boot_env["credential"].call_count == 0
     assert boot_env["secret_client"].call_count == 0
-    assert not (tmp_path / "sentinel.db").exists()
+
+
+def test_no_sse_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No /events route; the dev flag is on, so the 404 cannot be an auth response."""
+    monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")
+    app = main.create_app()
+    with TestClient(app) as client:
+        routes = _route_auth(app)
+        assert "GET /api/scenarios" in routes  # the walk sees the mounted routers
+        assert not [r for r in routes if r.split(" ", 1)[1].startswith("/events")]
+        assert client.get("/events/inc-x").status_code == 404
 
 
 # ── Startup order, Key Vault and PG* wiring ───────────────────────────────────
