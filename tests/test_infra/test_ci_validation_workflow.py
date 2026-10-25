@@ -5,6 +5,7 @@ Backend 8.1; decisions 2026-10-24.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -228,6 +229,33 @@ def test_guard_passes_refs_via_env() -> None:
     (step,) = _steps(job)
     assert step["env"] == {"BASE": "${{ github.base_ref }}", "HEAD": "${{ github.head_ref }}"}
     assert _on(doc)["pull_request"]["branches"] == ["main", "release-phase-2"]
+
+
+@pytest.mark.parametrize(
+    ("base", "head", "allowed"),
+    [
+        ("main", "dev/backend-phase-10-ops-dashboard", True),
+        ("main", "fix/guard-post-release", True),
+        ("main", "release-phase-2", True),
+        ("main", "feature/anything", False),
+        ("main", "planning/phase-2-e2e", False),
+        ("release-phase-2", "dev/backend-phase-9-cleanup", False),
+        ("release-phase-2", "fix/anything", False),
+        ("some-other-base", "anything", True),
+    ],
+)
+def test_guard_policy_post_release(base: str, head: str, allowed: bool) -> None:
+    """main takes dev/*, fix/* and release-phase-2; release-phase-2 is frozen."""
+    _need("bash")
+    (step,) = _steps(_load(GUARD)["jobs"]["verify-source-branch"])
+    proc = subprocess.run(
+        ["bash", "-c", step["run"]],
+        env={"PATH": os.environ["PATH"], "BASE": base, "HEAD": head},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (proc.returncode == 0) is allowed, proc.stdout + proc.stderr
 
 
 def test_actionlint_clean() -> None:
