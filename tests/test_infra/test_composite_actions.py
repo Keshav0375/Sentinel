@@ -1006,6 +1006,11 @@ def test_backend_up_fails_without_bundled_manifests(tmp_path: Path) -> None:
             "api://00000000-0000-0000-0000-000000000001/sentinel-backend-sentinel-dev",
             "SENTINEL_API_AUDIENCE",
         ),
+        (
+            "api-audience",
+            "api://x/y,00000000-0000-0000-0000-000000000002",
+            "SENTINEL_API_AUDIENCE",
+        ),
         ("api-audience", "00000000-0000-0000-0000-000000000002,", "SENTINEL_API_AUDIENCE"),
         (
             "api-audience",
@@ -1050,6 +1055,13 @@ def test_backend_up_accepts_value_variants(tmp_path: Path) -> None:
     configmap = (Path(f"{tmp_path / 'stub.log'}.rendered") / "configmap.yaml").read_text()
     assert "https://kv-sentinel-test.vault.azure.net" in configmap
     assert "00000000-0000-0000-0000-000000000002" in configmap
+
+
+def test_backend_up_accepts_guid_first_list(tmp_path: Path) -> None:
+    _need("envsubst")
+    audience = "00000000-0000-0000-0000-000000000002,api://x/y"
+    run = _apply(tmp_path, {**SAMPLE_UP_INPUTS, "api-audience": audience})
+    assert run.returncode == 0, run.stdout
 
 
 def _cluster(tmp_path: Path, *lines: str) -> StepRun:

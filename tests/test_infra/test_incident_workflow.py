@@ -244,6 +244,20 @@ def test_backend_up_failure_pings_teams_once() -> None:
     assert "backend-url" in job["outputs"]
 
 
+def test_summary_teams_step_never_blank() -> None:
+    step = next(s for s in _steps("summary") if s.get("id") == "notify")
+    with_ = step["with"]
+    title = " ".join(with_["title"].split())
+
+    assert step["if"] == "${{ !cancelled() }}"
+    assert "steps.outcome.outcome == 'success'" in with_["severity"]
+    assert with_["severity"].rstrip("}} ").endswith("|| 'critical'")
+    assert "steps.outcome.outcome == 'success'" in title
+    assert "workflow fault" in title
+    assert "incident-id || 'unknown'" in title
+    assert "||" in with_["body"].splitlines()[0]
+
+
 def test_ensure_backend_up_uses_shared_stable_lookup() -> None:
     step = next(s for s in _steps("ensure-backend-up") if s.get("id") == "tag")
 

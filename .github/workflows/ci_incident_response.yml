@@ -720,11 +720,15 @@ jobs:
         if: ${{ !cancelled() }}
         uses: ./.github/actions/notify-teams
         with:
-          severity: ${{ steps.outcome.outputs.severity }}
-          title: "Sentinel — incident summary: ${{ steps.outcome.outputs.resolution }}"
+          severity: ${{ (steps.outcome.outcome == 'success' && steps.outcome.outputs.severity) || 'critical' }}
+          title: >-
+            ${{ (steps.outcome.outcome == 'success' && steps.outcome.outputs.resolution) &&
+            format('Sentinel — incident summary: {0}', steps.outcome.outputs.resolution) ||
+            format('Sentinel — incident {0}: workflow fault',
+            needs.run-agent-pipeline.outputs.incident-id || 'unknown') }}
           webhook-url: ${{ steps.kv.outputs.teams-webhook-url }}
           body: |
-            ${{ steps.outcome.outputs.outcome }}
+            ${{ steps.outcome.outputs.outcome || 'the outcome step failed; see the workflow run' }}
             incident: ${{ needs.run-agent-pipeline.outputs.incident-id }}
             signal_type: ${{ github.event.client_payload.signal_type }}
             correlation_id: ${{ github.event.client_payload.correlation_id }}
