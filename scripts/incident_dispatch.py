@@ -8,7 +8,8 @@ Pure functions plus a small CLI, stdlib only, so the workflow's YAML stays free 
 * ``pr-details`` ``context.pr_details`` from a GitHub pull request and its file list
 * ``logs``       ``context.recent_logs`` from a Datadog log search response
 * ``result``     the workflow outputs from the polled incident (no flag means the poll timed out)
-* ``summary``    the final resolution, outcome, severity and the Datadog event body
+* ``summary``    the final resolution, outcome, severity, a record warning and the Datadog
+                 event body
 
 Values printed for GITHUB_OUTPUT are single-line. Nothing here reads a secret or calls a network.
 """
@@ -131,9 +132,10 @@ def build_payload(
         "tags": normalise_tags(event.get("tags")),
         "context": context,
     }
-    alert_id = event.get("alert_id")
-    if isinstance(alert_id, str) and alert_id.strip():
-        payload["alert_id"] = alert_id.strip()
+    for key in ("alert_id", "dd_event_id", "severity"):
+        value = event.get(key)
+        if isinstance(value, str) and value.strip():
+            payload[key] = value.strip()
     return payload
 
 
@@ -217,6 +219,7 @@ def summary_outputs(
     ensure_result: str,
     pipeline_result: str,
     create_result: str,
+    record_result: str,
     resolution_type: str,
     pr_url: str,
     evidence: str,
@@ -224,7 +227,8 @@ def summary_outputs(
     incident_id: str,
     run_url: str,
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """The final resolution, outcome and severity, and the Datadog event body."""
+    """The final resolution, outcome, severity and record warning, and the Datadog event body."""
+    warning = ""
     if ensure_result != "success":
         resolution, outcome, severity = (
             "failed",
@@ -237,12 +241,17 @@ def summary_outputs(
             f"incident NOT processed: the agent pipeline job ended {pipeline_result}",
             "critical",
         )
-    elif resolution_type == "rollback" and create_result == "success":
+    elif resolution_type == "rollback" and pr_url.strip():
         resolution, outcome, severity = (
             "rollback",
             f"revert PR opened for review: {pr_url}",
             "warning",
         )
+        if record_result != "success":
+            warning = (
+                f"the revert PR was not recorded on the incident ({record_result or 'skipped'})"
+            )
+            outcome += f"; {warning}"
     elif resolution_type == "rollback":
         resolution, outcome, severity = (
             "failed",
@@ -266,7 +275,13 @@ def summary_outputs(
         "tags": tags,
         "alert_type": {"info": "info", "warning": "warning", "critical": "error"}[severity],
     }
-    return {"resolution": resolution, "outcome": outcome, "severity": severity}, event
+    outputs = {
+        "resolution": resolution,
+        "outcome": outcome,
+        "severity": severity,
+        "warning": single_line(warning),
+    }
+    return outputs, event
 
 
 def read_client_payload(path: str | None) -> dict[str, Any]:
@@ -359,6 +374,7 @@ def _run(args: argparse.Namespace) -> int:
             ensure_result=env.get("ENSURE_RESULT", ""),
             pipeline_result=env.get("PIPELINE_RESULT", ""),
             create_result=env.get("CREATE_RESULT", ""),
+            record_result=env.get("RECORD_RESULT", ""),
             resolution_type=env.get("RESOLUTION_TYPE", ""),
             pr_url=env.get("PR_URL", ""),
             evidence=env.get("EVIDENCE", ""),
@@ -369,6 +385,8 @@ def _run(args: argparse.Namespace) -> int:
         with open(args.dd_event_file, "w", encoding="utf-8") as handle:
             handle.write(_compact(event))
         _print_outputs(outputs)
+        if outputs["warning"]:
+            print(f"::warning::incident_dispatch: {outputs['warning']}", file=sys.stderr)
     return 0
 
 

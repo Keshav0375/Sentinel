@@ -145,7 +145,17 @@ def test_single_job_build_run_test() -> None:
     assert len(job["services"]) == 1
     assert next(iter(job["services"].values()))["image"] == "pgvector/pgvector:pg16"
     ids = [s.get("id") for s in _steps(job)]
-    order = ["build", "migrate", "run", "health", "ready", "unit", "integration", "teardown"]
+    order = [
+        "build",
+        "migrate",
+        "run",
+        "health",
+        "ready",
+        "actionlint",
+        "unit",
+        "integration",
+        "teardown",
+    ]
     positions = [ids.index(i) for i in order]
     assert positions == sorted(positions)
     build, run, unit, integration = (
@@ -153,9 +163,23 @@ def test_single_job_build_run_test() -> None:
     )
     assert "docker build --tag sentinel-backend:test" in build
     assert "docker run -d --name sentinel-backend -p 8000:8000" in run
-    assert "pytest tests/test_tools/ tests/test_models/ -x" in unit
-    assert "pytest tests/test_agents/ tests/test_api/ -x" in integration
+    assert "pytest tests/test_tools/ tests/test_models/ tests/test_scripts/ -x" in unit
+    assert "pytest tests/test_agents/ tests/test_api/ tests/test_infra/ -x" in integration
     assert "docker" not in _runs(_job("run-quality"))
+
+
+def test_jobs_have_timeouts() -> None:
+    assert _job("run-quality")["timeout-minutes"] == 20
+    assert _job("build-and-test")["timeout-minutes"] == 60
+
+
+def test_actionlint_is_pinned_and_verified() -> None:
+    env = _load(CI_VALIDATION)["env"]
+    run = _step("build-and-test", "actionlint")["run"]
+    assert env["ACTIONLINT_VERSION"] == "1.7.12"
+    assert re.fullmatch(r"[0-9a-f]{64}", env["ACTIONLINT_SHA256"])
+    assert "sha256sum -c" in run
+    assert "linux_arm64" in run
 
 
 def test_container_env() -> None:

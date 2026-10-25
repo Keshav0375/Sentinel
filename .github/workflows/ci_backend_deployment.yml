@@ -239,7 +239,8 @@ jobs:
             -o jsonpath='{.spec.template.spec.containers[?(@.name=="sentinel-backend")].image}')"
           [ "$live" = "$expected" ] || die "deployment runs '$live', expected '$expected'"
           for path in /health /ready; do
-            curl -fsS --max-time 10 --retry 3 --retry-delay 5 -o /dev/null "$BACKEND_URL$path" || die "$path failed"
+            curl -fsS --connect-timeout 5 --max-time 10 --retry 3 --retry-delay 5 -o /dev/null \
+              "$BACKEND_URL$path" || die "$path failed"
           done
           echo "::notice::deploy: $IMAGE_TAG is live at $BACKEND_URL"
 
@@ -364,7 +365,7 @@ jobs:
           jq -cn --arg cid "$cid" --arg tag "sha-${GITHUB_SHA::7}" '{signal_type: "runtime_error",
             correlation_id: $cid, title: ("CI smoke test " + $tag), source: "ci-smoke", severity: "low",
             tags: {service: "sentinel-watchtower"}}' > "$work/payload.json"
-          code="$(curl -sS --max-time 30 -o "$work/ack.json" -w '%{http_code}' -H @"$work/auth" \
+          code="$(curl -sS --connect-timeout 10 --max-time 30 -o "$work/ack.json" -w '%{http_code}' -H @"$work/auth" \
             -H 'Content-Type: application/json' --data-binary @"$work/payload.json" \
             "$BACKEND_URL/webhooks/incident")" || code="000"
           [ "$code" = "202" ] || die "POST /webhooks/incident answered HTTP $code"
@@ -375,7 +376,7 @@ jobs:
           deadline=$((SECONDS + 1200))
           status=""
           while :; do
-            code="$(curl -sS --max-time 15 -o "$work/row.json" -w '%{http_code}' -H @"$work/auth" \
+            code="$(curl -sS --connect-timeout 10 --max-time 15 -o "$work/row.json" -w '%{http_code}' -H @"$work/auth" \
               "$BACKEND_URL/incidents/$id")" || code="000"
             if [ "$code" = "200" ]; then
               status="$(jq -r '.status // ""' "$work/row.json")"

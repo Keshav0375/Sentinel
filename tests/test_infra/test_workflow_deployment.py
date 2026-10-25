@@ -313,7 +313,10 @@ def test_run_tests_smoke_contract() -> None:
     assert [ids.index(i) for i in order] == sorted(ids.index(i) for i in order)
     token = _step(job, "token")
     assert token["uses"] == "./.github/actions/get-backend-token"
-    assert token["with"]["audience"] == "${{ vars.SENTINEL_API_AUDIENCE }}"
+    assert token["with"] == {
+        "audience": "${{ vars.SENTINEL_API_AUDIENCE }}",
+        "tenant": "${{ vars.AZURE_IDENTITY_TENANT_ID }}",
+    }
     smoke = _step(job, "smoke")
     assert smoke["env"]["BEARER"] == "${{ steps.token.outputs.bearer }}"
     for needle in (

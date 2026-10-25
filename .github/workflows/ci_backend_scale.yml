@@ -3,7 +3,7 @@
 # 2026-10-24 (phases 7 and 8). Scale-to-zero is pod-level: backend-down deletes the Service and
 # scales the Deployment to 0. The shared cluster is never stopped here (a separate manual op).
 # The nightly run always scales down and ignores SENTINEL_KEEP_WARM, so a forgotten demo session
-# costs at most one night.
+# costs at most one night. The stable-to-sha-tag lookup is the shared resolve-stable-tag action.
 name: "[sentinel] backend — scale"
 
 on:
@@ -39,13 +39,13 @@ jobs:
     steps:
       - id: checkout
         name: Check out the composite actions
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
 
       - id: login
         name: Azure login (resource tenant)
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -54,24 +54,9 @@ jobs:
       - id: resolve-tag
         name: Resolve stable to its sha- tag
         if: github.event_name == 'workflow_dispatch' && inputs.direction == 'up'
-        shell: bash
-        env:
-          ACR_NAME: ${{ vars.ACR_NAME }}
-        run: |
-          set -euo pipefail
-          die() { echo "::error::resolve-tag: $1"; exit 1; }
-          [ -n "${ACR_NAME:-}" ] || die "vars.ACR_NAME is empty"
-          digest="$(az acr repository show --name "$ACR_NAME" --image sentinel-backend:stable \
-            --query digest -o tsv --only-show-errors)" || die "sentinel-backend:stable not found in ACR"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "stable digest is malformed"
-          tags="$(az acr manifest list-metadata --registry "$ACR_NAME" --name sentinel-backend \
-            --query "[?digest=='${digest}'].tags[]" -o tsv --only-show-errors)" ||
-            die "could not list sentinel-backend manifests"
-          tag="$(printf '%s\n' "$tags" | tr '\t' '\n' | grep -E '^sha-[0-9a-f]{7}$' | sort | head -n 1)" ||
-            tag=""
-          [ -n "$tag" ] || die "stable has no sha-<7 hex> tag"
-          echo "::notice::resolve-tag: stable is $tag"
-          echo "image-tag=$tag" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/resolve-stable-tag
+        with:
+          acr-name: ${{ vars.ACR_NAME }}
 
       - id: up
         name: Bring the backend up

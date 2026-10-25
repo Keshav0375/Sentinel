@@ -1,14 +1,13 @@
 """Offline static checks of .github/workflows/ci_backend_scale.yml (backend task 8.4; decisions
-2026-10-24), plus the resolve-tag script run under local bash with a stubbed az.
+2026-10-24), plus its use of the shared resolve-stable-tag action (the lookup itself is tested with
+the composite actions).
 
 Nothing here calls Azure.
 """
 
 from __future__ import annotations
 
-import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -57,14 +56,6 @@ UP_WITH = {
     "pg-user": "${{ vars.PG_USER_BACKEND }}",
 }
 
-AZ_STUB = """#!/usr/bin/env bash
-case "$*" in
-  *"repository show"*) printf '%s\\n' "$STUB_DIGEST";;
-  *"manifest list-metadata"*) printf '%s\\n' "$STUB_TAGS";;
-  *) exit 9;;
-esac
-"""
-
 
 def _text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
@@ -88,34 +79,6 @@ def _step(step_id: str) -> dict[str, Any]:
         if step.get("id") == step_id:
             return step
     pytest.fail(f"no step with id {step_id!r}")
-
-
-def _run_resolve(
-    tmp_path: Path, digest: str, tags: str, acr_name: str = "sentinelacr"
-) -> tuple[subprocess.CompletedProcess[str], str]:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    az = bin_dir / "az"
-    az.write_text(AZ_STUB, encoding="utf-8")
-    az.chmod(0o755)
-    out = tmp_path / "out"
-    out.touch()
-    env = os.environ.copy()
-    env.update(
-        PATH=f"{bin_dir}:{os.environ['PATH']}",
-        ACR_NAME=acr_name,
-        STUB_DIGEST=digest,
-        STUB_TAGS=tags,
-        GITHUB_OUTPUT=str(out),
-    )
-    proc = subprocess.run(
-        ["bash", "-c", _step("resolve-tag")["run"]],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return proc, out.read_text(encoding="utf-8")
 
 
 def test_name() -> None:
@@ -159,9 +122,9 @@ def test_single_scale_job_in_sentinel_dev() -> None:
 
 def test_checkout_then_azure_login_first() -> None:
     steps = _steps()
-    assert steps[0]["uses"] == "actions/checkout@v4"
+    assert steps[0]["uses"] == "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
     assert steps[0]["with"]["persist-credentials"] is False
-    assert steps[1]["uses"] == "azure/login@v2"
+    assert steps[1]["uses"] == "azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6"
     assert steps[1]["with"] == {
         "client-id": "${{ vars.AZURE_CLIENT_ID }}",
         "tenant-id": "${{ vars.AZURE_TENANT_ID }}",
@@ -240,32 +203,9 @@ def test_vars_are_the_contract_names() -> None:
     assert "secrets." not in text
 
 
-def test_resolve_tag_picks_sha_tag_of_stable_digest(tmp_path: Path) -> None:
-    proc, out = _run_resolve(tmp_path, "sha256:" + "a" * 64, "stable\tsha-1234567\tlatest")
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "image-tag=sha-1234567" in out.splitlines()
-
-
-def test_resolve_tag_picks_first_sorted_when_several(tmp_path: Path) -> None:
-    proc, out = _run_resolve(tmp_path, "sha256:" + "a" * 64, "sha-bbbbbbb\tstable\tsha-aaaaaaa")
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "image-tag=sha-aaaaaaa" in out.splitlines()
-
-
-def test_resolve_tag_fails_without_sha_tag(tmp_path: Path) -> None:
-    proc, out = _run_resolve(tmp_path, "sha256:" + "a" * 64, "stable")
-    assert proc.returncode != 0
-    assert "stable has no sha-" in proc.stdout
-    assert "image-tag=" not in out
-
-
-def test_resolve_tag_rejects_malformed_digest(tmp_path: Path) -> None:
-    proc, _ = _run_resolve(tmp_path, "sha256:XYZ", "stable\tsha-1234567")
-    assert proc.returncode != 0
-    assert "malformed" in proc.stdout
-
-
-def test_resolve_tag_rejects_empty_acr_name(tmp_path: Path) -> None:
-    proc, _ = _run_resolve(tmp_path, "sha256:" + "a" * 64, "sha-1234567", acr_name="")
-    assert proc.returncode != 0
-    assert "vars.ACR_NAME is empty" in proc.stdout
+def test_resolve_tag_uses_the_shared_action() -> None:
+    step = _step("resolve-tag")
+    assert step["uses"] == "./.github/actions/resolve-stable-tag"
+    assert step["with"] == {"acr-name": "${{ vars.ACR_NAME }}"}
+    assert "run" not in step
+    assert step["if"] == UP_IF

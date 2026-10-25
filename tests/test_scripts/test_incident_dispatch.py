@@ -172,6 +172,27 @@ def test_build_payload_maps_the_dispatch() -> None:
     assert model.tags.version == "pr-12"
 
 
+def test_build_payload_maps_severity_and_dd_event_id() -> None:
+    cp = _cp(event={"title": "t", "severity": " error ", "dd_event_id": "7613449929768408044"})
+
+    payload = _script.build_payload(cp, service_metadata=None, pr_details=None, recent_logs=None)
+
+    assert payload["severity"] == "error"
+    assert payload["dd_event_id"] == "7613449929768408044"
+    model = IncidentPayload.model_validate(payload)
+    assert model.severity == "error"
+    assert model.dd_event_id == "7613449929768408044"
+
+
+def test_build_payload_omits_blank_severity_and_dd_event_id() -> None:
+    cp = _cp(event={"title": "t", "severity": "  ", "dd_event_id": 123})
+
+    payload = _script.build_payload(cp, service_metadata=None, pr_details=None, recent_logs=None)
+
+    assert "severity" not in payload
+    assert "dd_event_id" not in payload
+
+
 def test_build_payload_omits_context_of_the_wrong_type() -> None:
     payload = _script.build_payload(
         _cp(event={"title": "t"}), service_metadata="str", pr_details=[1], recent_logs={"a": 1}
@@ -319,6 +340,7 @@ _ARGS: dict[str, str] = {
     "ensure_result": "success",
     "pipeline_result": "success",
     "create_result": "success",
+    "record_result": "success",
     "resolution_type": "rollback",
     "pr_url": "https://github.com/Keshav0375/Sentinel-deployment/pull/7",
     "evidence": "5xx",
@@ -335,18 +357,33 @@ _ARGS: dict[str, str] = {
         ({"pipeline_result": "failure"}, "failed", "critical", "error", "job ended failure"),
         ({}, "rollback", "warning", "warning", "revert PR opened for review: https://"),
         (
-            {"create_result": "failure"},
+            {"create_result": "failure", "pr_url": ""},
             "failed",
             "critical",
             "error",
             "revert PR was not opened (failure)",
         ),
         (
-            {"create_result": ""},
+            {"create_result": "", "pr_url": ""},
             "failed",
             "critical",
             "error",
             "revert PR was not opened (skipped)",
+        ),
+        # The summary keys on the PR url, not on the create job result.
+        (
+            {"create_result": "failure"},
+            "rollback",
+            "warning",
+            "warning",
+            "revert PR opened for review: https://",
+        ),
+        (
+            {"record_result": "failure"},
+            "rollback",
+            "warning",
+            "warning",
+            "not recorded on the incident (failure)",
         ),
         (
             {"resolution_type": "escalated", "create_result": "skipped"},
@@ -378,6 +415,21 @@ def test_summary_outputs_cases(
     assert "service:sentinel-watchtower" in event["tags"]
     assert not any(tag.startswith("deploy_status") for tag in event["tags"])
     assert "run: https://github.com/x/y/actions/runs/1" in event["text"]
+
+
+def test_summary_outputs_warning_only_when_record_failed() -> None:
+    outputs, _ = _script.summary_outputs(**_ARGS)
+    assert outputs["warning"] == ""
+
+    outputs, event = _script.summary_outputs(**(_ARGS | {"record_result": ""}))
+    assert "skipped" in outputs["warning"]
+    assert outputs["warning"] in outputs["outcome"]
+    assert outputs["warning"] in event["text"]
+
+    outputs, _ = _script.summary_outputs(
+        **(_ARGS | {"resolution_type": "escalated", "record_result": "failure"})
+    )
+    assert outputs["warning"] == ""
 
 
 def test_summary_outputs_without_service_or_incident() -> None:
@@ -496,6 +548,20 @@ def test_main_result_and_summary_files(
     event = json.loads(event_path.read_text())
     assert event["title"] == "Sentinel incident rollback"
     assert "source:sentinel" in event["tags"]
+
+
+def test_main_summary_prints_record_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for name, value in (_ARGS | {"record_result": "failure"}).items():
+        monkeypatch.setenv(name.upper(), value)
+    event_path = tmp_path / "dd_event.json"
+
+    assert _script.main(["summary", "--dd-event-file", str(event_path)]) == 0
+
+    captured = capsys.readouterr()
+    assert any(line.startswith("warning=") for line in captured.out.splitlines())
+    assert "::warning::incident_dispatch:" in captured.err
 
 
 def test_every_output_value_is_single_line(

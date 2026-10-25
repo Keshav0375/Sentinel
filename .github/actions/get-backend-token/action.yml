@@ -1,4 +1,6 @@
-# Mint an Entra bearer token for the Sentinel API (backend task 7.3).
+# Mint an Entra bearer token for the Sentinel API (backend task 7.3). The audience input is the API audience comma
+# list (vars.SENTINEL_API_AUDIENCE: client-id GUID first, optionally the identifier URI); the token is requested for
+# the first entry, which must be a GUID.
 # Caller: azure/login in the identity tenant (where the API app registration lives).
 name: Sentinel get-backend-token
 description: >-
@@ -8,7 +10,8 @@ description: >-
 inputs:
   audience:
     description: >-
-      ONE value: the API app client-id GUID or its identifier URI (never the comma list).
+      The API audience comma list (vars.SENTINEL_API_AUDIENCE: client-id GUID first, optionally the identifier
+      URI); the token is requested for the first entry, which must be a GUID.
     required: true
   tenant:
     description: Tenant to mint the token in (optional).
@@ -32,9 +35,11 @@ runs:
       run: |
         set -euo pipefail
         die() { echo "::error::get-backend-token: $1"; exit 1; }
-        [ -n "${AUDIENCE:-}" ] || die "input for AUDIENCE is empty"
-        case "$AUDIENCE" in *,*) die "audience must be one value, not the comma list";; esac
-        args=(--scope "${AUDIENCE%/}/.default" --query accessToken -o tsv)
+        [ -n "${AUDIENCE:-}" ] || die "input audience is empty"
+        first="$(printf '%s' "${AUDIENCE%%,*}" | tr -d '[:space:]')"
+        guid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        [[ "$first" =~ $guid_re ]] || die "the first entry of input audience is not a GUID"
+        args=(--scope "$first/.default" --query accessToken -o tsv)
         if [ -n "${TENANT:-}" ]; then
           args+=(--tenant "$TENANT")
         fi
