@@ -314,7 +314,6 @@ jobs:
         name: Pytest (unit set)
         env:
           GROQ_API_KEY: "fake-key-for-ci"
-          SENTINEL_DB_PATH: ":memory:"
           TEST_DATABASE_URL: "postgresql://postgres:test@localhost:5432/sentinel"
         run: |
           set -euo pipefail
@@ -325,12 +324,11 @@ jobs:
         name: Pytest (integration set)
         env:
           GROQ_API_KEY: "fake-key-for-ci"
-          SENTINEL_DB_PATH: ":memory:"
           TEST_DATABASE_URL: "postgresql://postgres:test@localhost:5432/sentinel"
         run: |
           set -euo pipefail
           python -m pytest tests/test_infra/ tests/test_memory/ tests/test_agents/ tests/test_api/ \
-            tests/test_eval/ -x -q
+            tests/test_eval/ tests/test_e2e/ -x -q
 
       # The bearer is minted in the identity tenant, so log in again there (after the long pytest steps).
       - id: login-identity

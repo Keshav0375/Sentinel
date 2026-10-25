@@ -15,8 +15,8 @@ nvidia-*, triton), which is dropped from the set — the CPU wheel needs none of
 `pip check` then proves the installed set is complete and consistent.
 
 `--main-only` (the container image, Dockerfile): the main group only, and the project
-itself is not installed. The image runs from `src/` on PYTHONPATH, because the poetry
-package includes `data/`, which stays out of the image.
+itself is not installed. The image runs from `src/` on PYTHONPATH, and `src/` carries the
+package data (prompts, dashboard, the scenario catalog).
 """
 
 from __future__ import annotations

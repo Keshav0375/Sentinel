@@ -4,8 +4,7 @@
 (decision 2026-10-15): the incident id, the alert, the §3.1 ``signal_type`` the plan step
 reads, and the correlation id carried from the Event Grid bridge (§2.1). Phase 5 owns the
 real ``POST /webhooks/incident`` body: :meth:`PipelineInput.from_payload` builds the input
-from an ``IncidentPayload`` (§3.1). :meth:`PipelineInput.from_alert` is the Phase-1 adapter
-for the eval runner and scenario scripts.
+from an ``IncidentPayload`` (§3.1).
 
 ``PipelineResult`` is the terminal outcome: ``rollback_proposed`` with the rollback spec
 GitHub Actions turns into a revert PR, or ``escalated`` with the context a human needs.
@@ -18,13 +17,12 @@ term memory and ``GET /incidents/{id}`` with the rest.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Final, Literal, Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from sentinel.models.alert import (
     SIGNAL_TYPES,
-    AlertPayload,
     IncidentAlert,
     IncidentPayload,
     SignalType,
@@ -32,7 +30,6 @@ from sentinel.models.alert import (
 from sentinel.models.tools import EscalationContext, RollbackSpec
 
 __all__ = [
-    "DEFAULT_SIGNAL_TYPE",
     "SIGNAL_TYPES",
     "PipelineInput",
     "PipelineResult",
@@ -40,9 +37,6 @@ __all__ = [
     "ResolutionType",
     "SignalType",
 ]
-
-# An alert that does not say which case it is runs the full pipeline.
-DEFAULT_SIGNAL_TYPE: Final[SignalType] = "runtime_error"
 
 # Terminal statuses (decision 2026-10-15); "resolved" is reserved for a later
 # "revert deploy succeeded" signal.
@@ -84,43 +78,6 @@ class PipelineInput(BaseModel):
             signal_type=payload.signal_type,
             correlation_id=payload.correlation_id,
         )
-
-    @classmethod
-    def from_alert(cls, incident_id: str, alert: AlertPayload) -> PipelineInput:
-        """Phase-1 adapter for eval/scenario scripts: the input for a Phase-1 *alert*.
-
-        The two fields a Phase-1 alert does not carry are derived:
-
-        - ``signal_type``: ``alert.metadata["signal_type"]`` when it is ``deploy_failure``
-          or ``runtime_error`` (any case), else :data:`DEFAULT_SIGNAL_TYPE` (the full
-          pipeline — never the fast path by accident).
-        - ``correlation_id``: ``alert.metadata["correlation_id"]`` when it is a UUID, else a
-          fresh ``uuid4`` (the bridge generates it in §2; a direct POST has none).
-        """
-        metadata = alert.metadata
-        return cls(
-            incident_id=incident_id,
-            alert=IncidentAlert.from_phase1(alert),
-            signal_type=_signal_type(metadata.get("signal_type")),
-            correlation_id=_correlation_id(metadata.get("correlation_id")),
-        )
-
-
-def _signal_type(value: Any) -> SignalType:
-    if isinstance(value, str):
-        for signal in SIGNAL_TYPES:
-            if value.strip().lower() == signal:
-                return signal
-    return DEFAULT_SIGNAL_TYPE
-
-
-def _correlation_id(value: Any) -> str:
-    if isinstance(value, str):
-        try:
-            return str(uuid.UUID(value))
-        except ValueError:
-            pass
-    return str(uuid.uuid4())
 
 
 class PipelineResult(BaseModel):

@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from sentinel.api.eval_report import make_eval_report_router
+from sentinel.catalog import CATALOG_PATH
 from sentinel.config import Settings
 from sentinel.eval import runner
 from sentinel.eval.judge import make_judge_client
@@ -38,7 +39,7 @@ from sentinel.models.eval_result import GroundTruthCheck, TrajectoryScore
 from sentinel.models.pipeline import PipelineResult
 from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
 
-FIXTURE = Path(__file__).parent / "fixtures" / "branches.yaml"
+FIXTURE = CATALOG_PATH  # the vendored catalog (decision 2026-10-25): no second copy
 _DEPLOYED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -237,11 +238,9 @@ def _dataset() -> list[FakeItem]:
 # ── Static guarantees ─────────────────────────────────────────────────────────
 
 
-def test_runner_never_imports_phase1_or_actors() -> None:
+def test_runner_never_imports_actors() -> None:
     src = Path(runner.__file__).read_text(encoding="utf-8")
-    assert "sentinel.generator" not in src
-    assert "data/" not in src
-    banned = ("data", "sentinel.generator", "sentinel.agents", "sentinel.tools")
+    banned = ("sentinel.agents", "sentinel.tools")
     banned += ("sentinel.memory", "httpx", "asyncpg")
     for node in ast.walk(ast.parse(src)):
         names: list[str] = []

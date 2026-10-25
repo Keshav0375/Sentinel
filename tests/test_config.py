@@ -23,7 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
 
-from sentinel import main
+from sentinel import cli, main
 from sentinel.config import Settings, get_settings, secret_value
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -55,12 +55,10 @@ def test_overrides_applied() -> None:
         sentinel_primary_provider="openai",
         sentinel_max_tool_calls=10,
         sentinel_log_level="DEBUG",
-        sentinel_db_path=Path("/tmp/test.db"),
     )
     assert s.sentinel_primary_provider == "openai"
     assert s.sentinel_max_tool_calls == 10
     assert s.sentinel_log_level == "DEBUG"
-    assert s.sentinel_db_path == Path("/tmp/test.db")
 
 
 def test_max_tool_calls_zero_raises() -> None:
@@ -382,14 +380,13 @@ def test_db_pool_invalid_bounds_raise(pool_min: int, pool_max: int, message: str
 
 
 def test_app_lifespan_boots_without_any_secret(
-    no_settings_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    no_settings_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The real lifespan (get_settings → SDK defaults → routers) starts and serves /health.
 
     The embedding model and the global trace-processor registry are stubbed; the
     subprocess test below boots the unstubbed CLI.
     """
-    monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
     monkeypatch.setattr(main, "EmbeddingClient", MagicMock())
     monkeypatch.setattr(main, "install_trace_processors", MagicMock())
     monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")  # /api/config reachable without a token
@@ -427,7 +424,6 @@ def serve_process(tmp_path: Path) -> Iterator[tuple[subprocess.Popen[bytes], int
     """
     env = {k: v for k, v in os.environ.items() if k.upper() not in _SETTINGS_ENV_VARS}
     env["LITELLM_MODE"] = "PRODUCTION"
-    env["SENTINEL_DB_PATH"] = str(tmp_path / "sentinel.db")
     env["PYTHONPATH"] = os.pathsep.join(
         p for p in (str(_REPO_ROOT / "src"), env.get("PYTHONPATH", "")) if p
     )
@@ -480,3 +476,48 @@ def test_sentinel_serve_boots_without_llm_keys_database_or_langfuse(
     assert err.value.code == 401
     log = log_path.read_text(errors="replace")
     assert "auth_not_configured" in log
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+
+def test_cli_help_lists_only_serve(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["sentinel", "--help"])
+    cli.main()
+    out = capsys.readouterr().out
+    assert "sentinel serve" in out
+    assert "scenario" not in out
+
+
+@pytest.mark.parametrize("command", ["scenario", "scenarios"])
+def test_cli_scenario_commands_are_gone(
+    command: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["sentinel", command])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 1
+    assert "Unknown command" in capsys.readouterr().out
+
+
+def test_cli_serve_passes_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    import uvicorn
+
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def record(*args: object, **kwargs: object) -> None:
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(uvicorn, "run", record)
+    monkeypatch.setattr(sys, "argv", ["sentinel", "serve", "--port", "3001"])
+    cli.main()
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == ("sentinel.main:app",)
+    assert kwargs["port"] == 3001
+
+
+def test_settings_has_no_sqlite_path() -> None:
+    assert not any("db_path" in field for field in Settings.model_fields)

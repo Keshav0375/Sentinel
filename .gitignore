@@ -19,12 +19,6 @@ venv/
 env/
 ENV/
 
-# ── Database ──────────────────────────────────────────────────────────────────
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/*.sqlite
-
 # ── Test / Coverage ───────────────────────────────────────────────────────────
 .pytest_cache/
 .coverage

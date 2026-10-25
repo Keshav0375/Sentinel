@@ -11,8 +11,7 @@ class MemoryStore(Protocol):
 
     Both SemanticMemory (service/runbook lookups) and EpisodicMemory
     (incident similarity search) satisfy this protocol without inheriting
-    from it. Concrete implementations can be swapped — e.g. SQLite → Cosmos
-    DB in Phase 2 — without changing any caller.
+    from it. Concrete implementations can be swapped without changing any caller.
 
     Method signatures use Any because each concrete implementation has
     domain-specific typed methods on top of these four primitives:
@@ -20,8 +19,7 @@ class MemoryStore(Protocol):
     - EpisodicMemory[EpisodicRecord]: store_incident(), search_similar()
     - SemanticMemory[SemanticRecord]: get_service(), get_runbook()
 
-    All methods are async to stay consistent with the aiosqlite backend and
-    any future network-backed store (Cosmos, Redis).
+    All methods are async: the stores are asyncpg-backed (Postgres + pgvector).
     """
 
     async def store(self, record: Any) -> None:

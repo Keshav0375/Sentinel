@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sentinel — Live Incident Dashboard</title>
+  <title>Sentinel — Incident Response</title>
   <style>
     /* ══ Design Tokens ══════════════════════════════════════════════════════ */
     :root {
@@ -32,7 +32,6 @@
       --sans:       -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
       --mono:       ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
       --sidebar-w:  260px;
-      --event-w:    340px;
       --header-h:   auto;
       --footer-h:   38px;
       --transition: .25s ease;
@@ -70,36 +69,8 @@
            padding:6px 10px;border-radius:var(--r);font-size:13px;
            font-family:var(--sans);min-width:200px;cursor:pointer}
     select:focus{outline:2px solid var(--blue);outline-offset:1px}
-    .btn{padding:6px 16px;border:none;border-radius:var(--r);font-size:13px;
-         font-family:var(--sans);font-weight:600;cursor:pointer;
-         transition:all .15s;display:inline-flex;align-items:center;gap:5px}
-    .btn:hover{filter:brightness(1.1)}.btn:active{transform:scale(.97)}
-    .btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
-    .btn-primary{background:var(--blue);color:#fff}
-    .btn-success{background:var(--green);color:#000}
-    .btn-danger{background:var(--red);color:#fff}
-    .btn-outline{background:transparent;color:var(--text);border:1px solid var(--border)}
-    .btn-sm{padding:4px 10px;font-size:12px}
 
-    /* ══ Incident Bar ══════════════════════════════════════════════════════ */
-    #inc-bar{background:var(--surface);border-bottom:1px solid var(--border);
-             padding:7px 20px;display:none;align-items:center;gap:18px;
-             font-size:12px;flex-shrink:0}
-    #inc-bar.on{display:flex}
-    .itag{display:flex;align-items:center;gap:5px}
-    .itag-lbl{color:var(--muted);font-size:11px}
-    .sev{padding:2px 10px;border-radius:12px;font-size:11px;font-weight:700;
-         text-transform:uppercase;letter-spacing:.04em}
-    .sev-critical{background:var(--red-dim);color:var(--red)}
-    .sev-high{background:var(--amber-dim);color:var(--amber)}
-    .sev-warning{background:var(--blue-dim);color:var(--blue)}
-    .sev-low,.sev-info{background:var(--green-dim);color:var(--green)}
-    .pill{padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600}
-    .pill-running{background:var(--blue-dim);color:var(--blue)}
-    .pill-resolved{background:var(--green-dim);color:var(--green)}
-    .pill-escalated{background:var(--red-dim);color:var(--red)}
-
-    /* ══ Three-Column Layout ═══════════════════════════════════════════════ */
+    /* ══ Layout ════════════════════════════════════════════════════════════ */
     .app-layout{display:flex;flex:1;overflow:hidden}
 
     /* ── Left: History Sidebar ─────────────────────────────────────────── */
@@ -151,116 +122,11 @@
     #empty-icon{font-size:48px;margin-bottom:16px;opacity:.5}
     #empty h2{font-size:18px;margin-bottom:6px;color:var(--text)}
     #empty p{color:var(--muted);font-size:13px;max-width:360px;margin:0 auto}
-    #pipeline{display:none}
-    #pipeline.on{display:block}
-
-    /* ── Pipeline Flow ─────────────────────────────────────────────────── */
-    .pipeline-label{font-size:11px;font-weight:700;text-transform:uppercase;
-                    letter-spacing:.08em;color:var(--muted);margin-bottom:14px}
-    .pipeline-flow{display:flex;flex-direction:column;gap:0}
-    .pipe-connector{display:flex;justify-content:center;height:20px}
-    .pipe-connector::before{content:'';width:2px;height:100%;
-                            background:var(--border);border-radius:1px}
-
-    /* ── Agent Card ─────────────────────────────────────────────────────── */
-    .agent-card{background:var(--surface);border:1px solid var(--border);
-                border-radius:var(--r-lg);overflow:hidden;
-                transition:border-color var(--transition),box-shadow var(--transition)}
-    .agent-card.active{border-color:var(--blue);
-                       box-shadow:0 0 0 1px var(--blue),0 0 16px rgba(56,139,253,.1)}
-    .agent-card.done{border-color:var(--green)}
-    .agent-card.err{border-color:var(--red)}
-    .card-header{padding:12px 16px;display:flex;align-items:flex-start;gap:10px;
-                 border-bottom:1px solid var(--border)}
-    .card-status{width:10px;height:10px;border-radius:50%;background:var(--border);
-                 flex-shrink:0;margin-top:3px;transition:background var(--transition)}
-    .agent-card.active .card-status{background:var(--blue);animation:pulse 1.4s infinite}
-    .agent-card.done .card-status{background:var(--green)}
-    .agent-card.err .card-status{background:var(--red)}
-    @keyframes pulse{
-      0%,100%{box-shadow:0 0 0 2px rgba(56,139,253,.3)}
-      50%{box-shadow:0 0 0 5px rgba(56,139,253,.06)}}
-    .card-info{flex:1}
-    .card-name{font-size:14px;font-weight:700;display:flex;align-items:center;gap:6px}
-    .card-desc{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.4}
-    .card-body{padding:10px 16px;min-height:36px}
-    .tool-list{list-style:none}
-    .tool-item{padding:6px 0;border-bottom:1px solid var(--border);font-size:12px}
-    .tool-item:last-child{border-bottom:none}
-    .tool-name{font-family:var(--mono);font-weight:600;color:var(--purple);
-               display:flex;align-items:center;gap:5px;word-break:break-all}
-    .tool-result{color:var(--muted);margin-top:3px;font-family:var(--mono);
-                 font-size:11px;max-height:60px;overflow-y:auto;
-                 white-space:pre-wrap;word-break:break-all;line-height:1.4}
-    .tool-pending{color:var(--muted);font-style:italic;font-size:11px}
-    .card-empty{color:var(--muted);font-size:12px;font-style:italic}
-    .card-output{margin-top:6px;padding:8px 10px;background:var(--bg);
-                 border-radius:var(--r);font-size:12px;font-family:var(--mono);
-                 color:var(--text-secondary);line-height:1.4}
-
-    /* ── Right: Event Feed ─────────────────────────────────────────────── */
-    .sidebar-right{width:var(--event-w);background:var(--surface);
-                   border-left:1px solid var(--border);display:flex;
-                   flex-direction:column;flex-shrink:0}
-    .event-feed{flex:1;overflow-y:auto;padding:6px 0}
-    .event-item{padding:8px 14px;border-bottom:1px solid var(--border);
-                display:flex;gap:10px;font-size:12px;
-                transition:background .15s}
-    .event-item:hover{background:var(--surface-2)}
-    .event-time{color:var(--muted);font-family:var(--mono);font-size:11px;
-                flex-shrink:0;min-width:56px}
-    .event-icon{flex-shrink:0;font-size:13px;width:18px;text-align:center}
-    .event-text{flex:1;line-height:1.5;color:var(--text-secondary)}
-    .event-text strong{color:var(--text);font-weight:600}
-    .event-item.ev-started .event-text{color:var(--blue)}
-    .event-item.ev-completed .event-text{color:var(--green)}
-    .event-item.ev-tool .event-text{color:var(--text-secondary)}
-    .event-item.ev-result .event-text{color:var(--muted)}
-    .event-item.ev-resolved .event-text{color:var(--green);font-weight:600}
-    .event-item.ev-error .event-text{color:var(--red)}
-    .event-item.ev-system .event-text{color:var(--muted);font-style:italic}
-
-    /* ══ Resolution Banner ═════════════════════════════════════════════════ */
-    #res-banner{display:none;background:var(--green-dim);
-                border:1px solid var(--green);border-radius:var(--r-lg);
-                padding:12px 16px;margin-bottom:16px;color:var(--green);
-                font-weight:600;align-items:center;gap:8px;cursor:pointer;
-                transition:filter .15s}
-    #res-banner.on{display:flex}
-    #res-banner:hover{filter:brightness(1.1)}
-    #res-banner .banner-hint{font-weight:400;font-size:12px;margin-left:auto;
-                             color:var(--green);opacity:.7}
-
-    /* ══ Modals ════════════════════════════════════════════════════════════ */
-    .modal-backdrop{display:none;position:fixed;inset:0;
-                    background:rgba(0,0,0,.72);z-index:200;
-                    align-items:center;justify-content:center;padding:20px}
-    .modal-backdrop.on{display:flex}
-    .modal-card{background:var(--surface);border-radius:var(--r-lg);
-                padding:24px;max-width:600px;width:100%;
-                box-shadow:0 4px 40px rgba(0,0,0,.4)}
-    .modal-card h2{font-size:16px;margin-bottom:16px;display:flex;
-                   align-items:center;gap:8px}
-    .modal-actions{display:flex;gap:10px;flex-wrap:wrap}
-
-    /* ══ Resolution Modal ══════════════════════════════════════════════════ */
-    #resolve-modal .modal-card{border:2px solid var(--green);max-width:520px}
-    #resolve-modal h2{color:var(--green)}
-    .resolve-section{margin-bottom:14px}
-    .resolve-section:last-child{margin-bottom:0}
-    .resolve-label{font-size:11px;font-weight:700;text-transform:uppercase;
-                   letter-spacing:.06em;color:var(--muted);margin-bottom:4px}
-    .resolve-value{font-size:13px;color:var(--text-secondary);line-height:1.5}
-    .resolve-value code{font-family:var(--mono);background:var(--surface-2);
-                        padding:1px 6px;border-radius:3px;font-size:12px}
 
     /* ══ Footer ════════════════════════════════════════════════════════════ */
     footer{background:var(--surface);border-top:1px solid var(--border);
            padding:8px 20px;display:flex;align-items:center;gap:24px;
            font-size:12px;color:var(--muted);flex-wrap:wrap;flex-shrink:0}
-    .met{display:flex;align-items:center;gap:5px}
-    .met-icon{font-size:13px;opacity:.7}
-    .mv{font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
     .footer-right{margin-left:auto;display:flex;align-items:center;gap:16px}
     .footer-link{color:var(--muted);font-size:12px;text-decoration:none;
                  transition:color .15s}
@@ -291,28 +157,12 @@
   </div>
 
   <div class="fire-row">
-    <select id="sce-sel"><option value="">Loading scenarios...</option></select>
-    <button class="btn btn-primary" id="fire-btn" onclick="fireScenario()" disabled>
-      Fire Scenario
-    </button>
+    <select id="sce-sel" onchange="showScenario()"><option value="">Loading scenarios...</option></select>
+    <span id="sce-info" style="font-size:12px;color:var(--muted)"></span>
   </div>
 </header>
 
-<!-- ═══ INCIDENT BAR ═══════════════════════════════════════════════════════ -->
-<div id="inc-bar">
-  <div class="itag"><span class="itag-lbl">Incident</span>
-    <code id="ib-id" style="font-family:var(--mono);font-size:11px"></code></div>
-  <div class="itag"><span class="itag-lbl">Service</span>
-    <strong id="ib-svc"></strong></div>
-  <div class="itag"><span class="itag-lbl">Severity</span>
-    <span id="ib-sev" class="sev"></span></div>
-  <div class="itag"><span class="itag-lbl">Status</span>
-    <span id="ib-status" class="pill pill-running">Running</span></div>
-  <div class="itag"><span class="itag-lbl">Elapsed</span>
-    <span id="ib-elapsed" class="mv">0s</span></div>
-</div>
-
-<!-- ═══ THREE-COLUMN LAYOUT ═══════════════════════════════════════════════ -->
+<!-- ═══ LAYOUT ═════════════════════════════════════════════════════════════ -->
 <div class="app-layout">
 
   <!-- ── Left: History Sidebar ─────────────────────────────────────────── -->
@@ -329,60 +179,21 @@
     History
   </div>
 
-  <!-- ── Center: Main Pipeline ─────────────────────────────────────────── -->
+  <!-- ── Center: Main ──────────────────────────────────────────────────── -->
   <div class="main-content">
     <div class="main-inner">
       <div id="empty">
         <div id="empty-icon">&#x1f6e1;</div>
-        <h2>No active incident</h2>
-        <p>Select a scenario above and click <strong>Fire Scenario</strong> to start the multi-agent pipeline.</p>
-      </div>
-
-      <div id="pipeline">
-        <div id="res-banner" onclick="openResolution()">
-          <span id="res-banner-text">&#10003; Pipeline complete</span>
-          <span class="banner-hint">Click for summary</span>
-        </div>
-        <div class="pipeline-label">Agent Pipeline</div>
-        <div class="pipeline-flow" id="pipeline-flow"></div>
+        <h2>Scenario catalog</h2>
+        <p>Scenarios run on Sentinel-deployment: a human merges a scenario branch's PR, and the incident flows Datadog &rarr; GitHub Actions &rarr; Sentinel. The list above is the catalog (read-only).</p>
       </div>
     </div>
   </div>
 
-  <!-- ── Right: Event Feed ─────────────────────────────────────────────── -->
-  <aside class="sidebar-right">
-    <div class="panel-head">
-      <span class="panel-title">Live Events</span>
-    </div>
-    <div class="event-feed" id="event-feed">
-      <div class="history-empty" id="event-empty">Events will appear here when a scenario is fired.</div>
-    </div>
-  </aside>
-
 </div>
-
-<!-- ═══ RESOLUTION MODAL ═══════════════════════════════════════════════════ -->
-<div class="modal-backdrop" id="resolve-modal" onclick="closeModal('resolve-modal')">
-  <div class="modal-card" onclick="event.stopPropagation()">
-    <h2>&#10003; Incident Resolved</h2>
-    <div id="resolve-body"></div>
-    <div class="modal-actions" style="margin-top:16px">
-      <button class="btn btn-outline" onclick="closeModal('resolve-modal')">Close</button>
-    </div>
-  </div>
-</div>
-
 
 <!-- ═══ FOOTER ═════════════════════════════════════════════════════════════ -->
 <footer>
-  <div class="met"><span class="met-icon">&#9881;</span><span>Tools</span>
-    <span class="mv" id="m-tools">0</span></div>
-  <div class="met"><span class="met-icon">&#9201;</span><span>Elapsed</span>
-    <span class="mv" id="m-elapsed">&mdash;</span></div>
-  <div class="met"><span class="met-icon">&#129504;</span><span>Memory</span>
-    <span class="mv" id="m-mem">0</span></div>
-  <div class="met"><span class="met-icon">&#129302;</span><span>Agents</span>
-    <span class="mv" id="m-agents">0</span></div>
   <div class="footer-right">
     <a class="footer-link" href="/eval">Eval Results &rarr;</a>
     <a class="footer-link" href="/docs">API Docs &rarr;</a>
@@ -393,45 +204,10 @@
 'use strict';
 
 /* ══════════════════════════════════════════════════════════════════════════
-   CONSTANTS
-   ══════════════════════════════════════════════════════════════════════════ */
-
-const AGENTS = [
-  {key:'triage',          label:'Triage',          icon:'\u{1f50d}',
-   desc:'Classifies incident severity and identifies the affected service using metadata and past patterns'},
-  {key:'analysis',        label:'Analysis',        icon:'\u{1f4cb}',
-   desc:'Reads the Datadog evidence and the deploy history and forms one root-cause hypothesis'},
-  {key:'reflexion',       label:'Reflexion',       icon:'\u{1f914}',
-   desc:'Critiques the hypothesis; below 0.7 confidence it sends Analysis back (at most twice)'},
-  {key:'resolution',      label:'Resolution',      icon:'\u{1f527}',
-   desc:'Drafts a rollback spec or an escalation; a human merges the revert PR on GitHub'},
-  {key:'reverification',  label:'Reverification',  icon:'\u{2705}',
-   desc:'Checks the rollback spec against the root cause: PASS, FAIL (one retry) or ESCALATE'},
-];
-
-const SEV_MAP = {critical:'critical',high:'high',warning:'warning',low:'low',info:'info'};
-
-
-const TOOL_LABELS = {
-  get_service_metadata: 'Looking up service metadata',
-  search_past_incidents: 'Searching for similar past incidents',
-  fetch_logs: 'Fetching application logs',
-  get_deploy_details: 'Checking recent deployments',
-  prepare_rollback_spec: 'Drafting rollback spec',
-  format_escalation: 'Preparing escalation',
-};
-
-/* ══════════════════════════════════════════════════════════════════════════
    STATE
    ══════════════════════════════════════════════════════════════════════════ */
 
 let scenarios = [];
-let currentInc = null;
-let eventSource = null;
-let elTimer = null;
-let startTs = 0;
-let nTools = 0, nMem = 0, nAgents = 0;
-let agentOutputs = {};
 let currentConfig = {};
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -453,14 +229,25 @@ async function loadScenarios() {
     scenarios = await r.json();
     const sel = document.getElementById('sce-sel');
     sel.innerHTML = scenarios.map(s =>
-      `<option value="${esc(s.id)}">${esc(s.id)} — ${esc(s.failure_class)}</option>`
+      `<option value="${esc(s.branch)}">${esc(s.branch)} — ${esc(s.fault)}</option>`
     ).join('');
-    document.getElementById('fire-btn').disabled = false;
+    showScenario();
   } catch(e) {
     document.getElementById('sce-sel').innerHTML =
       '<option value="">Failed to load scenarios</option>';
-    addEvent('error', 'system', `Failed to load scenarios: ${e.message}`);
   }
+}
+
+function showScenario() {
+  const sel = document.getElementById('sce-sel');
+  const info = document.getElementById('sce-info');
+  const s = scenarios.find(x => x.branch === sel.value);
+  if (!s) { info.textContent = ''; return; }
+  let text = `case ${s.case} · expects ${s.expected_signal_type} → ${s.expected_resolution}`;
+  if (s.expected_failed_stage) text += ` (fails at ${s.expected_failed_stage})`;
+  if (s.also_expected && s.also_expected.length) text += ` · also ${s.also_expected.join(', ')}`;
+  if (s.expected_culprit) text += ` · culprit ${s.expected_culprit}`;
+  info.textContent = text;
 }
 
 async function loadConfig() {
@@ -502,7 +289,7 @@ function updateModelBadges() {
 function renderHistory(items) {
   const list = document.getElementById('history-list');
   if (!items.length) {
-    list.innerHTML = '<div class="history-empty">No past incidents yet. Fire a scenario to create one.</div>';
+    list.innerHTML = '<div class="history-empty">No past incidents yet.</div>';
     return;
   }
   list.innerHTML = items.map(item => {
@@ -535,368 +322,6 @@ function formatDate(iso) {
     return d.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' +
            d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
   } catch { return iso; }
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
-   PIPELINE UI
-   ══════════════════════════════════════════════════════════════════════════ */
-
-function buildPipeline() {
-  const flow = document.getElementById('pipeline-flow');
-  flow.innerHTML = AGENTS.map((a, i) => {
-    const connector = i < AGENTS.length - 1
-      ? '<div class="pipe-connector"></div>' : '';
-    return `<div class="agent-card" id="card-${a.key}">
-      <div class="card-header">
-        <div class="card-status"></div>
-        <div class="card-info">
-          <div class="card-name">${a.icon} ${a.label}</div>
-          <div class="card-desc">${a.desc}</div>
-        </div>
-      </div>
-      <div class="card-body" id="body-${a.key}">
-        <ul class="tool-list" id="tl-${a.key}"></ul>
-        <div class="card-empty" id="ce-${a.key}">Waiting...</div>
-      </div>
-    </div>${connector}`;
-  }).join('');
-}
-
-function setCardState(agentKey, state) {
-  const card = document.getElementById(`card-${agentKey}`);
-  if (!card) return;
-  card.classList.remove('active','done','err');
-  if (state) card.classList.add(state);
-  if (state === 'active') {
-    card.scrollIntoView({behavior:'smooth', block:'nearest'});
-  }
-}
-
-function hidePlaceholder(agentKey) {
-  const el = document.getElementById(`ce-${agentKey}`);
-  if (el) el.style.display = 'none';
-}
-
-function appendCardOutput(agentKey, text) {
-  hidePlaceholder(agentKey);
-  const body = document.getElementById(`body-${agentKey}`);
-  if (!body) return;
-  let out = body.querySelector('.card-output');
-  if (!out) {
-    out = document.createElement('div');
-    out.className = 'card-output';
-    body.appendChild(out);
-  }
-  out.textContent = text.slice(0, 300);
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
-   EVENT FEED (RIGHT SIDEBAR)
-   ══════════════════════════════════════════════════════════════════════════ */
-
-function addEvent(type, agentName, text) {
-  const feed = document.getElementById('event-feed');
-  const empty = document.getElementById('event-empty');
-  if (empty) empty.remove();
-
-  const item = document.createElement('div');
-  item.className = `event-item ev-${type}`;
-  const time = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  const icon = eventIcon(type);
-  item.innerHTML = `<span class="event-time">${time}</span>
-    <span class="event-icon">${icon}</span>
-    <span class="event-text">${text}</span>`;
-  feed.appendChild(item);
-  feed.scrollTop = feed.scrollHeight;
-}
-
-function eventIcon(type) {
-  const map = {
-    started: '\u{1f916}', completed: '✅', tool: '⚙',
-    result: '→', resolved: '\u{1f389}',
-    error: '❌', system: '\u{1f4ac}',
-  };
-  return map[type] || '•';
-}
-
-function humanizeToolName(toolName) {
-  return TOOL_LABELS[toolName] || toolName.replace(/_/g, ' ');
-}
-
-function agentLabel(key) {
-  const a = AGENTS.find(a => a.key === key);
-  return a ? a.label : key;
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
-   FIRE SCENARIO
-   ══════════════════════════════════════════════════════════════════════════ */
-
-async function fireScenario() {
-  const sid = document.getElementById('sce-sel').value;
-  if (!sid) return;
-  const scen = scenarios.find(s => s.id === sid);
-  if (!scen) return;
-
-  if (eventSource) { eventSource.close(); eventSource = null; }
-  if (elTimer) { clearInterval(elTimer); elTimer = null; }
-  resetState();
-  resetUI();
-
-  const btn = document.getElementById('fire-btn');
-  btn.disabled = true;
-  btn.textContent = 'Starting...';
-
-  try {
-    const a = scen.alert;
-    const meta = a.metadata || {};
-    const payload = {
-      signal_type: meta.signal_type === 'deploy_failure' ? 'deploy_failure' : 'runtime_error',
-      correlation_id: crypto.randomUUID(),
-      title: meta.title || `${a.metric} ${a.current_value} (threshold ${a.threshold}) on ${a.service}`,
-      source: a.source, alert_id: a.alert_id, severity: a.severity,
-      tags: {service: a.service}, timestamp: a.timestamp,
-    };
-    const r = await fetch('/webhooks/incident', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-    if (r.status === 401 || r.status === 403) throw new Error('POST /webhooks/incident needs an Entra bearer token with the Incident.Write role (SENTINEL_DEV_OPEN_DASHBOARD opens only the dashboard and its read APIs)');
-    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
-    const {incident_id} = await r.json();
-
-    currentInc = {id: incident_id, scenario: scen};
-    showIncBar(incident_id, scen);
-    showPipeline();
-    startElapsed();
-    startSSE(incident_id);
-    addEvent('system', 'system', `Incident <strong>${esc(incident_id)}</strong> created &mdash; pipeline started`);
-  } catch(e) {
-    addEvent('error', 'system', `Failed to fire scenario: ${e.message}`);
-    btn.disabled = false;
-    btn.textContent = 'Fire Scenario';
-  }
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
-   SSE STREAMING
-   ══════════════════════════════════════════════════════════════════════════ */
-
-function startSSE(incId) {
-  eventSource = new EventSource(`/events/${incId}`);
-  eventSource.onmessage = e => {
-    try { dispatch(JSON.parse(e.data), incId); }
-    catch(err) { addEvent('error', 'system', `Parse error: ${err.message}`); }
-  };
-  eventSource.onerror = () => {
-    addEvent('system', 'system', 'Event stream closed');
-    eventSource.close();
-  };
-}
-
-function dispatch(ev, incId) {
-  switch(ev.type) {
-    case 'agent_started':     onStarted(ev);            break;
-    case 'agent_completed':   onCompleted(ev);           break;
-    case 'tool_called':       onToolCalled(ev);          break;
-    case 'tool_result':       onToolResult(ev);          break;
-    case 'incident_completed': onPipelineDone(ev);       break;
-    default:
-      addEvent('system', ev.agent_name || '', `${ev.type}: ${ev.agent_name || ''}`);
-  }
-}
-
-/* ── Event Handlers ──────────────────────────────────────────────────────── */
-
-function onStarted(ev) {
-  setCardState(ev.agent_name, 'active');
-  nAgents++;
-  document.getElementById('m-agents').textContent = nAgents;
-  addEvent('started', ev.agent_name,
-    `<strong>${agentLabel(ev.agent_name)}</strong> started analyzing`);
-}
-
-function onCompleted(ev) {
-  setCardState(ev.agent_name, 'done');
-  const output = ev.data?.output;
-  if (output) {
-    const text = String(output).slice(0, 300);
-    appendCardOutput(ev.agent_name, text);
-    agentOutputs[ev.agent_name] = text;
-  }
-  nAgents = Math.max(0, nAgents - 1);
-  document.getElementById('m-agents').textContent = nAgents;
-  addEvent('completed', ev.agent_name,
-    `<strong>${agentLabel(ev.agent_name)}</strong> completed`);
-}
-
-function onToolCalled(ev) {
-  const agent = ev.agent_name;
-  const toolName = ev.data?.tool_name || 'tool';
-  const callId = ev.data?.call_id || toolName;
-
-  hidePlaceholder(agent);
-  const tl = document.getElementById(`tl-${agent}`);
-  if (tl) {
-    const li = document.createElement('li');
-    li.className = 'tool-item';
-    li.id = `tc-${callId}`;
-    li.innerHTML = `<div class="tool-name">⚙ ${esc(toolName)}</div>
-      <div class="tool-pending" id="tp-${callId}">Running...</div>`;
-    tl.appendChild(li);
-  }
-  nTools++;
-  document.getElementById('m-tools').textContent = nTools;
-  if (toolName === 'search_past_incidents') {
-    nMem++;
-    document.getElementById('m-mem').textContent = nMem;
-  }
-  addEvent('tool', agent,
-    `${humanizeToolName(toolName)} <span style="color:var(--muted)">via ${agentLabel(agent)}</span>`);
-}
-
-function onToolResult(ev) {
-  const callId = ev.data?.call_id || ev.data?.tool_name || '';
-  const output = ev.data?.output || '';
-  const toolName = ev.data?.tool_name || 'tool';
-  const el = document.getElementById(`tp-${callId}`);
-  if (el) {
-    el.className = 'tool-result';
-    el.textContent = String(output).slice(0, 200);
-  }
-  const summary = String(output).slice(0, 80);
-  addEvent('result', ev.agent_name || '',
-    `${humanizeToolName(toolName)} → <span style="color:var(--muted)">${esc(summary)}</span>`);
-}
-
-function onPipelineDone(ev) {
-  // data.status is rollback_proposed (a revert PR for a human to merge) or escalated.
-  const proposed = (ev.data || {}).status === 'rollback_proposed';
-  const label = proposed ? 'Rollback proposed' : 'Escalated';
-  document.getElementById('res-banner').classList.add('on');
-  document.getElementById('res-banner-text').textContent =
-    proposed ? '\u2713 Rollback proposed \u2014 a human reviews the revert PR'
-             : '\u26a0 Escalated \u2014 a human takes over';
-  document.getElementById('ib-status').className = proposed ? 'pill pill-resolved' : 'pill pill-escalated';
-  document.getElementById('ib-status').textContent = label;
-  if (elTimer) { clearInterval(elTimer); elTimer = null; }
-  if (eventSource) { eventSource.close(); eventSource = null; }
-  addEvent('resolved', 'orchestrator', `<strong>${label}</strong> &mdash; pipeline complete`);
-
-  const btn = document.getElementById('fire-btn');
-  btn.disabled = false;
-  btn.textContent = 'Fire Scenario';
-
-  loadHistory();
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
-   RESOLUTION MODAL
-   ══════════════════════════════════════════════════════════════════════════ */
-
-function cleanMd(s) {
-  return String(s)
-    .replace(/#{1,4}\s*/g, '')
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/^\|.*\|$/gm, '')
-    .replace(/^\s*[-|:]+\s*$/gm, '')
-    .replace(/^[-*]\s+/gm, '• ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-function openResolution() {
-  const body = document.getElementById('resolve-body');
-  const alert = currentInc?.scenario?.alert;
-
-  let html = '';
-
-  html += section('Issue',
-    alert ? `${alert.metric} on <code>${esc(alert.service)}</code> &mdash; ` +
-            `current value ${alert.current_value} exceeds threshold ${alert.threshold}`
-           : 'Alert details not available');
-
-  html += section('Root Cause',
-    agentOutputs.analysis
-      ? esc(cleanMd(agentOutputs.analysis))
-      : agentOutputs.triage
-        ? esc(cleanMd(agentOutputs.triage))
-        : 'Root cause analysis not available');
-
-  html += section('Drafted',
-    agentOutputs.resolution
-      ? esc(cleanMd(agentOutputs.resolution))
-      : 'No rollback spec drafted (escalated)');
-
-  const elapsed = document.getElementById('m-elapsed').textContent;
-  html += section('Pipeline Stats',
-    `Completed in <strong>${elapsed}</strong> with <strong>${nTools}</strong> tool calls across <strong>${AGENTS.length}</strong> agents`);
-
-  body.innerHTML = html;
-  document.getElementById('resolve-modal').classList.add('on');
-}
-
-function section(label, content) {
-  return `<div class="resolve-section">
-    <div class="resolve-label">${label}</div>
-    <div class="resolve-value">${content}</div>
-  </div>`;
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
-   UI HELPERS
-   ══════════════════════════════════════════════════════════════════════════ */
-
-function closeModal(id) {
-  document.getElementById(id).classList.remove('on');
-}
-
-function showIncBar(id, scen) {
-  const sev = scen.alert.severity || '';
-  document.getElementById('ib-id').textContent = id;
-  document.getElementById('ib-svc').textContent = scen.alert.service || '';
-  const sevEl = document.getElementById('ib-sev');
-  sevEl.textContent = sev.toUpperCase();
-  sevEl.className = `sev sev-${SEV_MAP[sev.toLowerCase()] || 'low'}`;
-  document.getElementById('ib-status').className = 'pill pill-running';
-  document.getElementById('ib-status').textContent = 'Running';
-  document.getElementById('inc-bar').classList.add('on');
-}
-
-function showPipeline() {
-  document.getElementById('empty').style.display = 'none';
-  document.getElementById('res-banner').classList.remove('on');
-  buildPipeline();
-  document.getElementById('pipeline').classList.add('on');
-}
-
-function startElapsed() {
-  startTs = Date.now();
-  const tick = () => {
-    const s = Math.floor((Date.now() - startTs) / 1000);
-    const txt = s >= 60 ? `${Math.floor(s/60)}m ${s%60}s` : `${s}s`;
-    document.getElementById('m-elapsed').textContent = txt;
-    document.getElementById('ib-elapsed').textContent = txt;
-  };
-  tick();
-  elTimer = setInterval(tick, 1000);
-}
-
-function resetState() {
-  nTools = nMem = nAgents = 0;
-  agentOutputs = {};
-  document.getElementById('m-tools').textContent = '0';
-  document.getElementById('m-mem').textContent = '0';
-  document.getElementById('m-agents').textContent = '0';
-  document.getElementById('m-elapsed').textContent = '—';
-  document.getElementById('ib-elapsed').textContent = '0s';
-  currentInc = null;
-}
-
-function resetUI() {
-  document.getElementById('inc-bar').classList.remove('on');
-  document.getElementById('resolve-modal').classList.remove('on');
-  const feed = document.getElementById('event-feed');
-  feed.innerHTML = '';
 }
 
 function esc(s) {

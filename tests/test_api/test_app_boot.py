@@ -11,7 +11,6 @@ import asyncio
 import re
 import time
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -30,9 +29,13 @@ from sentinel import main
 from sentinel.api import auth
 from sentinel.api.auth import require_incident_write
 from sentinel.config import Settings
+from sentinel.eval.dataset_writer import DatasetWrites, TerminalRun
 from sentinel.infra import database, workload_identity
 from sentinel.infra import incident_tasks as tasks_module
 from sentinel.infra.workload_identity import POSTGRES_ENTRA_SCOPE
+from sentinel.models.alert import IncidentAlert
+from sentinel.models.pipeline import PipelineInput, PipelineResult
+from sentinel.models.tools import EscalationContext
 
 TENANT = "11111111-2222-3333-4444-555555555555"
 CLIENT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -59,7 +62,6 @@ PROTECTED_REQUESTS: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/scenarios", None),
     ("GET", "/api/trajectories", None),
     ("GET", "/api/eval-report", None),
-    ("GET", "/events/inc-x", None),
     ("GET", "/incidents", None),
     ("GET", "/incidents/inc-x", None),
     ("GET", "/incidents/inc-x/trajectory", None),
@@ -75,7 +77,6 @@ EXPECTED_DEV_OPEN = {
     "GET /api/config",
     "GET /api/trajectories",
     "GET /api/eval-report",
-    "GET /events/{incident_id}",
 }
 
 # ── Helpers / fixtures ────────────────────────────────────────────────────────
@@ -133,12 +134,11 @@ def _auth(token: str) -> dict[str, str]:
 
 
 @pytest.fixture(autouse=True)
-def boot_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[dict[str, MagicMock]]:
+def boot_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, MagicMock]]:
     """Real lifespan with the embedding model, trace processors, SDK defaults and Azure stubbed."""
     monkeypatch.setattr(main, "EmbeddingClient", MagicMock())
     monkeypatch.setattr(main, "install_trace_processors", MagicMock())
     monkeypatch.setattr(main, "apply_sdk_defaults", MagicMock())
-    monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
     azure = {"credential": MagicMock(), "secret_client": MagicMock()}
     monkeypatch.setattr(workload_identity, "DefaultAzureCredential", azure["credential"])
     monkeypatch.setattr(workload_identity, "SecretClient", azure["secret_client"])
@@ -262,7 +262,7 @@ def test_dev_flag_logs_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_dashboard_js_uses_only_dev_open_routes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every URL the dashboard JS calls is in the dev-open set, except the protected webhook."""
+    """Every URL the dashboard JS calls is a dev-open GET; it POSTs nothing."""
     index_html = main._DASHBOARD_HTML.read_text(encoding="utf-8")
     eval_html = main._EVAL_HTML.read_text(encoding="utf-8")
     gets: set[str] = set()
@@ -273,33 +273,39 @@ def test_dashboard_js_uses_only_dev_open_routes(monkeypatch: pytest.MonkeyPatch)
                 posts.add(url)
             else:
                 gets.add(f"GET {url}")
-        if re.findall(r"new EventSource\(`(/events/)", html):
-            gets.add("GET /events/{incident_id}")
     assert gets == {
         "GET /api/scenarios",
         "GET /api/config",
         "GET /api/trajectories",
         "GET /api/eval-report",
-        "GET /events/{incident_id}",
     }
     assert gets <= EXPECTED_DEV_OPEN
-    assert posts == {"/webhooks/incident"}
+    assert posts == set()
+    assert "EventSource" not in index_html
+    assert "EventSource" not in eval_html
 
     monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")
     app = main.create_app()
     with TestClient(app):
         assert _route_auth(app)["POST /webhooks/incident"] is True
-    assert "SENTINEL_DEV_OPEN_DASHBOARD" in index_html
 
 
-def test_no_azure_or_sqlite_at_boot_without_config(
-    boot_env: dict[str, MagicMock], tmp_path: Path
-) -> None:
+def test_no_azure_at_boot_without_config(boot_env: dict[str, MagicMock]) -> None:
     with TestClient(main.create_app()) as client:
         assert client.get("/health").status_code == 200
     assert boot_env["credential"].call_count == 0
     assert boot_env["secret_client"].call_count == 0
-    assert not (tmp_path / "sentinel.db").exists()
+
+
+def test_no_sse_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No /events route; the dev flag is on, so the 404 cannot be an auth response."""
+    monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")
+    app = main.create_app()
+    with TestClient(app) as client:
+        routes = _route_auth(app)
+        assert "GET /api/scenarios" in routes  # the walk sees the mounted routers
+        assert not [r for r in routes if r.split(" ", 1)[1].startswith("/events")]
+        assert client.get("/events/inc-x").status_code == 404
 
 
 # ── Startup order, Key Vault and PG* wiring ───────────────────────────────────
@@ -477,3 +483,91 @@ async def test_shutdown_logs_cancelled_incident_before_closing_the_pool(
         "pool",
         "credential",
     ]
+
+
+def _terminal_run() -> TerminalRun:
+    incident_id = str(uuid4())
+    request = PipelineInput(
+        incident_id=incident_id,
+        alert=IncidentAlert(title="t"),
+        signal_type="runtime_error",
+        correlation_id=str(uuid4()),
+    )
+    result = PipelineResult(
+        incident_id=incident_id,
+        status="escalated",
+        resolution_type="escalated",
+        root_cause="not sure",
+        confidence=0.4,
+        escalation=EscalationContext(
+            hypothesis="not sure", evidence=["e"], confidence=0.4, missing=["x"]
+        ),
+        reflexion_loops=0,
+        tool_calls_used=0,
+        tokens_used=0,
+    )
+    return TerminalRun(
+        request=request,
+        result=result,
+        timeline=(),
+        suspect=None,
+        raw_hypothesis=False,
+        raw_evidence=False,
+    )
+
+
+async def test_shutdown_drains_a_dataset_write_before_the_traces_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _teardown_harness(monkeypatch)
+    monkeypatch.setenv("SENTINEL_SHUTDOWN_GRACE_S", "5")
+    writes = DatasetWrites()
+    monkeypatch.setattr(main, "DATASET_WRITES", writes)
+
+    class Writer:
+        async def write(self, run: TerminalRun) -> bool:
+            await asyncio.sleep(0.05)
+            events.append("item")
+            return True
+
+    monkeypatch.setattr(
+        main, "_wire_app", lambda _a, _s, _p, _t: writes.start(Writer(), _terminal_run())
+    )
+
+    async with main.lifespan(FastAPI()):
+        pass
+
+    assert events == ["item", "traces", "pool", "credential"]
+    assert len(writes) == 0
+
+
+async def test_shutdown_cancels_a_hanging_dataset_write_within_the_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _teardown_harness(monkeypatch)
+    monkeypatch.setenv("SENTINEL_SHUTDOWN_GRACE_S", "0.2")
+    writes = DatasetWrites(timeout_s=60)
+    monkeypatch.setattr(main, "DATASET_WRITES", writes)
+
+    class Writer:
+        async def write(self, run: TerminalRun) -> bool:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                events.append("write_cancelled")
+                raise
+            return True  # pragma: no cover
+
+    monkeypatch.setattr(
+        main, "_wire_app", lambda _a, _s, _p, _t: writes.start(Writer(), _terminal_run())
+    )
+
+    lifespan = main.lifespan(FastAPI())
+    await lifespan.__aenter__()
+    started = time.monotonic()
+    await lifespan.__aexit__(None, None, None)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2 + 1.0
+    assert events == ["write_cancelled", "traces", "pool", "credential"]
+    assert len(writes) == 0

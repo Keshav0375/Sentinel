@@ -15,8 +15,8 @@ class EpisodicRecord(BaseModel):
     """A past resolved incident stored in episodic memory.
 
     The embedding is the vector representation of the symptoms field, used for
-    cosine-similarity search when a new incident arrives. Stored as a BLOB in
-    SQLite and deserialized with numpy.
+    cosine-similarity search when a new incident arrives. Stored in a
+    pgvector column in Postgres (``memory/episodic.py``).
     """
 
     id: str

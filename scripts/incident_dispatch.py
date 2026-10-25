@@ -5,7 +5,8 @@ Pure functions plus a small CLI, stdlib only, so the workflow's YAML stays free 
 
 * ``tags``       service and PR number from the dispatch's Datadog tags
 * ``payload``    the ``POST /webhooks/incident`` body from the dispatch and the fetched context
-* ``pr-details`` ``context.pr_details`` from a GitHub pull request and its file list
+* ``pr-details`` ``context.pr_details`` (number, merge sha, author, files, branch = head.ref) from a
+                 GitHub pull request and its file list
 * ``logs``       ``context.recent_logs`` from a Datadog log search response
 * ``result``     the workflow outputs from the polled incident (no flag means the poll timed out)
 * ``summary``    the final resolution, outcome, severity, a record warning and the Datadog
@@ -145,11 +146,14 @@ def shape_pr_details(pull: dict[str, Any], files: list[str]) -> dict[str, Any] |
     if pull.get("merged") is not True or not isinstance(sha, str) or not SHA40_RE.match(sha):
         return None
     user = pull.get("user")
+    head = pull.get("head")
+    ref = head.get("ref") if isinstance(head, dict) else None
     return {
         "number": int(pull["number"]),
         "sha": sha,
         "author": user.get("login") if isinstance(user, dict) else None,
         "files_changed": [name for name in files if name][:MAX_FILES],
+        "branch": ref.strip() if isinstance(ref, str) and ref.strip() else None,
     }
 
 

@@ -196,7 +196,6 @@ jobs:
         run: python -m pytest tests/ -x --tb=short -q
         env:
           GROQ_API_KEY: "fake-key-for-ci"
-          SENTINEL_DB_PATH: ":memory:"
           TEST_DATABASE_URL: "postgresql://postgres:test@localhost:5432/sentinel"
 
   # ── 4. Summary: collect results and post table ───────────────────────────

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Literal
 
 from pydantic import SecretStr, field_validator, model_validator
@@ -77,9 +76,6 @@ class Settings(BaseSettings):
 
     # Local sentence-transformers model for zero-cost embedding (384 dims).
     sentinel_embedding_model: str = "all-MiniLM-L6-v2"
-
-    # ── Infrastructure ────────────────────────────────────────────────────────
-    sentinel_db_path: Path = Path("./data/sentinel.db")
 
     # ── PostgreSQL + pgvector (Phase 2) ───────────────────────────────────────
     # asyncpg DSN (postgresql://…). Empty → no Postgres pool is created; the app still

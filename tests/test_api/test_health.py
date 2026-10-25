@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -69,8 +68,7 @@ def _as_pool(stub: _StubPool) -> asyncpg.Pool:
     return cast(asyncpg.Pool, stub)
 
 
-def _lifespan_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
+def _lifespan_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in ("PGHOST", "PGDATABASE", "PGUSER"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(main, "EmbeddingClient", MagicMock())
@@ -202,9 +200,9 @@ async def test_ready_503_when_pool_closed(pg_dsn: str) -> None:
 
 @pytest.mark.parametrize("fake_llm", ["1", "0"])
 def test_lifespan_ready_without_database_any_fake_mode(
-    fake_llm: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    fake_llm: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _lifespan_env(monkeypatch, tmp_path)
+    _lifespan_env(monkeypatch)
     monkeypatch.setenv("SENTINEL_FAKE_LLM", fake_llm)
     with TestClient(main.create_app()) as client:
         first = client.get("/ready")
@@ -216,10 +214,8 @@ def test_lifespan_ready_without_database_any_fake_mode(
     assert health.json() == {"status": "ok"}
 
 
-def test_lifespan_ready_with_database(
-    pg_dsn: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _lifespan_env(monkeypatch, tmp_path)
+def test_lifespan_ready_with_database(pg_dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    _lifespan_env(monkeypatch)
     monkeypatch.setenv("DATABASE_URL", pg_dsn)
     monkeypatch.setenv("SENTINEL_DB_POOL_MIN", "1")
     monkeypatch.setenv("SENTINEL_DB_POOL_MAX", "2")
@@ -229,10 +225,8 @@ def test_lifespan_ready_with_database(
     assert resp.json() == {"status": "ready"}
 
 
-def test_lifespan_pg_env_without_pool_is_not_ready(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _lifespan_env(monkeypatch, tmp_path)
+def test_lifespan_pg_env_without_pool_is_not_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    _lifespan_env(monkeypatch)
     monkeypatch.setenv("PGHOST", "h")  # incomplete libpq config: no pool opens
     with TestClient(main.create_app()) as client:
         resp = client.get("/ready")

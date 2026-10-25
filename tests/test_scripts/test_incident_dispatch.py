@@ -227,7 +227,7 @@ def test_shape_pr_details_uses_the_merge_commit() -> None:
         "number": 12,
         "merged": True,
         "merge_commit_sha": _SHA40,
-        "head": {"sha": "b" * 40},
+        "head": {"sha": "b" * 40, "ref": "deployfail/03"},
         "user": {"login": "dev"},
     }
     files = [f"f{i}.py" for i in range(150)] + [""]
@@ -237,6 +237,9 @@ def test_shape_pr_details_uses_the_merge_commit() -> None:
     assert shaped["sha"] == _SHA40
     assert shaped["number"] == 12 and shaped["author"] == "dev"
     assert len(shaped["files_changed"]) == _script.MAX_FILES == 100
+    assert shaped["branch"] == "deployfail/03"
+    assert _script.shape_pr_details(pull | {"head": {}}, files)["branch"] is None
+    assert _script.shape_pr_details(pull | {"head": {"ref": "  "}}, files)["branch"] is None
     assert _script.shape_pr_details(pull | {"merged": False}, files) is None
     assert _script.shape_pr_details(pull | {"merge_commit_sha": "abc"}, files) is None
     assert _script.shape_pr_details(pull | {"merge_commit_sha": None}, files) is None
@@ -517,6 +520,7 @@ def test_main_pr_details_and_logs(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert _script.main(["pr-details", "--pull", str(pull), "--files", str(files)]) == 0
     details = json.loads(capsys.readouterr().out)
     assert details["files_changed"] == ["a.py", "b.py"] and details["author"] is None
+    assert details["branch"] is None
 
     pull.write_text(json.dumps({"number": 3, "merged": False}))
     assert _script.main(["pr-details", "--pull", str(pull), "--files", str(files)]) == 0

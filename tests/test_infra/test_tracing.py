@@ -863,9 +863,8 @@ def test_langfuse_enabled_needs_both_keys(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.fixture
-def light_lifespan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """The real lifespan on a throwaway SQLite file, with app wiring stubbed out."""
-    monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
+def light_lifespan(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """The real lifespan with app wiring stubbed out."""
     wire = MagicMock()
     monkeypatch.setattr(main, "_wire_app", wire)
     return wire

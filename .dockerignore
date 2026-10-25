@@ -1,4 +1,4 @@
-# Allowlist: only the image's build inputs enter the context (never data/, .env, .git, tests/).
+# Allowlist: only the image's build inputs enter the context (never .env, .git, tests/).
 *
 !pyproject.toml
 !poetry.lock

@@ -1,29 +1,10 @@
-"""Deploy models — CorrelatedDeploy (and the Phase-1 generator's Deploy)."""
+"""Deploy models — CorrelatedDeploy."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 from pydantic import BaseModel, Field
-
-
-class Deploy(BaseModel):
-    """A single deployment event for a service — Phase-1 scenario generator only.
-
-    Matches the deploy objects in scenario JSON files:
-    {"id": "...", "service": "...", "ts": "...", "author": "...", ...}
-
-    Used only by ``sentinel.generator.deploy_gen``; backend task 9.1 deletes both.
-    The Analysis agent's ``suspect_deploy`` uses :class:`CorrelatedDeploy`.
-    """
-
-    id: str
-    service: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    author: str
-    commit_sha: str
-    files_changed: int
-    description: str = ""
 
 
 class CorrelatedDeploy(BaseModel):

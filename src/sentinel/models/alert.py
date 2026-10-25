@@ -2,18 +2,16 @@
 
 ``IncidentPayload`` is the §3.1 request body (with its tag / PR / context sub-models);
 ``IncidentAlert`` is the pipeline-facing alert built from it (no raw payload, signal type or
-correlation id: those travel on ``PipelineInput``). The Phase-1 ``AlertPayload`` family stays
-for the scenario generator and the eval runner until backend 9.1 deletes them;
-``IncidentAlert.from_phase1`` adapts one.
+correlation id: those travel on ``PipelineInput``).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import uuid
-from datetime import UTC, datetime
-from enum import StrEnum
-from typing import Any, Final, Literal, get_args
+from datetime import datetime
+from typing import Final, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
@@ -28,45 +26,8 @@ MAX_RECENT_LOGS: Final = 50
 MAX_METADATA_KEYS: Final = 50
 MAX_CONTEXT_ITEM_CHARS: Final = 2000
 TRUNCATED: Final = "…[truncated]"
-
-
-class AlertSource(StrEnum):
-    """Monitoring system that fired the alert."""
-
-    DATADOG = "datadog"
-    PAGERDUTY = "pagerduty"
-
-
-class AlertSeverity(StrEnum):
-    """Raw severity as reported by the monitoring tool.
-
-    Distinct from incident.Severity (P1-P4), which is Sentinel's internal
-    classification assigned by the Triage Agent after context enrichment.
-    """
-
-    CRITICAL = "critical"
-    HIGH = "high"
-    WARNING = "warning"
-    LOW = "low"
-    INFO = "info"
-
-
-class AlertPayload(BaseModel):
-    """Incoming alert from a monitoring integration.
-
-    alert_id and timestamp have defaults so synthetic scenario payloads don't
-    need to supply them explicitly.
-    """
-
-    alert_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    source: AlertSource
-    service: str
-    metric: str
-    threshold: float
-    current_value: float
-    severity: AlertSeverity
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    metadata: dict[str, Any] = Field(default_factory=dict)
+# The eval label's shape: a PR head ref a dataset item may carry (decision 2026-10-25).
+BRANCH_PATTERN: Final = re.compile(r"[A-Za-z0-9._/-]{1,100}")
 
 
 class IncidentTags(BaseModel):
@@ -88,7 +49,19 @@ class PRDetails(BaseModel):
     number: int | None = None
     sha: str | None = None
     author: str | None = None
+    # The PR's head ref (the scenario branch, e.g. deployfail/03); the eval dataset item's label.
+    # Eval metadata only: never shown to an agent (``IncidentAlert.agent_view``).
+    branch: str | None = None
     files_changed: list[str] = []
+
+    @field_validator("branch")
+    @classmethod
+    def _branch_shape(cls, value: str | None) -> str | None:
+        """The stripped branch when it fits BRANCH_PATTERN, else None (dropped, never rejected)."""
+        if value is None:
+            return None
+        value = value.strip()
+        return value if BRANCH_PATTERN.fullmatch(value) else None
 
 
 class IncidentContext(BaseModel):
@@ -232,21 +205,15 @@ class IncidentAlert(BaseModel):
             timestamp=payload.timestamp,
         )
 
-    @classmethod
-    def from_phase1(cls, alert: AlertPayload) -> IncidentAlert:
-        """Adapt a Phase-1 ``AlertPayload`` (eval runner / scenario scripts)."""
-        title = alert.metadata.get("title")
-        if not (isinstance(title, str) and title.strip()):
-            title = (
-                f"{alert.metric} {alert.current_value} (threshold {alert.threshold}) "
-                f"on {alert.service}"
-            )
-        return cls(
-            alert_id=alert.alert_id,
-            source=alert.source.value,
-            title=title.strip(),
-            severity=alert.severity.value,
-            service=alert.service,
-            tags=IncidentTags(service=alert.service),
-            timestamp=alert.timestamp,
-        )
+    def agent_view(self) -> IncidentAlert:
+        """This alert as an agent sees it: ``context.pr_details.branch`` removed.
+
+        The branch is the eval ground-truth label (decision 2026-10-25, amended after review):
+        it labels the dataset item and never reaches a prompt.
+        """
+        pr = self.context.pr_details
+        if pr is None or pr.branch is None:
+            return self
+        pr_view = pr.model_copy(update={"branch": None})
+        context = self.context.model_copy(update={"pr_details": pr_view})
+        return self.model_copy(update={"context": context})

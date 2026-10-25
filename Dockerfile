@@ -30,8 +30,8 @@ RUN /opt/venv/bin/python -c "from sentence_transformers import SentenceTransform
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM python:3.12-slim@sha256:6c6ae3622772575c3ac02ecb2b02a06d05f19e1713a0cbff476ef37bca79e90f AS runtime
 
-# The app runs from src/ on PYTHONPATH and is not pip-installed: the poetry package
-# includes data/, which never enters the image.
+# The app runs from src/ on PYTHONPATH and is not pip-installed (install_locked.py --main-only
+# skips the project); src/ carries the package data: prompts, dashboard, scenario catalog.
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH=/app/src \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -60,6 +60,6 @@ RUN mkdir reports && chown 10001:10001 reports
 USER 10001:10001
 EXPOSE 8000
 
-# 5 s for open requests (an SSE stream never ends by itself), then the lifespan teardown
-# (worst case 37 s): 42 s fits the pod's 45 s terminationGracePeriodSeconds.
+# 5 s for open requests, then the lifespan teardown (worst case 37 s): 42 s fits the
+# pod's 45 s terminationGracePeriodSeconds.
 CMD ["uvicorn", "sentinel.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]

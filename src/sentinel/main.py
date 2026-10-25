@@ -3,9 +3,6 @@
 Run with::
 
     uvicorn sentinel.main:app --reload
-
-The app must be launched from the project root so that the ``data`` package
-(scenario files) is importable.
 """
 
 from __future__ import annotations
@@ -25,7 +22,6 @@ from sentinel.agents.orchestrator import ORCHESTRATOR, PipelineDeps, run_pipelin
 from sentinel.api.auth import configure_auth, require_incident_write
 from sentinel.api.config_view import make_config_router
 from sentinel.api.eval_report import make_eval_report_router
-from sentinel.api.events import make_events_router
 from sentinel.api.generate import make_generate_router
 from sentinel.api.health import database_configured, db_readiness, make_health_router
 from sentinel.api.incidents import make_incidents_router
@@ -33,6 +29,7 @@ from sentinel.api.scenarios import make_scenarios_router
 from sentinel.api.trajectories import make_trajectories_router
 from sentinel.api.webhooks import PipelineFn, make_incident_router
 from sentinel.config import Settings, get_settings
+from sentinel.eval.dataset_writer import DATASET_WRITES
 from sentinel.infra.dashboard_emitter import DashboardEventEmitter
 from sentinel.infra.database import close_pool, init_pool_from_settings
 from sentinel.infra.event_bus import EventBus, EventType, PipelineEvent
@@ -70,7 +67,6 @@ DEV_OPEN_ROUTES: Final[tuple[str, ...]] = (
     "GET /api/config",
     "GET /api/trajectories",
     "GET /api/eval-report",
-    "GET /events/{incident_id}",
 )
 
 
@@ -88,7 +84,8 @@ def make_pipeline_fn(
     which builds its agents per run, so provider credentials are read at use (§4.7), never
     at boot. On completion the incident's short-term memory gets the terminal status
     (``rollback_proposed`` | ``escalated``) and the result, and the dashboard stream is
-    closed with an ``incident_completed`` event.
+    closed with an ``incident_completed`` event. The dataset item is written in the
+    background and never delays this.
 
     Args:
         settings_fn: Callable returning the current Settings.
@@ -178,10 +175,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Teardown (each step runs even if the one before it raised or was cancelled): in-flight
     incidents are drained (up to SENTINEL_SHUTDOWN_GRACE_S; the rest are logged, then
     cancelled) BEFORE the traces flush and the pool closes, so a finishing incident can
-    still store itself; then the LangFuse client is shut down (flushing pending spans, for at
-    most ``TRACE_SHUTDOWN_TIMEOUT_S``, after which it is abandoned so a failed startup still
-    exits and the pod restarts), the pool is closed, then the Azure credential (the pool's
-    password callable uses it) is closed.
+    still store itself; then the background dataset writes (within the rest of the same
+    grace; the rest cancelled); then the LangFuse client is shut down (flushing pending
+    spans, for at most ``TRACE_SHUTDOWN_TIMEOUT_S``, after which it is abandoned so a failed
+    startup still exits and the pod restarts), the pool is closed, then the Azure credential
+    (the pool's password callable uses it) is closed.
     """
     settings = get_settings()
     configure_logging(settings.sentinel_log_level)
@@ -210,9 +208,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Each step can raise or be cancelled (e.g. a second SIGTERM); the nested finally
         # blocks run the later ones regardless. The drain comes first: a finishing incident
         # still needs the pool and its traces. Flushing can block on network I/O: it runs
-        # off the loop and shutdown_traces bounds it (TRACE_SHUTDOWN_TIMEOUT_S).
+        # off the loop and shutdown_traces bounds it (TRACE_SHUTDOWN_TIMEOUT_S). The dataset
+        # writes drain next, inside what is left of the same grace (they need the LangFuse
+        # client, so before the flush).
+        loop = asyncio.get_running_loop()
+        drain_deadline = loop.time() + grace_s
         try:
-            await incident_tasks.shutdown(grace_s)
+            try:
+                await incident_tasks.shutdown(grace_s)
+            finally:
+                await DATASET_WRITES.drain(max(0.0, drain_deadline - loop.time()))
         finally:
             try:
                 await asyncio.to_thread(shutdown_traces)
@@ -251,7 +256,7 @@ def _wire_app(
     # ── LLM + SDK defaults ────────────────────────────────────────────────────
     apply_sdk_defaults(settings)
 
-    # ── Event bus (dashboard SSE) ─────────────────────────────────────────────
+    # ── Event bus ─────────────────────────────────────────────────────────────
     event_bus = EventBus()
 
     # ── Trajectory tracing ────────────────────────────────────────────────────
@@ -306,7 +311,6 @@ def _wire_app(
         dependencies=protected,
     )
     app.include_router(make_dashboard_router(), dependencies=dashboard)
-    app.include_router(make_events_router(event_bus), dependencies=dashboard)
     app.include_router(make_scenarios_router(), dependencies=dashboard)
     app.include_router(make_eval_report_router(), dependencies=dashboard)
     app.include_router(make_config_router(settings), dependencies=dashboard)

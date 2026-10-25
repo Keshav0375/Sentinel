@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,7 +19,7 @@ from sentinel.main import create_app, make_pipeline_fn
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload, AlertSeverity, AlertSource, IncidentAlert
+from sentinel.models.alert import IncidentAlert
 from sentinel.models.incident import IncidentStatus
 from sentinel.models.pipeline import PipelineInput, PipelineResult
 from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
@@ -30,17 +29,6 @@ from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
 
 def _fake_settings() -> Settings:
     return Settings(anthropic_api_key="sk-ant-test", openai_api_key="sk-test", _env_file=None)
-
-
-def _make_alert(service: str = "api-gateway") -> AlertPayload:
-    return AlertPayload(
-        source=AlertSource.DATADOG,
-        service=service,
-        metric="error_rate",
-        threshold=0.05,
-        current_value=0.34,
-        severity=AlertSeverity.CRITICAL,
-    )
 
 
 def _make_incident_alert(service: str = "api-gateway") -> IncidentAlert:
@@ -93,14 +81,13 @@ def test_module_level_app_is_fastapi() -> None:
 
 
 @pytest.fixture
-def lifespan_env(pg_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
-    """Point the real lifespan at the test database and a throwaway SQLite file.
+def lifespan_env(pg_dsn: str, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point the real lifespan at the test database.
 
     Global side effects of a full startup (SDK default client, trace processors) are
     stubbed so they cannot leak into other tests.
     """
     monkeypatch.setenv("DATABASE_URL", pg_dsn)
-    monkeypatch.setenv("SENTINEL_DB_PATH", str(tmp_path / "sentinel.db"))
     monkeypatch.setenv("SENTINEL_DB_POOL_MIN", "1")
     monkeypatch.setenv("SENTINEL_DB_POOL_MAX", "2")
     monkeypatch.setattr(main, "apply_sdk_defaults", MagicMock())
@@ -151,7 +138,12 @@ _INCIDENT = "4f7c2a5e-8f1d-4f0e-9c4b-2b8e6a1d3c70"
 
 
 def _request(incident_id: str = _INCIDENT) -> PipelineInput:
-    return PipelineInput.from_alert(incident_id, _make_alert())
+    return PipelineInput(
+        incident_id=incident_id,
+        alert=_make_incident_alert(),
+        signal_type="runtime_error",
+        correlation_id="0b6f1c2e-3d4a-4b5c-8d9e-0f1a2b3c4d5e",
+    )
 
 
 def _result(status: str = "rollback_proposed", incident_id: str = _INCIDENT) -> PipelineResult:
