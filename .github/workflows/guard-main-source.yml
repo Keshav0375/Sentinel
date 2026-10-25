@@ -9,21 +9,21 @@ name: Guard main source
 # Keep the job name `verify-source-branch` stable — it is referenced by name as a
 # required status check in the "Main Protection" ruleset.
 #
-# Policy:
-#   main            <- only  release-phase-2  or  planning/phase-2-e2e
-#   release-phase-2 <- only  dev/*  or  fix/*  or  planning/phase-2-e2e
+# Policy (post-release, 2026-10-25 — Phase 2 shipped to main as #29):
+#   main            <- only  dev/*  or  fix/*  or  release-phase-2
+#   release-phase-2 <- nothing (frozen: the Phase 2 record; main-backup holds pre-release main)
 #
-# `dev/*` is the Phase-2 implementation prefix — one branch per phase, branched
-# from an up-to-date release-phase-2 and merged back into it at the phase gate
-# (e.g. dev/backend-phase-1-data-layer). planning/phase-2-e2e carries plans,
-# architecture, and the tracker only. release-phase-2 -> main is the final merge.
+# `dev/*` is the phase implementation prefix — one branch per phase, branched from
+# an up-to-date main and merged back into it at the phase gate
+# (e.g. dev/backend-phase-10-ops-dashboard). During Phase 2 these targeted
+# release-phase-2 instead; that branch is now read-only history.
 #
 # `fix/*` (added 2026-08-15) covers repairs that belong to no phase — tooling and
 # CI defects found mid-build, e.g. fix/quality-gate-implicit-paths. Without it the
 # only way to land such a fix was to disguise it as a phase branch, which would
 # have made the tracker lie about what a `dev/*` branch means. Note ci.yml's
 # branch-convention check already accepts fix/, so the guard was the narrower of
-# the two rules; this aligns them. `main` is unchanged and stays strict.
+# the two rules; this aligns them.
 #
 # Entries are shell glob patterns, so `dev/*` matches any phase branch.
 # (edit the ALLOWED lists below to change who may target each branch)
@@ -46,9 +46,10 @@ jobs:
           echo "PR: $HEAD -> $BASE"
           case "$BASE" in
             main)
-              ALLOWED="release-phase-2 planning/phase-2-e2e" ;;
+              ALLOWED="dev/* fix/* release-phase-2" ;;
             release-phase-2)
-              ALLOWED="dev/* fix/* planning/phase-2-e2e" ;;
+              echo "::error::release-phase-2 is frozen (the Phase 2 record) — open PRs into main instead."
+              exit 1 ;;
             *)
               echo "No source restriction configured for base '$BASE'."; exit 0 ;;
           esac
