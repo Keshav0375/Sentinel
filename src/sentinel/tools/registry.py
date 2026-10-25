@@ -3,16 +3,19 @@
 Pattern
 -------
 Each tool is an async function decorated with ``@function_tool``. Tools cannot
-receive their dependencies (memory clients, scenario data) as LLM-visible
+receive their dependencies (memory clients, the database pool) as LLM-visible
 parameters — the LLM only sees the typed domain input schema. Dependencies
 are therefore injected at construction time via closure::
 
     def make_get_service_metadata(memory: SemanticMemory) -> FunctionTool:
         @function_tool
-        async def get_service_metadata(service_name: str) -> ServiceMetadata:
+        async def get_service_metadata(request: ServiceLookupInput) -> str:
             \"\"\"Get metadata for a named service from the service map.\"\"\"
-            return await memory.get_service(service_name)
+            return tool_json(await _lookup_service(memory, request))
         return get_service_metadata
+
+Every tool returns compact JSON via ``sentinel.tools.output.tool_json`` (the SDK
+would otherwise hand the model a Python repr); a failure carries ``"error": true``.
 
 The registry wires all tools together in ``build_tools``. Agents receive a
 pre-built list of ``FunctionTool`` objects — they never import tool modules
@@ -21,9 +24,9 @@ directly. This keeps agent definitions decoupled from tool implementations.
 Usage::
 
     deps = ToolDeps(
-        semantic_memory=SemanticMemory(db_path),
-        episodic_memory=EpisodicMemory(db_path, embedding_client),
-        scenario=loaded_scenario,
+        semantic_memory=SemanticMemory(pool),  # pool: asyncpg.Pool | None
+        episodic_memory=EpisodicMemory(pool, embedding_client),
+        pool=pool,
     )
     tools = build_tools(deps)
     agent = Agent(name="triage", tools=tools, ...)
@@ -39,9 +42,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from agents import FunctionTool
 
-from sentinel.generator.scenarios import Scenario
+from sentinel.config import Settings
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 
@@ -57,22 +61,27 @@ class ToolDeps:
     Attributes:
         semantic_memory: Service map and runbook lookups (SemanticMemory).
         episodic_memory: Past-incident similarity search (EpisodicMemory).
-        scenario: Active scenario supplying synthetic logs and deploys in the
-            MVP. None when no scenario is pre-loaded (e.g. registry-only unit
-            tests that don't exercise log/deploy tools).
+        pool: asyncpg pool ``get_deploy_details`` reads ``deployments`` from. None
+            (no ``DATABASE_URL``) builds fine; the tool then reports "unavailable".
+        settings: Credentials and endpoints for the API-backed tools (Datadog for
+            ``fetch_logs``, GitHub for ``get_deploy_details``). Defaults to the
+            environment's Settings; keys are read at call time, so a missing key fails
+            (or, for GitHub, skips) the call, never the build.
     """
 
     semantic_memory: SemanticMemory
     episodic_memory: EpisodicMemory
-    scenario: Scenario | None = field(default=None)
+    pool: asyncpg.Pool | None = field(default=None)
+    settings: Settings = field(default_factory=Settings)
 
 
 def build_tools(deps: ToolDeps) -> list[FunctionTool]:
     """Create all function tools with their dependencies injected via closure.
 
     Returns a flat list of ``FunctionTool`` instances ready to be passed to
-    an ``Agent``. The list grows as tasks 4.2–4.8 are implemented — each
-    adds an import block and a ``tools.append`` call below.
+    an ``Agent``: exactly the six Phase-2 tools (decision 2026-10-14) —
+    four read-only lookups and two output-only drafts. No tool notifies,
+    approves or acts on the world (backend.md §3.3).
 
     Args:
         deps: The bundled dependencies for this request context.
@@ -90,31 +99,21 @@ def build_tools(deps: ToolDeps) -> list[FunctionTool]:
     # ── 4.3 — fetch_logs ─────────────────────────────────────────────────────
     from sentinel.tools.log_fetcher import make_log_fetcher_tool
 
-    tools.append(make_log_fetcher_tool(deps.scenario))
+    tools.append(make_log_fetcher_tool(deps.settings))
 
-    # ── 4.4 — list_recent_deploys ─────────────────────────────────────────────
+    # ── 4.4 — get_deploy_details ─────────────────────────────────────────────
     from sentinel.tools.deploy_checker import make_deploy_checker_tool
 
-    tools.append(make_deploy_checker_tool(deps.scenario))
+    tools.append(make_deploy_checker_tool(deps.pool, deps.settings))
 
     # ── 4.5 — search_past_incidents ──────────────────────────────────────────
     from sentinel.tools.incident_search import make_incident_search_tool
 
     tools.append(make_incident_search_tool(deps.episodic_memory))
 
-    # ── 4.6 — draft_rollback_pr, draft_hotfix ────────────────────────────────
+    # ── 4.6 — prepare_rollback_spec, format_escalation (output only) ─────────
     from sentinel.tools.remediation_tools import make_remediation_tools
 
     tools.extend(make_remediation_tools())
-
-    # ── 4.7 — draft_slack_summary ────────────────────────────────────────────
-    from sentinel.tools.comms_tools import make_comms_tools
-
-    tools.extend(make_comms_tools())
-
-    # ── 4.8 — request_human_approval (HITL gate) ─────────────────────────────
-    from sentinel.tools.hitl import make_hitl_tool
-
-    tools.append(make_hitl_tool())
 
     return tools

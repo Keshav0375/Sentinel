@@ -1,26 +1,16 @@
-"""Scenarios API — GET /api/scenarios.
+"""Scenarios API — GET /api/scenarios: the scenario-branch catalog, read-only.
 
-Returns the list of all available scenarios with their alert payloads so the
-dashboard can populate its "Fire Scenario" dropdown and POST the correct
-``AlertPayload`` to the webhook receiver.
+Serves the 30 Sentinel-deployment scenario branches (decision 2026-10-25) from the vendored
+``sentinel/catalog/branches.yaml``. A scenario runs only as a human-merged PR on
+Sentinel-deployment; this route only lists them. main.py mounts it behind the bearer.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter
-from pydantic import BaseModel
 
-from sentinel.generator.alert_gen import generate_alert, list_scenarios, load_scenario
-from sentinel.models.alert import AlertPayload
-
-
-class ScenarioInfo(BaseModel):
-    """Single scenario entry returned by GET /api/scenarios."""
-
-    id: str
-    label: str
-    failure_class: str
-    alert: AlertPayload
+from sentinel.catalog import load_catalog
+from sentinel.eval.runner import BranchTruth
 
 
 def make_scenarios_router() -> APIRouter:
@@ -31,27 +21,9 @@ def make_scenarios_router() -> APIRouter:
     """
     router = APIRouter()
 
-    @router.get("/api/scenarios", response_model=list[ScenarioInfo])
-    async def get_scenarios() -> list[ScenarioInfo]:  # pyright: ignore[reportUnusedFunction]
-        """Return all available scenarios with pre-generated alert payloads.
-
-        The alert payload is safe to POST directly to ``/webhooks/alert``.
-        Each call generates fresh ``alert_id`` / ``timestamp`` values so the
-        deduplicator treats each fire as a new incident.
-        """
-        results: list[ScenarioInfo] = []
-        for sid in list_scenarios():
-            scenario = load_scenario(sid)
-            alert = generate_alert(scenario)
-            label = f"{sid.replace('_', ' ').title()} — {scenario.description[:60]}"
-            results.append(
-                ScenarioInfo(
-                    id=sid,
-                    label=label,
-                    failure_class=scenario.failure_class,
-                    alert=alert,
-                )
-            )
-        return results
+    @router.get("/api/scenarios", response_model=list[BranchTruth])
+    async def get_scenarios() -> list[BranchTruth]:  # pyright: ignore[reportUnusedFunction]
+        """Every catalog entry, in branches.yaml order."""
+        return list(load_catalog())
 
     return router

@@ -15,12 +15,14 @@ Checks whose tool is not installed are reported as SKIPPED (warning), not failur
 so the gate runs anywhere; CI images pin the full toolchain so nothing is skipped there.
 Path arguments that do not exist yet are pruned before the tool runs (a repo mid-build
 has not created every directory), and a check whose paths have all been pruned is
-SKIPPED rather than failed.
+SKIPPED rather than failed. Some tools take no path argument at all and discover their
+own inputs — those declare it in IMPLICIT_PATHS so they get the same treatment.
 
 The pytest globs below must cover every `tests/` directory named by a task file in
 the sentinel-brain repo's implementation/tasks/. If a phase adds a test package, add it here —
 otherwise the gate reports green without ever running that phase's tests.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -42,7 +44,23 @@ MATRIX: dict[str, list[Check]] = {
         ("ruff-format", ["ruff", "format", "--check", "src/", "tests/"], True),
         ("pyright", ["pyright", "src/"], True),
         ("gitleaks", ["gitleaks", "detect", "--no-banner", "--redact"], True),
-        ("pip-audit", ["pip-audit", "--strict"], False),
+        # filelock CVE-2026-112940/-112913/-112907: fixed only in filelock 4.2.1, but litellm
+        # (<=1.106.2) caps filelock <4.0. Accepted until litellm lifts the cap; re-check by
+        # 2026-11-24 (sentinel-brain decisions 2026-10-24, STATE follow-up). Drop the ignores then.
+        (
+            "pip-audit",
+            [
+                "pip-audit",
+                "--strict",
+                "--ignore-vuln",
+                "CVE-2026-112940",
+                "--ignore-vuln",
+                "CVE-2026-112913",
+                "--ignore-vuln",
+                "CVE-2026-112907",
+            ],
+            False,
+        ),
         # Unit = no external service required.
         (
             "pytest-unit",
@@ -51,6 +69,7 @@ MATRIX: dict[str, list[Check]] = {
                 "tests/test_models/",
                 "tests/test_tools/",
                 "tests/test_providers/",
+                "tests/test_scripts/",
                 "tests/test_config.py",
                 "-x",
                 "-q",
@@ -67,6 +86,7 @@ MATRIX: dict[str, list[Check]] = {
                 "tests/test_agents/",
                 "tests/test_api/",
                 "tests/test_eval/",
+                "tests/test_e2e/",
                 "-x",
                 "-q",
             ],
@@ -88,6 +108,47 @@ MATRIX: dict[str, list[Check]] = {
         ("tf-validate", ["terraform", "validate", "-no-color"], True),
         ("tflint", ["tflint", "--recursive"], False),
         ("tfsec", ["tfsec", "."], False),
+        # The bootstrap scripts create the state account and the CI identity by running
+        # against a live subscription — the highest-risk files in sentinel-infra and, until
+        # now, the only ones no gate check ever read. Required, because a green gate that
+        # never lints them says nothing about them. It caught CRLF line endings on the first
+        # run, which would have failed every script on ubuntu-latest with
+        # "bad interpreter: /usr/bin/env bash^M". Path pruning skips this cleanly in repos
+        # that ship no scripts/ (see _is_path_arg, which now recognises .sh).
+        (
+            "shellcheck",
+            ["shellcheck", "scripts/*.sh", "ci-images/*.sh"],
+            True,
+        ),
+        # Phase 3 put PYTHON in the infra repo: the Event Grid bridge and the KV
+        # rotator run unattended against live services, and until this entry the
+        # gate never imported them, let alone ran their tests — PASS said nothing
+        # about 149 lines of handler code (review blocker, 2026-08-23; same
+        # blindspot class as the shellcheck gap). Path-pruned in repos without
+        # the tests directory.
+        (
+            "py-unittest",
+            ["python", "-m", "unittest", "discover", "-s", "modules/functions/tests/"],
+            True,
+        ),
+        ("ruff-infra", ["ruff", "check", "modules/functions/src/"], False),
+        # The naming module decides every resource name in the estate, and it is
+        # the one part that can be tested properly — pure computation, no provider,
+        # no state. `terraform test` needs its own init because module dirs are not
+        # initialised by the root's. Path-pruned in repos without the module.
+        (
+            "tf-test-init",
+            [
+                "terraform",
+                "-chdir=modules/naming",
+                "init",
+                "-backend=false",
+                "-input=false",
+                "-no-color",
+            ],
+            False,
+        ),
+        ("tf-test", ["terraform", "-chdir=modules/naming", "test", "-no-color"], False),
         # sentinel-infra ships 4 workflows (dry / apply / destroy / runners) — lint them here
         # rather than standalone, so infra task 4.3's gate is the same body CI runs.
         ("actionlint", ["actionlint"], True),
@@ -98,6 +159,14 @@ MATRIX: dict[str, list[Check]] = {
 
 # Checks skipped when --fast is set (slow / network / heavy).
 FAST_SKIP = {"pytest-integration", "pip-audit", "tfsec", "gitleaks"}
+
+# Checks whose input path is implicit: the tool discovers its own files instead of
+# taking them as argv, so resolve_argv() has nothing to prune. `actionlint` walks
+# .github/workflows/ itself and exits 3 when the directory is absent — which is the
+# normal state of a repo mid-build, since sentinel-infra ships workflows in task 4.3
+# and sentinel-deployment in task 2.2. Without this, infra phases 1-3 and deployment
+# phase 1 could never report green no matter what they contained.
+IMPLICIT_PATHS = {"actionlint": ".github/workflows"}
 
 
 @dataclass
@@ -145,7 +214,7 @@ def _is_path_arg(arg: str) -> bool:
     """True for args that name a file or directory in the repo (not a flag)."""
     if arg.startswith("-"):
         return False
-    return arg.endswith((".py", "/")) or arg == "."
+    return arg.endswith((".py", ".sh", "/")) or arg == "." or "*" in arg
 
 
 def resolve_argv(argv: list[str], cwd: Path) -> list[str] | None:
@@ -156,6 +225,22 @@ def resolve_argv(argv: list[str], cwd: Path) -> list[str] | None:
     hard error, not a signal. Returns None when the check named paths and none of
     them survived — the caller reports SKIPPED.
     """
+    # Expand globs first. Without this a check must NAME every file, so adding a
+    # script leaves it silently unchecked while the gate still reports PASS. That
+    # happened three times: shellcheck did not cover the bootstrap scripts at all,
+    # then stopped covering bootstrap-identities.sh when it replaced
+    # bootstrap-oidc.sh. A glob makes coverage the default rather than something
+    # someone has to remember.
+    argv = [
+        m
+        for a in argv
+        for m in (
+            sorted(str(x.relative_to(cwd)).replace("\\", "/") for x in cwd.glob(a))
+            if (_is_path_arg(a) and "*" in a)
+            else [a]
+        )
+    ]
+
     path_args = [a for a in argv if _is_path_arg(a)]
     if not path_args:
         return argv
@@ -170,6 +255,9 @@ def run_check(name: str, argv: list[str], required: bool, cwd: Path) -> Result:
     tool = argv[0]
     if shutil.which(tool) is None:
         return Result(name, "skipped", detail=f"{tool} not on PATH")
+    implicit = IMPLICIT_PATHS.get(name)
+    if implicit is not None and not (cwd / implicit).exists():
+        return Result(name, "skipped", detail=f"no such path yet: {implicit}")
     resolved = resolve_argv(argv, cwd)
     if resolved is None:
         paths = " ".join(a for a in argv if _is_path_arg(a))
@@ -266,15 +354,20 @@ def main() -> int:
     report = gate(args.repo, path, args.fast)
 
     if args.json:
-        print(json.dumps({
-            "repo": report.repo,
-            "path": report.path,
-            "ok": report.ok,
-            "inconclusive": report.inconclusive,
-            "ran": len(report.ran),
-            "skipped": [r.name for r in report.skipped],
-            "results": [r.__dict__ for r in report.results],
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "repo": report.repo,
+                    "path": report.path,
+                    "ok": report.ok,
+                    "inconclusive": report.inconclusive,
+                    "ran": len(report.ran),
+                    "skipped": [r.name for r in report.skipped],
+                    "results": [r.__dict__ for r in report.results],
+                },
+                indent=2,
+            )
+        )
     else:
         print_human(report, unicode_ok)
 

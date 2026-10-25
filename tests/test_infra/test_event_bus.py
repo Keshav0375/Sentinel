@@ -19,7 +19,7 @@ class TestPipelineEvent:
     def test_create_with_data(self) -> None:
         event = PipelineEvent(
             type=EventType.TOOL_CALLED,
-            agent_name="log_analyst_agent",
+            agent_name="analysis",
             incident_id="inc-001",
             data={"tool": "fetch_logs", "service": "api-gateway"},
         )
@@ -32,10 +32,10 @@ class TestPipelineEvent:
 
     def test_serialization_roundtrip(self) -> None:
         event = PipelineEvent(
-            type=EventType.HITL_REQUESTED,
-            agent_name="remediation_agent",
+            type=EventType.TOOL_RESULT,
+            agent_name="resolution",
             incident_id="inc-002",
-            data={"action": "rollback", "risk": "high"},
+            data={"tool": "prepare_rollback_spec", "result": "spec"},
         )
         json_str = event.model_dump_json()
         restored = PipelineEvent.model_validate_json(json_str)
@@ -49,9 +49,7 @@ class TestPipelineEvent:
             "agent_completed",
             "tool_called",
             "tool_result",
-            "hitl_requested",
-            "hitl_resolved",
-            "incident_resolved",
+            "incident_completed",
         }
         actual = {e.value for e in EventType}
         assert actual == expected
@@ -98,7 +96,7 @@ class TestEventBusPublish:
         bus = EventBus()
         q1 = await bus.subscribe("inc-001")
         q2 = await bus.subscribe("inc-001")
-        event = PipelineEvent(type=EventType.TOOL_CALLED, agent_name="log_analyst_agent")
+        event = PipelineEvent(type=EventType.TOOL_CALLED, agent_name="analysis")
         count = await bus.publish("inc-001", event)
         assert count == 2
         assert q1.get_nowait() == event
@@ -199,7 +197,7 @@ class TestEventBusMultipleIncidents:
         q1 = await bus.subscribe("inc-001")
         q2 = await bus.subscribe("inc-002")
         e1 = PipelineEvent(type=EventType.AGENT_STARTED, agent_name="triage_agent")
-        e2 = PipelineEvent(type=EventType.TOOL_CALLED, agent_name="log_analyst_agent")
+        e2 = PipelineEvent(type=EventType.TOOL_CALLED, agent_name="analysis")
         await bus.publish("inc-001", e1)
         await bus.publish("inc-002", e2)
         r1 = q1.get_nowait()
@@ -214,7 +212,7 @@ class TestEventBusMultipleIncidents:
         await bus.close_incident("inc-001")
         assert bus.incident_subscriber_count("inc-001") == 0
         assert bus.incident_subscriber_count("inc-002") == 1
-        event = PipelineEvent(type=EventType.AGENT_COMPLETED, agent_name="comms_agent")
+        event = PipelineEvent(type=EventType.AGENT_COMPLETED, agent_name="reverification")
         count = await bus.publish("inc-002", event)
         assert count == 1
         assert q2.get_nowait() == event

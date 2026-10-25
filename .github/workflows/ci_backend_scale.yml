@@ -1,0 +1,163 @@
+# Manual up/down toggle and nightly scale-to-zero safety net (backend task 8.4).
+# Source: architecture backend.md sections 8.5 (rule 4) and 9.5, as amended by decisions.md
+# 2026-10-24 (phases 7 and 8). Scale-to-zero is pod-level: backend-down deletes the Service and
+# scales the Deployment to 0. The shared cluster is never stopped here (a separate manual op).
+# The nightly run always scales down and ignores SENTINEL_KEEP_WARM, so a forgotten demo session
+# costs at most one night. The stable-to-sha-tag lookup is the shared resolve-stable-tag action.
+name: "[sentinel] backend — scale"
+
+on:
+  workflow_dispatch:
+    inputs:
+      direction:
+        description: Scale the backend up or down
+        required: true
+        type: choice
+        options:
+          - up
+          - down
+        default: down
+  schedule:
+    - cron: '0 2 * * *'
+
+concurrency:
+  group: sentinel-backend
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # Until the infra CI-identity ticket sets the variables below, the scale job is skipped and the run (manual or
+  # nightly) stays green with a notice. No secrets and no login here; the environment makes environment-level
+  # variables visible.
+  preflight:
+    name: Check Azure CI identity
+    runs-on: ubuntu-24.04
+    environment: sentinel-dev
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        name: Check the Azure CI identity variables
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ACR_NAME: ${{ vars.ACR_NAME }}
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+          AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+          SENTINEL_API_TENANT_ID: ${{ vars.SENTINEL_API_TENANT_ID }}
+          SENTINEL_API_AUDIENCE: ${{ vars.SENTINEL_API_AUDIENCE }}
+          KEY_VAULT_URI: ${{ vars.KEY_VAULT_URI }}
+          PG_HOST: ${{ vars.PG_HOST }}
+          PG_DATABASE: ${{ vars.PG_DATABASE }}
+          PG_USER_BACKEND: ${{ vars.PG_USER_BACKEND }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID ACR_NAME ACR_LOGIN_SERVER \
+            AKS_RESOURCE_GROUP AKS_CLUSTER_NAME SENTINEL_API_TENANT_ID SENTINEL_API_AUDIENCE KEY_VAULT_URI \
+            PG_HOST PG_DATABASE PG_USER_BACKEND; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            msg="Azure CI identity not configured — ${GITHUB_WORKFLOW:-this workflow} skipped."
+            msg="$msg See sentinel-brain decisions 2026-10-24 phase 8 'Names the infra CI-identity ticket must create'."
+            echo "::notice::$msg Missing:$missing"
+            {
+              echo "$msg"
+              echo ""
+              echo "Missing variables:$missing"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+  scale:
+    name: scale
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-24.04
+    environment: sentinel-dev
+    timeout-minutes: 60
+    outputs:
+      backend-url: ${{ steps.up.outputs.backend-url }}
+    steps:
+      - id: checkout
+        name: Check out the composite actions
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - id: login
+        name: Azure login (resource tenant)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - id: resolve-tag
+        name: Resolve stable to its sha- tag
+        if: github.event_name == 'workflow_dispatch' && inputs.direction == 'up'
+        uses: ./.github/actions/resolve-stable-tag
+        with:
+          acr-name: ${{ vars.ACR_NAME }}
+
+      - id: up
+        name: Bring the backend up
+        if: github.event_name == 'workflow_dispatch' && inputs.direction == 'up'
+        uses: ./.github/actions/backend-up
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          image-tag: ${{ steps.resolve-tag.outputs.image-tag }}
+          acr-login-server: ${{ vars.ACR_LOGIN_SERVER }}
+          api-tenant-id: ${{ vars.SENTINEL_API_TENANT_ID }}
+          api-audience: ${{ vars.SENTINEL_API_AUDIENCE }}
+          key-vault-url: ${{ vars.KEY_VAULT_URI }}
+          pg-host: ${{ vars.PG_HOST }}
+          pg-database: ${{ vars.PG_DATABASE }}
+          pg-user: ${{ vars.PG_USER_BACKEND }}
+
+      - id: summary
+        name: Publish the backend URL
+        if: github.event_name == 'workflow_dispatch' && inputs.direction == 'up'
+        shell: bash
+        env:
+          BACKEND_URL: ${{ steps.up.outputs.backend-url }}
+          IMAGE_TAG: ${{ steps.resolve-tag.outputs.image-tag }}
+        run: |
+          set -euo pipefail
+          echo "::notice::backend-url: $BACKEND_URL"
+          {
+            echo "### Sentinel backend is up"
+            echo ""
+            echo "- backend-url: $BACKEND_URL"
+            echo "- image-tag: $IMAGE_TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - id: down-manual
+        name: Scale the backend down (manual, honours SENTINEL_KEEP_WARM)
+        if: github.event_name == 'workflow_dispatch' && inputs.direction == 'down'
+        uses: ./.github/actions/backend-down
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          keep-warm: ${{ vars.SENTINEL_KEEP_WARM }}
+
+      - id: down-nightly
+        name: Scale the backend to zero (nightly safety net, ignores SENTINEL_KEEP_WARM)
+        if: github.event_name == 'schedule'
+        uses: ./.github/actions/backend-down
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          keep-warm: 'false'

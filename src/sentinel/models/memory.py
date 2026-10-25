@@ -1,11 +1,12 @@
-"""Memory models — EpisodicRecord, Runbook, SemanticRecord, MemoryQueryResult."""
+"""Memory models — EpisodicRecord, IncidentOutcome, IncidentRow, DeploymentRow, Runbook,
+SemanticRecord, MemoryQueryResult."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
 from sentinel.models.service import ServiceMetadata
 
@@ -14,8 +15,8 @@ class EpisodicRecord(BaseModel):
     """A past resolved incident stored in episodic memory.
 
     The embedding is the vector representation of the symptoms field, used for
-    cosine-similarity search when a new incident arrives. Stored as a BLOB in
-    SQLite and deserialized with numpy.
+    cosine-similarity search when a new incident arrives. Stored in a
+    pgvector column in Postgres (``memory/episodic.py``).
     """
 
     id: str
@@ -24,6 +25,9 @@ class EpisodicRecord(BaseModel):
     symptoms: str
     root_cause: str
     resolution: str
+    # Read-only here: incidents.resolution_type is written by the phase-4 pipeline;
+    # store_incident leaves it NULL (decision 2026-10-12, item 3).
+    resolution_type: str | None = None
     mttr_seconds: int | None = None
     embedding: list[float] = []
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -33,20 +37,22 @@ class EpisodicRecord(BaseModel):
 class Runbook(BaseModel):
     """Ordered remediation steps for a specific failure class on a service.
 
-    Stored in the SQLite runbooks table. Referenced by the Triage and
-    Remediation agents to guide their decision-making.
+    Parsed from the markdown in services.runbook (one per service). Referenced by
+    the Triage and Remediation agents to guide their decision-making.
     """
 
     id: str
     service_name: str
     failure_class: str
     steps: list[str]
+    # Set by get_service_metadata when it cut steps to keep its output small.
+    truncated: bool = False
 
 
 class SemanticRecord(BaseModel):
     """Combined view of a service's metadata and associated runbooks.
 
-    Loaded from semantic memory (SQLite) once per incident. The Triage Agent
+    Loaded from semantic memory (PostgreSQL) once per incident. The Triage Agent
     uses this to understand service topology and available remediation playbooks.
     """
 
@@ -63,3 +69,72 @@ class MemoryQueryResult(BaseModel):
 
     records: list[EpisodicRecord] = []
     similarity_scores: list[float] = []
+
+
+class IncidentOutcome(BaseModel):
+    """What the phase-4 pipeline adds to an ``incidents`` row (§5.3) beyond an Incident.
+
+    Passed to ``EpisodicMemory.store_incident(incident, outcome=...)``: it supplies the
+    columns a Phase-1 :class:`~sentinel.models.incident.Incident` cannot (correlation_id,
+    root_cause_confidence, resolution_type, reflexion_loops, langfuse_trace_id), the
+    root cause and resolution with the agent that produced each (``provenance``), and the
+    pipeline result, kept in ``trajectory``. Agent output, not verified fact.
+    """
+
+    correlation_id: str | None = Field(default=None, description="The bridge's UUID (§2.1).")
+    root_cause: str
+    root_cause_by: str = Field(description="The agent (or the orchestrator) that said it.")
+    root_cause_confidence: float = Field(ge=0.0, le=1.0)
+    resolution: str
+    resolution_by: str
+    resolution_type: str = Field(description="rollback | escalated (§5.3).")
+    reflexion_loops: int = Field(ge=0)
+    langfuse_trace_id: str = Field(description="The incident UUID as 32 hex (§4.5).")
+    pipeline_result: dict[str, Any] = Field(description="PipelineResult, as JSON.")
+
+
+class IncidentRow(BaseModel):
+    """One ``incidents`` row (§5.3) as stored: every column except ``embedding``.
+
+    What ``GET /incidents*`` returns (decision 2026-10-19). An incident still in flight
+    (short-term memory only) has the same shape with ``status: "in_progress"``.
+    UUID columns are strings; JSONB columns are their decoded JSON.
+    """
+
+    id: str
+    alert_id: str
+    dd_event_id: str | None = None
+    correlation_id: str | None = None
+    severity: str
+    service: str
+    status: str
+    root_cause: str | None = None
+    root_cause_confidence: float | None = None
+    resolution: str | None = None
+    resolution_type: str | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    trajectory: JsonValue = None
+    eval_score: JsonValue = None
+    langfuse_trace_id: str | None = None
+    reflexion_loops: int | None = None
+    created_at: datetime | None = None
+    resolved_at: datetime | None = None
+    mttr_seconds: int | None = None
+
+
+class DeploymentRow(BaseModel):
+    """One ``deployments`` row (§5.3), every column. UUIDs as strings, JSONB decoded."""
+
+    id: str
+    service: str
+    pr_number: int | None = None
+    commit_sha: str
+    author: str | None = None
+    deploy_status: str
+    gha_run_id: int | None = None
+    dd_deploy_event_id: str | None = None
+    files_changed: JsonValue = None
+    incident_id: str | None = None
+    deployed_at: datetime | None = None
+    metadata: JsonValue = None

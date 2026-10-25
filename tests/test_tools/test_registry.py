@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from agents import FunctionTool, function_tool
 
+from sentinel.config import Settings
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
@@ -31,7 +31,7 @@ def deps(mock_semantic: SemanticMemory, mock_episodic: EpisodicMemory) -> ToolDe
     return ToolDeps(
         semantic_memory=mock_semantic,
         episodic_memory=mock_episodic,
-        scenario=None,
+        pool=None,
     )
 
 
@@ -47,37 +47,45 @@ def test_tool_deps_constructs(
     assert deps.episodic_memory is mock_episodic
 
 
-def test_tool_deps_scenario_defaults_to_none(
+def test_tool_deps_pool_defaults_to_none(
     mock_semantic: SemanticMemory,
     mock_episodic: EpisodicMemory,
 ) -> None:
     deps = ToolDeps(semantic_memory=mock_semantic, episodic_memory=mock_episodic)
-    assert deps.scenario is None
+    assert deps.pool is None
 
 
-def test_tool_deps_scenario_can_be_set(
+def test_tool_deps_pool_can_be_set(
     mock_semantic: SemanticMemory,
     mock_episodic: EpisodicMemory,
 ) -> None:
-    scenario = MagicMock()
+    pool = MagicMock()
     deps = ToolDeps(
         semantic_memory=mock_semantic,
         episodic_memory=mock_episodic,
-        scenario=scenario,
+        pool=pool,
     )
-    assert deps.scenario is scenario
+    assert deps.pool is pool
 
 
-async def test_tool_deps_with_real_memory_objects(tmp_path: Path) -> None:
+def test_tool_deps_settings_default_and_injection(
+    mock_semantic: SemanticMemory,
+    mock_episodic: EpisodicMemory,
+) -> None:
+    """Settings default to the environment's and can be injected (fetch_logs reads them)."""
+    default = ToolDeps(semantic_memory=mock_semantic, episodic_memory=mock_episodic)
+    assert isinstance(default.settings, Settings)
+    custom = Settings(dd_site="datadoghq.eu")
+    deps = ToolDeps(semantic_memory=mock_semantic, episodic_memory=mock_episodic, settings=custom)
+    assert deps.settings is custom
+    assert "fetch_logs" in {t.name for t in build_tools(deps)}
+
+
+def test_tool_deps_with_real_memory_objects() -> None:
     """ToolDeps accepts concrete memory implementations, not just mocks."""
-    from sentinel.infra.db import create_tables  # noqa: PLC0415
-
-    db_path = tmp_path / "test.db"
-    await create_tables(db_path)
-
     client = EmbeddingClient(MagicMock())
-    semantic = SemanticMemory(db_path)
-    episodic = EpisodicMemory(db_path, client)
+    semantic = SemanticMemory(None)  # no pool: constructs; calls would raise
+    episodic = EpisodicMemory(None, client)  # no pool: constructs; calls would raise
 
     deps = ToolDeps(semantic_memory=semantic, episodic_memory=episodic)
     assert isinstance(deps.semantic_memory, SemanticMemory)
@@ -102,12 +110,22 @@ def test_build_tools_non_empty(deps: ToolDeps) -> None:
     assert len(tools) > 0
 
 
-def test_build_tools_has_expected_tool_count(deps: ToolDeps) -> None:
-    # 4.2 get_service_metadata + 4.3 fetch_logs + 4.4 list_recent_deploys
-    # + 4.5 search_past_incidents + 4.6 (x2) + 4.7 draft_slack_summary
-    # + 4.8 request_human_approval = 8 tools total
-    tools = build_tools(deps)
-    assert len(tools) == 8
+def test_build_tools_is_exactly_the_six_phase_2_tools(deps: ToolDeps) -> None:
+    """Decision 2026-10-14: four read-only lookups + two output-only drafts, nothing else.
+
+    No notification tool, no approval tool, no execute tool: the revert PR a human
+    merges on GitHub is the only gate (backend.md §3.3).
+    """
+    names = [t.name for t in build_tools(deps)]
+    assert len(names) == 6
+    assert set(names) == {
+        "get_service_metadata",
+        "search_past_incidents",
+        "fetch_logs",
+        "get_deploy_details",
+        "prepare_rollback_spec",
+        "format_escalation",
+    }
 
 
 def test_build_tools_each_tool_has_name(deps: ToolDeps) -> None:
@@ -134,10 +152,12 @@ def test_build_tools_contains_fetch_logs(deps: ToolDeps) -> None:
     assert "fetch_logs" in names
 
 
-def test_build_tools_contains_list_recent_deploys(deps: ToolDeps) -> None:
+def test_build_tools_contains_get_deploy_details(deps: ToolDeps) -> None:
+    """get_deploy_details is the one LLM-visible deploy tool; the old name is retired."""
     tools = build_tools(deps)
     names = {t.name for t in tools}
-    assert "list_recent_deploys" in names
+    assert "get_deploy_details" in names
+    assert "list_recent_deploys" not in names
 
 
 def test_build_tools_contains_search_past_incidents(deps: ToolDeps) -> None:
@@ -146,28 +166,16 @@ def test_build_tools_contains_search_past_incidents(deps: ToolDeps) -> None:
     assert "search_past_incidents" in names
 
 
-def test_build_tools_contains_draft_rollback_pr(deps: ToolDeps) -> None:
+def test_build_tools_contains_prepare_rollback_spec(deps: ToolDeps) -> None:
     tools = build_tools(deps)
     names = {t.name for t in tools}
-    assert "draft_rollback_pr" in names
+    assert "prepare_rollback_spec" in names
 
 
-def test_build_tools_contains_draft_hotfix(deps: ToolDeps) -> None:
+def test_build_tools_contains_format_escalation(deps: ToolDeps) -> None:
     tools = build_tools(deps)
     names = {t.name for t in tools}
-    assert "draft_hotfix" in names
-
-
-def test_build_tools_contains_draft_slack_summary(deps: ToolDeps) -> None:
-    tools = build_tools(deps)
-    names = {t.name for t in tools}
-    assert "draft_slack_summary" in names
-
-
-def test_build_tools_contains_request_human_approval(deps: ToolDeps) -> None:
-    tools = build_tools(deps)
-    names = {t.name for t in tools}
-    assert "request_human_approval" in names
+    assert "format_escalation" in names
 
 
 def test_build_tools_each_tool_has_description(deps: ToolDeps) -> None:

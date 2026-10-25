@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import contextvars
+import math
+import sys
+import threading
+import time
+import types
+
 import numpy as np
 import pytest
 
+from sentinel.config import Settings
+from sentinel.memory import embeddings
 from sentinel.memory.embeddings import EmbeddingClient
 
 DIMS = 8  # small dimension — keeps tests fast without real model
+REAL_DIMS = 384  # all-MiniLM-L6-v2; matches the VECTOR(384) columns
 
 
 class _FakeModel:
@@ -227,3 +237,169 @@ async def test_clear_cache_forces_re_encode() -> None:
     client.clear_cache()
     await client.embed("text")
     assert model.encode_calls == 2
+
+
+# ── Off the event loop ────────────────────────────────────────────────────────
+
+_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("trace_id", default=None)
+
+
+class _ThreadRecordingModel(_FakeModel):
+    """Records the thread and the trace contextvar each encode() call ran with."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.threads: list[int] = []
+        self.trace_ids: list[str | None] = []
+
+    def encode(self, texts: list[str], **kwargs: bool) -> np.ndarray:
+        self.threads.append(threading.get_ident())
+        self.trace_ids.append(_trace_id.get())
+        return super().encode(texts, **kwargs)
+
+
+async def test_embed_encodes_off_the_event_loop_thread() -> None:
+    model = _ThreadRecordingModel()
+    await EmbeddingClient(model).embed("off the loop")
+    assert model.threads and model.threads[0] != threading.get_ident()
+
+
+async def test_embed_carries_contextvars_into_the_worker_thread() -> None:
+    # asyncio.to_thread copies the context (run_in_executor would not) — the active
+    # tracing span must still be visible while the model encodes.
+    model = _ThreadRecordingModel()
+    token = _trace_id.set("trace-123")
+    try:
+        await EmbeddingClient(model).embed("traced text")
+    finally:
+        _trace_id.reset(token)
+    assert model.trace_ids == ["trace-123"]
+
+
+# ── from_model_name(): one model load per process ─────────────────────────────
+
+
+@pytest.fixture
+def fake_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Swap in a fake ``sentence_transformers`` module and an empty model cache.
+
+    Returns the list of model names the fake SentenceTransformer was constructed with.
+    """
+    loads: list[str] = []
+
+    class _FakeSentenceTransformer(_FakeModel):
+        def __init__(self, model_name: str, revision: str | None = None) -> None:
+            super().__init__()
+            time.sleep(0.05)  # widen the race window for the concurrency test
+            loads.append(model_name)
+
+    module = types.ModuleType("sentence_transformers")
+    module.SentenceTransformer = _FakeSentenceTransformer  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+    monkeypatch.setattr(embeddings, "_MODEL_CACHE", {})
+    return loads
+
+
+def test_from_model_name_loads_the_model_once(fake_sentence_transformers: list[str]) -> None:
+    first = EmbeddingClient.from_model_name("fake-model")
+    second = EmbeddingClient.from_model_name("fake-model")
+    assert fake_sentence_transformers == ["fake-model"]
+    assert first._model is second._model
+
+
+def test_from_model_name_clients_keep_separate_text_caches(
+    fake_sentence_transformers: list[str],
+) -> None:
+    first = EmbeddingClient.from_model_name("fake-model")
+    second = EmbeddingClient.from_model_name("fake-model")
+    first._cache["x"] = [1.0]
+    assert second.cache_size == 0
+
+
+def test_from_model_name_caches_per_model_name(fake_sentence_transformers: list[str]) -> None:
+    EmbeddingClient.from_model_name("model-a")
+    EmbeddingClient.from_model_name("model-b")
+    EmbeddingClient.from_model_name("model-a")
+    assert fake_sentence_transformers == ["model-a", "model-b"]
+
+
+def test_from_model_name_pins_the_baked_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    class _RecordingSentenceTransformer(_FakeModel):
+        def __init__(self, model_name: str, revision: str | None = None) -> None:
+            super().__init__()
+            calls.append((model_name, revision))
+
+    module = types.ModuleType("sentence_transformers")
+    module.SentenceTransformer = _RecordingSentenceTransformer  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+    monkeypatch.setattr(embeddings, "_MODEL_CACHE", {})
+    EmbeddingClient.from_model_name("all-MiniLM-L6-v2")
+    EmbeddingClient.from_model_name("other-model")
+    assert calls == [
+        ("all-MiniLM-L6-v2", "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"),
+        ("other-model", None),
+    ]
+
+
+def test_from_model_name_concurrent_first_calls_load_once(
+    fake_sentence_transformers: list[str],
+) -> None:
+    clients: list[EmbeddingClient] = []
+    threads = [
+        threading.Thread(target=lambda: clients.append(EmbeddingClient.from_model_name("racy")))
+        for _ in range(8)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert fake_sentence_transformers == ["racy"]
+    assert len({id(c._model) for c in clients}) == 1
+
+
+# ── Real model (all-MiniLM-L6-v2, cached locally / in CI) ─────────────────────
+
+
+@pytest.fixture
+def real_client() -> EmbeddingClient:
+    """A fresh client on the configured model — shares the process-wide loaded model."""
+    return EmbeddingClient.from_model_name(
+        Settings.model_fields["sentinel_embedding_model"].default
+    )
+
+
+def _dot(a: list[float], b: list[float]) -> float:
+    # Assertion helper only — production similarity is pgvector <=>, never Python.
+    return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+async def test_real_embed_returns_384_floats(real_client: EmbeddingClient) -> None:
+    vec = await real_client.embed("api-gateway 5xx spike after deploy")
+    assert len(vec) == REAL_DIMS
+    assert all(type(v) is float for v in vec)
+
+
+async def test_real_embed_is_deterministic(real_client: EmbeddingClient) -> None:
+    text = "connection pool exhausted on payments-db"
+    first = await real_client.embed(text)
+    real_client.clear_cache()  # force a second inference, not a cache hit
+    second = await real_client.embed(text)
+    assert first == second
+
+
+async def test_real_embed_vectors_are_unit_length(real_client: EmbeddingClient) -> None:
+    vec = await real_client.embed("memory leak in checkout-service")
+    assert math.isclose(math.sqrt(_dot(vec, vec)), 1.0, abs_tol=1e-4)
+
+
+async def test_real_embed_similar_texts_are_closer(real_client: EmbeddingClient) -> None:
+    anchor, similar, dissimilar = await real_client.embed_batch(
+        [
+            "database connection pool exhausted, requests timing out",
+            "service cannot get a DB connection, the pool is saturated",
+            "the frontend logo colour was changed to blue",
+        ]
+    )
+    assert _dot(anchor, similar) > _dot(anchor, dissimilar)

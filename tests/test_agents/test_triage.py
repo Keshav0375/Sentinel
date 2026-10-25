@@ -2,39 +2,34 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from agents import Agent
 from agents.extensions.models.litellm_model import LitellmModel
 
-from data.seed import seed
 from sentinel.agents.triage import TRIAGE_AGENT_NAME, build_triage_agent
 from sentinel.config import Settings
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.incident import Severity, TriageResult
+from sentinel.providers import coerce_output
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture()
-async def db_path(tmp_path: Path) -> Path:
-    path = tmp_path / "test_triage.db"
-    await seed(path, verbose=False)
-    return path
+def semantic_memory() -> SemanticMemory:
+    # No pool: the agent is only built here, never run, so memory is never called.
+    return SemanticMemory(None)
 
 
 @pytest.fixture()
-def semantic_memory(db_path: Path) -> SemanticMemory:
-    return SemanticMemory(db_path)
-
-
-@pytest.fixture()
-def episodic_memory(db_path: Path) -> EpisodicMemory:
+def episodic_memory() -> EpisodicMemory:
+    # No pool: the agent is only built here, never run, so memory is never called.
     mock_client = MagicMock()
-    return EpisodicMemory(db_path, mock_client)
+    return EpisodicMemory(None, mock_client)
 
 
 @pytest.fixture()
@@ -42,11 +37,10 @@ def triage_agent(
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     fake_settings: Settings,
-) -> Agent[TriageResult]:
+) -> Agent[Any]:
     return build_triage_agent(
         semantic_memory,
         episodic_memory,
-        model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
 
@@ -129,59 +123,60 @@ def test_triage_result_requires_affected_service() -> None:
 # ── build_triage_agent — structural tests ─────────────────────────────────────
 
 
-def test_build_triage_agent_returns_agent(triage_agent: Agent[TriageResult]) -> None:
+def test_build_triage_agent_returns_agent(triage_agent: Agent[Any]) -> None:
     assert isinstance(triage_agent, Agent)
 
 
-def test_triage_agent_name(triage_agent: Agent[TriageResult]) -> None:
+def test_triage_agent_name(triage_agent: Agent[Any]) -> None:
     assert triage_agent.name == TRIAGE_AGENT_NAME
 
 
 def test_triage_agent_name_constant() -> None:
-    assert TRIAGE_AGENT_NAME == "triage_agent"
+    """The agent name is its prompt file and LangFuse prompt name (decision 2026-10-15)."""
+    assert TRIAGE_AGENT_NAME == "triage"
 
 
-def test_triage_agent_has_two_tools(triage_agent: Agent[TriageResult]) -> None:
+def test_triage_agent_has_two_tools(triage_agent: Agent[Any]) -> None:
     assert len(triage_agent.tools) == 2
 
 
-def test_triage_agent_tool_names(triage_agent: Agent[TriageResult]) -> None:
+def test_triage_agent_tool_names(triage_agent: Agent[Any]) -> None:
     names = {t.name for t in triage_agent.tools}
     assert "get_service_metadata" in names
     assert "search_past_incidents" in names
 
 
-def test_triage_agent_no_extra_tools(triage_agent: Agent[TriageResult]) -> None:
+def test_triage_agent_no_extra_tools(triage_agent: Agent[Any]) -> None:
     """Triage agent must not have deploy/log/remediation tools — scope is intentionally narrow."""
     names = {t.name for t in triage_agent.tools}
     unexpected = {
         "fetch_logs",
-        "list_recent_deploys",
-        "draft_rollback_pr",
-        "request_human_approval",
+        "get_deploy_details",
+        "prepare_rollback_spec",
+        "format_escalation",
     }
     assert not names & unexpected, f"Unexpected tools in triage agent: {names & unexpected}"
 
 
-def test_triage_agent_output_type(triage_agent: Agent[TriageResult]) -> None:
+def test_triage_agent_output_type(triage_agent: Agent[Any]) -> None:
     assert triage_agent.output_type is None
 
 
-def test_triage_agent_has_instructions(triage_agent: Agent[TriageResult]) -> None:
+def test_triage_agent_has_instructions(triage_agent: Agent[Any]) -> None:
     instructions = triage_agent.instructions
     assert isinstance(instructions, str) and len(instructions) > 0
 
 
-def test_triage_agent_instructions_mention_severity(triage_agent: Agent[TriageResult]) -> None:
+def test_triage_agent_instructions_mention_severity(triage_agent: Agent[Any]) -> None:
     assert isinstance(triage_agent.instructions, str)
     assert "P1" in triage_agent.instructions
 
 
-def test_triage_agent_uses_litellm_model(triage_agent: Agent[TriageResult]) -> None:
+def test_triage_agent_uses_litellm_model(triage_agent: Agent[Any]) -> None:
     assert isinstance(triage_agent.model, LitellmModel)
 
 
-def test_triage_agent_model_string_forwarded(
+def test_triage_agent_runs_on_its_role_primary_model(
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     fake_settings: Settings,
@@ -189,14 +184,13 @@ def test_triage_agent_model_string_forwarded(
     agent = build_triage_agent(
         semantic_memory,
         episodic_memory,
-        model_string="groq/llama-3.1-8b-instant",
         settings=fake_settings,
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.1-8b-instant"
+    assert agent.model.model == "anthropic/claude-haiku-4-5"
 
 
-def test_triage_agent_custom_model_string(
+def test_triage_agent_primary_openai_runs_openai_model(
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     fake_settings: Settings,
@@ -204,13 +198,34 @@ def test_triage_agent_custom_model_string(
     agent = build_triage_agent(
         semantic_memory,
         episodic_memory,
-        model_string="groq/llama-3.3-70b-versatile",
-        settings=fake_settings,
+        settings=fake_settings.model_copy(update={"sentinel_primary_provider": "openai"}),
     )
     assert isinstance(agent.model, LitellmModel)
-    assert agent.model.model == "groq/llama-3.3-70b-versatile"
+    assert agent.model.model == "openai/gpt-4o-mini"
 
 
-def test_triage_agent_no_handoffs(triage_agent: Agent[TriageResult]) -> None:
+def test_triage_agent_no_handoffs(triage_agent: Agent[Any]) -> None:
     """Triage agent is a specialist — it has no handoffs (orchestrator routes, not specialists)."""
     assert len(triage_agent.handoffs) == 0
+
+
+def test_triage_instructions_can_be_injected(
+    semantic_memory: SemanticMemory,
+    episodic_memory: EpisodicMemory,
+    fake_settings: Settings,
+) -> None:
+    agent = build_triage_agent(
+        semantic_memory, episodic_memory, settings=fake_settings, instructions="compiled"
+    )
+    assert agent.instructions == "compiled"
+
+
+def test_triage_result_round_trips_as_plain_text_json() -> None:
+    """Triage answers in text on Anthropic/OpenAI; its JSON coerces back unchanged."""
+    original = TriageResult(
+        severity=Severity.P2,
+        affected_service="sentinel-watchtower",
+        is_duplicate=False,
+        recommended_action="check the last deploy",
+    )
+    assert coerce_output(original.model_dump_json(), TriageResult) == original

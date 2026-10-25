@@ -1,37 +1,32 @@
-"""Deploy models — Deploy, DeployCorrelation."""
+"""Deploy models — CorrelatedDeploy."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
 
-class Deploy(BaseModel):
-    """A single deployment event for a service.
+class CorrelatedDeploy(BaseModel):
+    """A deploy the Analysis agent blames: identifying fields of a ``get_deploy_details`` row.
 
-    Matches the deploy objects in scenario JSON files:
-    {"id": "...", "service": "...", "ts": "...", "author": "...", ...}
+    A field-compatible subset of :class:`~sentinel.models.tools.DeployRecord` (same names
+    and types), so a record validates into one unchanged, and ``pr_number``,
+    ``commit_sha`` and ``deployed_at`` are exactly what ``prepare_rollback_spec`` takes
+    as ``target_deploy``. Nothing defaults to "now": every value comes from the
+    ``deployments`` row the tool returned.
     """
 
-    id: str
-    service: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    author: str
-    commit_sha: str
-    files_changed: int
-    description: str = ""
-
-
-class DeployCorrelation(BaseModel):
-    """Output of the Deploy Correlator agent.
-
-    suspect_deploy is None when no deploy is convincingly correlated to the
-    incident (e.g. a downstream outage scenario with no recent deploys).
-    confidence is in [0.0, 1.0].
-    """
-
-    recent_deploys: list[Deploy] = []
-    suspect_deploy: Deploy | None = None
-    confidence: float = 0.0
-    evidence: str
+    pr_number: int | None = Field(
+        description="Pull request that was deployed, copied from get_deploy_details; "
+        "None for a direct push."
+    )
+    commit_sha: str = Field(description="Deployed commit, copied from get_deploy_details.")
+    deployed_at: datetime = Field(
+        description="When the deploy was recorded (UTC), copied from get_deploy_details."
+    )
+    version: str | None = Field(default=None, description='Deployed version, "pr-<n>-<sha>".')
+    deploy_status: str = Field(description="succeeded | failed | rolled_back.")
+    failed_stage: str | None = Field(
+        default=None, description='Stage that failed (build, deploy, verify) or "none".'
+    )

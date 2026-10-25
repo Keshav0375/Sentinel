@@ -1,163 +1,64 @@
-"""Runtime model configuration --- GET/PUT /api/config.
+"""Model configuration view --- GET /api/config (read-only).
 
-Allows the dashboard to display and change which LLM models are used for each
-agent role. Changes take effect on the next pipeline run (agents are rebuilt
-per-incident so no restart is needed).
+Shows the dashboard which model each agent role runs on. The models are fixed per role
+(§4.7 table, ``providers/router.py``) and selected only by ``SENTINEL_PRIMARY_PROVIDER``;
+nothing here can change them (decision 2026-10-15 removed the ``PUT /api/config``
+model-repointing ability).
 """
 
 from __future__ import annotations
 
-from typing import Any
-
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from sentinel.config import Settings
+from sentinel.providers.router import ROLES, judge_model_string, role_models
+
+
+class RoleModels(BaseModel):
+    """The model pair one agent role runs on."""
+
+    primary: str
+    fallback: str
 
 
 class ModelConfig(BaseModel):
     """Response body for GET /api/config."""
 
-    triage_model: str
-    analysis_model: str
+    primary_provider: str
+    roles: dict[str, RoleModels]
     judge_model: str
-    available_providers: list[str]
 
 
-class ModelUpdate(BaseModel):
-    """Request body for PUT /api/config."""
-
-    triage_model: str | None = None
-    analysis_model: str | None = None
-    judge_model: str | None = None
-
-
-class RuntimeConfig:
-    """Mutable model configuration that wraps base Settings.
-
-    Overrides take effect on the next pipeline run. The base Settings
-    (from .env) are used as defaults for any unset override.
-    """
-
-    def __init__(self, base: Settings) -> None:
-        self._base = base
-        self._overrides: dict[str, str] = {}
-
-    @property
-    def triage_model(self) -> str:
-        return self._overrides.get("triage_model", self._base.sentinel_triage_model)
-
-    @property
-    def analysis_model(self) -> str:
-        return self._overrides.get("analysis_model", self._base.sentinel_analysis_model)
-
-    @property
-    def judge_model(self) -> str:
-        return self._overrides.get("judge_model", self._base.sentinel_judge_model)
-
-    def update(self, **kwargs: str | None) -> None:
-        for key, value in kwargs.items():
-            if value:
-                self._overrides[key] = value
-            else:
-                self._overrides.pop(key, None)
-
-    def effective_settings(self) -> Settings:
-        """Return Settings with any active overrides applied."""
-        if not self._overrides:
-            return self._base
-        updates: dict[str, Any] = {}
-        if "triage_model" in self._overrides:
-            updates["sentinel_triage_model"] = self._overrides["triage_model"]
-        if "analysis_model" in self._overrides:
-            updates["sentinel_analysis_model"] = self._overrides["analysis_model"]
-        if "judge_model" in self._overrides:
-            updates["sentinel_judge_model"] = self._overrides["judge_model"]
-        return self._base.model_copy(update=updates)
-
-    @property
-    def base_settings(self) -> Settings:
-        """Return the underlying base Settings (read-only access for validation)."""
-        return self._base
-
-    def reset(self) -> None:
-        """Clear all overrides, reverting to base settings."""
-        self._overrides.clear()
+def model_config_view(settings: Settings) -> ModelConfig:
+    """The effective §4.7 model assignment under *settings*."""
+    primary = settings.sentinel_primary_provider
+    roles: dict[str, RoleModels] = {}
+    for role in ROLES:
+        primary_model, fallback_model = role_models(role, primary)
+        roles[role] = RoleModels(primary=primary_model, fallback=fallback_model)
+    return ModelConfig(
+        primary_provider=primary,
+        roles=roles,
+        judge_model=judge_model_string(primary),
+    )
 
 
-_AVAILABLE_PROVIDERS = ["groq", "openai", "anthropic", "azure"]
-
-_PROVIDER_KEY_MAP: dict[str, str] = {
-    "openai": "openai_api_key",
-    "anthropic": "anthropic_api_key",
-    "azure": "azure_api_key",
-}
-
-
-def _check_provider_key(model_string: str, base: Settings) -> str | None:
-    """Return an error message if the API key for this provider is missing."""
-    if "/" not in model_string:
-        return None
-    provider = model_string.split("/")[0].lower()
-    if provider == "groq":
-        return None
-    field = _PROVIDER_KEY_MAP.get(provider)
-    if field is None:
-        return None
-    value = getattr(base, field, "")
-    if not value:
-        return f"{field.upper()} is required for model '{model_string}'"
-    return None
-
-
-def make_config_router(runtime_config: RuntimeConfig) -> APIRouter:
-    """Create the configuration display/update router.
+def make_config_router(settings: Settings) -> APIRouter:
+    """Create the read-only configuration router.
 
     Args:
-        runtime_config: Mutable RuntimeConfig holding model overrides.
+        settings: The app's Settings; only ``sentinel_primary_provider`` is read.
 
     Returns:
-        ``APIRouter`` with GET and PUT ``/api/config`` registered.
+        ``APIRouter`` with GET ``/api/config`` registered.
     """
     router = APIRouter()
+    view = model_config_view(settings)
 
     @router.get("/api/config", response_model=ModelConfig)
     async def get_config() -> ModelConfig:  # pyright: ignore[reportUnusedFunction]
-        """Return the current model configuration."""
-        return ModelConfig(
-            triage_model=runtime_config.triage_model,
-            analysis_model=runtime_config.analysis_model,
-            judge_model=runtime_config.judge_model,
-            available_providers=_AVAILABLE_PROVIDERS,
-        )
-
-    @router.put("/api/config", response_model=ModelConfig)
-    async def update_config(body: ModelUpdate) -> ModelConfig:  # pyright: ignore[reportUnusedFunction]
-        """Update model configuration for subsequent pipeline runs."""
-        errors: list[str] = []
-        base = runtime_config.base_settings
-        for _, model_val in [
-            ("triage_model", body.triage_model),
-            ("analysis_model", body.analysis_model),
-            ("judge_model", body.judge_model),
-        ]:
-            if model_val:
-                err = _check_provider_key(model_val, base)
-                if err:
-                    errors.append(err)
-        if errors:
-            raise HTTPException(status_code=422, detail="; ".join(errors))
-
-        runtime_config.update(
-            triage_model=body.triage_model,
-            analysis_model=body.analysis_model,
-            judge_model=body.judge_model,
-        )
-        return ModelConfig(
-            triage_model=runtime_config.triage_model,
-            analysis_model=runtime_config.analysis_model,
-            judge_model=runtime_config.judge_model,
-            available_providers=_AVAILABLE_PROVIDERS,
-        )
+        """Return the model each agent role runs on."""
+        return view
 
     return router

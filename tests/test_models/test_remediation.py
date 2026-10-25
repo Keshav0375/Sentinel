@@ -5,13 +5,10 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from sentinel.models import remediation
 from sentinel.models.remediation import (
-    ApprovalRequest,
-    ApprovalResult,
-    ApprovalStatus,
     RemediationAction,
     RemediationPlan,
-    RiskLevel,
     RollbackPR,
 )
 
@@ -24,18 +21,6 @@ def test_remediation_action_values() -> None:
     assert RemediationAction.SCALE == "scale"
     assert RemediationAction.RESTART == "restart"
     assert RemediationAction.ESCALATE == "escalate"
-
-
-def test_risk_level_values() -> None:
-    assert RiskLevel.HIGH == "high"
-    assert RiskLevel.MEDIUM == "medium"
-    assert RiskLevel.LOW == "low"
-
-
-def test_approval_status_values() -> None:
-    assert ApprovalStatus.APPROVED == "approved"
-    assert ApprovalStatus.REJECTED == "rejected"
-    assert ApprovalStatus.TIMEOUT == "timeout"
 
 
 # ── RemediationPlan ───────────────────────────────────────────────────────────
@@ -119,70 +104,10 @@ def test_rollback_pr_custom_branch() -> None:
     assert pr.target_branch == "release/2.1"
 
 
-# ── ApprovalRequest ───────────────────────────────────────────────────────────
+# ── No approval models ────────────────────────────────────────────────────────
 
 
-def test_approval_request_fields() -> None:
-    req = ApprovalRequest(
-        action="rollback deploy-abc123 on api-gateway",
-        risk_level=RiskLevel.HIGH,
-        evidence_summary="deploy-abc123 correlates with 7x error spike; null ref in logs",
-        proposed_by="remediation_agent",
-    )
-    assert req.risk_level is RiskLevel.HIGH
-    assert req.proposed_by == "remediation_agent"
-
-
-def test_approval_request_string_risk_coerced() -> None:
-    req = ApprovalRequest(
-        action="restart api-gateway",
-        risk_level="medium",  # type: ignore[arg-type]
-        evidence_summary="OOM condition",
-        proposed_by="remediation_agent",
-    )
-    assert req.risk_level is RiskLevel.MEDIUM
-
-
-def test_approval_request_invalid_risk_raises() -> None:
-    with pytest.raises(ValidationError):
-        ApprovalRequest(
-            action="x",
-            risk_level="extreme",  # type: ignore[arg-type]
-            evidence_summary="y",
-            proposed_by="z",
-        )
-
-
-# ── ApprovalResult ────────────────────────────────────────────────────────────
-
-
-def test_approval_result_approved() -> None:
-    result = ApprovalResult(status=ApprovalStatus.APPROVED, reviewer="keshav")
-    assert result.status is ApprovalStatus.APPROVED
-    assert result.comment is None
-
-
-def test_approval_result_rejected_with_comment() -> None:
-    result = ApprovalResult(
-        status=ApprovalStatus.REJECTED,
-        reviewer="keshav",
-        comment="Too risky during peak hours, escalate to on-call instead",
-    )
-    assert result.status is ApprovalStatus.REJECTED
-    assert result.comment is not None
-
-
-def test_approval_result_empty_reviewer_raises() -> None:
-    with pytest.raises(ValidationError):
-        ApprovalResult(status=ApprovalStatus.APPROVED, reviewer="  ")
-
-
-def test_approval_result_json_round_trip() -> None:
-    result = ApprovalResult(
-        status=ApprovalStatus.APPROVED,
-        reviewer="keshav",
-        comment="looks good",
-    )
-    reloaded = ApprovalResult.model_validate_json(result.model_dump_json())
-    assert reloaded.status is ApprovalStatus.APPROVED
-    assert reloaded.reviewer == "keshav"
+def test_no_approval_models_remain() -> None:
+    """The revert PR on GitHub is the only gate (backend.md §3.3): no approval API types."""
+    for name in ("ApprovalRequest", "ApprovalResult", "ApprovalStatus", "RiskLevel"):
+        assert not hasattr(remediation, name), name

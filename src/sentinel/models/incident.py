@@ -1,21 +1,21 @@
-"""Incident models — Severity, IncidentStatus, TimelineEntry, Incident."""
+"""Incident models — Severity, IncidentStatus, TimelineEntry, TriageResult, Incident."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
-from sentinel.models.alert import AlertPayload
+from sentinel.models.alert import IncidentAlert
 
 
 class Severity(StrEnum):
     """Internal incident severity, assigned by the Triage Agent.
 
-    Distinct from AlertSeverity (the raw value from the monitoring tool).
+    Distinct from the alert's raw severity string (whatever the monitoring tool sent).
     P1 = production down / revenue impacting.
     P2 = major degradation, most users affected.
     P3 = minor degradation, subset of users affected.
@@ -29,12 +29,18 @@ class Severity(StrEnum):
 
 
 class IncidentStatus(StrEnum):
-    """Lifecycle state of an incident as it moves through the pipeline."""
+    """Lifecycle state of an incident as it moves through the pipeline.
+
+    The pipeline ends in ``ROLLBACK_PROPOSED`` (a rollback spec for GitHub Actions to turn
+    into a revert PR a human merges or closes) or ``ESCALATED`` (decision 2026-10-15).
+    ``RESOLVED`` is reserved for a later "revert deploy succeeded" signal; the backend never
+    sets it, and there is no approval state — the revert PR on GitHub is the human gate.
+    """
 
     TRIAGE = "triage"
     INVESTIGATING = "investigating"
     REMEDIATING = "remediating"
-    PENDING_APPROVAL = "pending_approval"
+    ROLLBACK_PROPOSED = "rollback_proposed"
     RESOLVED = "resolved"
     ESCALATED = "escalated"
 
@@ -67,41 +73,21 @@ class TriageResult(BaseModel):
     recommended_action: str
 
 
-class IncidentSummary(BaseModel):
-    """Final outcome returned by the Orchestrator Agent after the full pipeline runs.
-
-    This is what the API layer surfaces to callers and what the eval system
-    uses to determine whether the pipeline reached a terminal state correctly.
-    """
-
-    status: Literal["resolved", "pending_approval", "escalated"]
-    affected_service: str
-    severity: Severity
-    root_cause_summary: str
-    action_taken: str
-    next_steps: list[str] = []
-
-
 class Incident(BaseModel):
     """Full state of a live or resolved incident.
 
-    Result fields (triage_result, log_analysis, deploy_correlation,
-    remediation_plan) are typed as dict[str, Any] | None because their
-    structured types (TriageResult, LogAnalysis, etc.) are defined in later
-    phases. They will be populated by agents as JSON-serialisable dicts and
-    re-typed once those models exist.
+    ``triage_result`` is the triage agent's output as a JSON-serialisable dict. The
+    pipeline's conclusions (root cause, rollback spec or escalation) are not fields here:
+    they travel in ``PipelineResult`` and the ``IncidentOutcome`` stored with the incident.
     """
 
-    id: str = Field(default_factory=lambda: f"inc-{uuid.uuid4().hex[:8]}")
-    alert: AlertPayload
+    # A UUID string: episodic memory stores it as incidents.id (UUID, §5.3).
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    alert: IncidentAlert
     status: IncidentStatus = IncidentStatus.TRIAGE
     severity: Severity | None = None
     affected_service: str | None = None
     timeline: list[TimelineEntry] = []  # pydantic v2 deep-copies mutable defaults
     triage_result: dict[str, Any] | None = None
-    log_analysis: dict[str, Any] | None = None
-    deploy_correlation: dict[str, Any] | None = None
-    remediation_plan: dict[str, Any] | None = None
-    comms_summary: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     resolved_at: datetime | None = None

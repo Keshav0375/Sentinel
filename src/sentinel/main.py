@@ -3,129 +3,71 @@
 Run with::
 
     uvicorn sentinel.main:app --reload
-
-The app must be launched from the project root so that the ``data`` package
-(seed script, scenario files) is importable.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Final
 
-from agents import Runner, add_trace_processor, handoff
-from agents import trace as agent_trace
-from fastapi import FastAPI
+# asyncpg ships no type stubs (see infra/database.py); only its Pool type is named here.
+import asyncpg  # pyright: ignore[reportMissingTypeStubs]
+from fastapi import APIRouter, Depends, FastAPI, params
 from fastapi.responses import HTMLResponse
 
-from sentinel.agents.comms import build_comms_agent
-from sentinel.agents.deploy_correlator import build_deploy_correlator_agent
-from sentinel.agents.log_analyst import build_log_analyst_agent
-from sentinel.agents.orchestrator import build_orchestrator_agent
-from sentinel.agents.remediation import build_remediation_agent
-from sentinel.agents.triage import build_triage_agent
-from sentinel.api.config_view import RuntimeConfig, make_config_router
+from sentinel.agents.orchestrator import ORCHESTRATOR, PipelineDeps, run_pipeline
+from sentinel.api.auth import configure_auth, require_incident_write
+from sentinel.api.config_view import make_config_router
 from sentinel.api.eval_report import make_eval_report_router
-from sentinel.api.events import (
-    HitlGateRegistry,
-    make_api_approval_fn,
-    make_events_router,
-    reset_current_incident,
-    set_current_incident,
-)
-from sentinel.api.health import make_health_router
+from sentinel.api.generate import make_generate_router
+from sentinel.api.health import database_configured, db_readiness, make_health_router
 from sentinel.api.incidents import make_incidents_router
 from sentinel.api.scenarios import make_scenarios_router
 from sentinel.api.trajectories import make_trajectories_router
-from sentinel.api.webhooks import AlertDeduplicator, PipelineFn, make_alert_router
+from sentinel.api.webhooks import PipelineFn, make_incident_router
 from sentinel.config import Settings, get_settings
-from sentinel.generator.alert_gen import load_scenario
-from sentinel.generator.scenarios import Scenario
+from sentinel.eval.dataset_writer import DATASET_WRITES
 from sentinel.infra.dashboard_emitter import DashboardEventEmitter
-from sentinel.infra.db import create_tables
-from sentinel.infra.event_bus import EventBus
+from sentinel.infra.database import close_pool, init_pool_from_settings
+from sentinel.infra.event_bus import EventBus, EventType, PipelineEvent
+from sentinel.infra.incident_tasks import IncidentTasks
 from sentinel.infra.logging import configure_logging, get_logger
-from sentinel.infra.tracing import SentinelTracer
+from sentinel.infra.tracing import (
+    SentinelTracer,
+    configure_langfuse,
+    install_trace_processors,
+    shutdown_traces,
+)
+from sentinel.infra.workload_identity import (
+    LazyAzureCredential,
+    entra_token_password,
+    load_key_vault_secrets,
+)
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.memory.short_term import ShortTermMemory
-from sentinel.models.alert import AlertPayload
 from sentinel.models.incident import IncidentStatus
-from sentinel.providers import apply_sdk_defaults, get_capabilities
-from sentinel.tools.hitl import ApprovalFn
+from sentinel.models.pipeline import PipelineInput, PipelineResult
+from sentinel.providers import apply_sdk_defaults
 
 _DASHBOARD_HTML = Path(__file__).resolve().parent / "dashboard" / "index.html"
 _EVAL_HTML = Path(__file__).resolve().parent / "dashboard" / "eval.html"
 
 logger = get_logger("sentinel.main")
 
-
-def _build_orchestrator_for_scenario(
-    scenario: Scenario | None,
-    settings: Settings,
-    semantic_memory: SemanticMemory,
-    episodic_memory: EpisodicMemory,
-    approval_fn: ApprovalFn | None = None,
-) -> Any:
-    """Build a full orchestrator pipeline with scenario data injected.
-
-    Rebuilds all agents per-incident so the log/deploy tools have access to
-    the scenario's synthetic data. The construction cost is negligible — it's
-    just Python object creation, not LLM calls.
-    """
-    triage_agent = build_triage_agent(
-        semantic_memory,
-        episodic_memory,
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    log_analyst_agent = build_log_analyst_agent(
-        semantic_memory,
-        scenario,
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-    deploy_correlator_agent = build_deploy_correlator_agent(
-        scenario,
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    remediation_agent = build_remediation_agent(
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-        approval_fn=approval_fn,
-    )
-    comms_agent = build_comms_agent(
-        model_string=settings.sentinel_triage_model,
-        settings=settings,
-    )
-    orchestrator = build_orchestrator_agent(
-        triage_agent,
-        log_analyst_agent,
-        deploy_correlator_agent,
-        remediation_agent,
-        comms_agent,
-        model_string=settings.sentinel_analysis_model,
-        settings=settings,
-    )
-
-    caps = get_capabilities(settings.sentinel_analysis_model)
-    back = handoff(orchestrator)
-    back.strict_json_schema = caps.strict_schemas
-    back_handoff: Any = [back]
-    for specialist in [
-        triage_agent,
-        log_analyst_agent,
-        deploy_correlator_agent,
-        remediation_agent,
-        comms_agent,
-    ]:
-        specialist.handoffs = back_handoff
-
-    return orchestrator
+# Routes served without a token under SENTINEL_DEV_OPEN_DASHBOARD (used only in the warning log).
+DEV_OPEN_ROUTES: Final[tuple[str, ...]] = (
+    "GET /",
+    "GET /eval",
+    "GET /api/scenarios",
+    "GET /api/config",
+    "GET /api/trajectories",
+    "GET /api/eval-report",
+)
 
 
 def make_pipeline_fn(
@@ -133,83 +75,87 @@ def make_pipeline_fn(
     semantic_memory: SemanticMemory,
     episodic_memory: EpisodicMemory,
     short_term_memory: ShortTermMemory,
-    max_turns: int = 15,
     event_bus: EventBus | None = None,
-    approval_fn: ApprovalFn | None = None,
+    pool: asyncpg.Pool | None = None,
 ) -> PipelineFn:
-    """Build the async pipeline callback fired by the webhook for each new alert.
+    """Build the async pipeline callback fired by the webhook for each new incident.
 
-    Agents are rebuilt per-incident so scenario-based alerts get their synthetic
-    log/deploy data injected into the tools.
+    Each incident runs the Python orchestrator (``agents/orchestrator.run_pipeline``),
+    which builds its agents per run, so provider credentials are read at use (§4.7), never
+    at boot. On completion the incident's short-term memory gets the terminal status
+    (``rollback_proposed`` | ``escalated``) and the result, and the dashboard stream is
+    closed with an ``incident_completed`` event. The dataset item is written in the
+    background and never delays this.
 
     Args:
-        settings_fn: Callable returning current Settings (supports runtime
-            model overrides via RuntimeConfig).
+        settings_fn: Callable returning the current Settings.
         semantic_memory: Shared semantic memory for service lookups.
         episodic_memory: Shared episodic memory for past incident search.
         short_term_memory: Live STM — updated with terminal status on completion.
-        max_turns: Maximum agent turns before the SDK raises an error.
         event_bus: Optional EventBus for dashboard streaming.
-        approval_fn: Optional HITL callback for the remediation agent.
+        pool: asyncpg pool for ``get_deploy_details`` and the rollback-target check; None
+            without ``DATABASE_URL`` (the tool then reports "unavailable" and the
+            pipeline can only escalate).
 
     Returns:
-        Async callable ``(incident_id, alert) → None`` suitable for passing to
-        ``make_alert_router`` as ``pipeline_fn``.
+        Async callable ``(PipelineInput) → None`` suitable for passing to
+        ``make_incident_router`` as ``pipeline_fn``.
     """
 
-    async def run_pipeline(incident_id: str, alert: AlertPayload) -> None:
-        settings = settings_fn()
-        logger.info("pipeline_start", incident_id=incident_id, service=alert.service)
-
-        scenario_id = alert.metadata.get("scenario_id")
-        scenario: Scenario | None = None
-        if scenario_id:
-            try:
-                scenario = load_scenario(str(scenario_id))
-            except FileNotFoundError:
-                logger.warning("scenario_not_found", scenario_id=scenario_id)
-
-        orchestrator = _build_orchestrator_for_scenario(
-            scenario, settings, semantic_memory, episodic_memory, approval_fn
-        )
-
-        token = set_current_incident(incident_id)
+    async def run_incident(request: PipelineInput) -> None:
+        incident_id = request.incident_id
+        status = IncidentStatus.ESCALATED
+        result: PipelineResult | None = None
         try:
-            input_text = f"New incident ID: {incident_id}\nAlert payload: {alert.model_dump_json()}"
-            with agent_trace(
-                "incident_pipeline",
-                metadata={"incident_id": incident_id},
-            ):
-                await Runner.run(orchestrator, input_text, max_turns=max_turns)
-            logger.info("pipeline_complete", incident_id=incident_id)
-            try:
-                short_term_memory.update_context(incident_id, status=IncidentStatus.RESOLVED)
-            except KeyError:
-                pass
-            if event_bus is not None:
-                from sentinel.infra.event_bus import EventType, PipelineEvent  # noqa: PLC0415
+            deps = PipelineDeps(
+                settings=settings_fn(),
+                semantic_memory=semantic_memory,
+                episodic_memory=episodic_memory,
+                pool=pool,
+            )
+            # run_pipeline never raises: a failure inside it is an escalated result.
+            result = await run_pipeline(request, deps)
+            status = IncidentStatus(result.status)
+        except Exception as exc:
+            logger.error("pipeline_error", incident_id=incident_id, error=str(exc))
 
+        try:
+            short_term_memory.update_context(
+                incident_id,
+                status=status,
+                result=None if result is None else result.model_dump(mode="json"),
+            )
+        except KeyError:
+            pass  # the incident was cleared mid-pipeline
+        if event_bus is not None:
+            try:
                 await event_bus.publish(
                     incident_id,
                     PipelineEvent(
-                        type=EventType.INCIDENT_RESOLVED,
-                        agent_name="orchestrator",
+                        type=EventType.INCIDENT_COMPLETED,
+                        agent_name=ORCHESTRATOR,
                         incident_id=incident_id,
+                        data={"status": status.value},
                     ),
                 )
-                await event_bus.close_incident(incident_id)
-        except Exception as exc:
-            logger.error("pipeline_error", incident_id=incident_id, error=str(exc))
+            except Exception as exc:
+                logger.error(
+                    "incident_completed_event_failed",
+                    incident_id=incident_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
             try:
-                short_term_memory.update_context(incident_id, status=IncidentStatus.ESCALATED)
-            except KeyError:
-                pass
-            if event_bus is not None:
                 await event_bus.close_incident(incident_id)
-        finally:
-            reset_current_incident(token)
+            except Exception as exc:
+                logger.error(
+                    "incident_stream_close_failed",
+                    incident_id=incident_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
 
-    return run_pipeline
+    return run_incident
 
 
 @asynccontextmanager
@@ -218,81 +164,174 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     Startup order:
     1. Load config and configure structured logging.
-    2. Create SQLite tables (idempotent).
-    3. Seed service map and runbooks (idempotent INSERT OR REPLACE).
-    4. Build memory clients (SemanticMemory, EpisodicMemory, ShortTermMemory).
-    5. Create Groq AsyncOpenAI client; set as SDK default.
-    6. Build specialist agents and orchestrator.
-    7. Wire alert deduplicator and pipeline callback.
-    8. Mount all API routers.
+    2. Configure the Entra bearer validator (never raises; unconfigured → 401 everywhere).
+    3. Read the Key Vault secrets (when KEY_VAULT_URL is set) BEFORE LangFuse, whose
+       client reads LANGFUSE_* from the environment at configure time.
+    4. Configure LangFuse.
+    5. Open the asyncpg pool: DATABASE_URL, else PGHOST/PGDATABASE/PGUSER with an Entra
+       token as the password for every new connection.
+    6. Wire memory clients, the SDK defaults, the pipeline callback and the routers.
+
+    Teardown (each step runs even if the one before it raised or was cancelled): in-flight
+    incidents are drained (up to SENTINEL_SHUTDOWN_GRACE_S; the rest are logged, then
+    cancelled) BEFORE the traces flush and the pool closes, so a finishing incident can
+    still store itself; then the background dataset writes (within the rest of the same
+    grace; the rest cancelled); then the LangFuse client is shut down (flushing pending
+    spans, for at most ``TRACE_SHUTDOWN_TIMEOUT_S``, after which it is abandoned so a failed
+    startup still exits and the pod restarts), the pool is closed, then the Azure credential
+    (the pool's password callable uses it) is closed.
     """
     settings = get_settings()
     configure_logging(settings.sentinel_log_level)
-    logger.info("sentinel_startup", db_path=str(settings.sentinel_db_path))
-
-    # ── Database ──────────────────────────────────────────────────────────────
-    await create_tables(settings.sentinel_db_path)
-
+    auth_configured = configure_auth(settings)
+    credential = LazyAzureCredential()
+    incident_tasks = IncidentTasks(settings.sentinel_max_concurrent_pipelines)
+    grace_s = settings.sentinel_shutdown_grace_s
     try:
-        from data.seed import seed  # noqa: PLC0415 — lazy import, data/ must be on path
+        settings = await load_key_vault_secrets(settings, credential)
+        logger.info(
+            "sentinel_startup",
+            langfuse_enabled=configure_langfuse(),
+            auth_configured=auth_configured,
+            key_vault=settings.key_vault_url is not None,
+            dev_open_dashboard=settings.sentinel_dev_open_dashboard,
+        )
+        # Opened inside the try: a failure anywhere later in startup still closes it, so a
+        # failed startup leaves no open connections and no stale module-level pool.
+        pool = await init_pool_from_settings(
+            settings, password_factory=lambda: entra_token_password(credential.get())
+        )
+        _wire_app(app, settings, pool, incident_tasks)
+        logger.info("sentinel_ready")
+        yield
+    finally:
+        # Each step can raise or be cancelled (e.g. a second SIGTERM); the nested finally
+        # blocks run the later ones regardless. The drain comes first: a finishing incident
+        # still needs the pool and its traces. Flushing can block on network I/O: it runs
+        # off the loop and shutdown_traces bounds it (TRACE_SHUTDOWN_TIMEOUT_S). The dataset
+        # writes drain next, inside what is left of the same grace (they need the LangFuse
+        # client, so before the flush).
+        loop = asyncio.get_running_loop()
+        drain_deadline = loop.time() + grace_s
+        try:
+            try:
+                await incident_tasks.shutdown(grace_s)
+            finally:
+                await DATASET_WRITES.drain(max(0.0, drain_deadline - loop.time()))
+        finally:
+            try:
+                await asyncio.to_thread(shutdown_traces)
+            finally:
+                try:
+                    await close_pool()
+                finally:
+                    credential.close()
+                    logger.info("sentinel_shutdown")
 
-        await seed(settings.sentinel_db_path, verbose=False)
-    except ImportError:
-        logger.warning("seed_skipped", reason="data package not on Python path")
 
+def _wire_app(
+    app: FastAPI,
+    settings: Settings,
+    pool: asyncpg.Pool | None,
+    incident_tasks: IncidentTasks,
+) -> None:
+    """Build the memory clients, SDK defaults, tracing and routers, and mount them.
+
+    *pool* is None when no ``DATABASE_URL`` is configured: semantic and episodic memory
+    are still built, and every call to them raises ``SentinelMemoryError`` ("memory
+    unavailable"). *incident_tasks* is the lifespan's in-flight registry: the webhook
+    router caps and tracks incidents with it, and the lifespan drains it at shutdown.
+
+    Only ``/health`` and ``/ready`` are open. Every other route requires an Entra bearer
+    token with the ``Incident.Write`` role. With ``SENTINEL_DEV_OPEN_DASHBOARD`` the
+    dashboard pages and their read APIs (``DEV_OPEN_ROUTES``) are open as well; the
+    webhook, incidents and generate routes stay protected.
+    """
     # ── Memory clients ────────────────────────────────────────────────────────
     embedding_client = EmbeddingClient.from_model_name(settings.sentinel_embedding_model)
-    semantic_memory = SemanticMemory(settings.sentinel_db_path)
-    episodic_memory = EpisodicMemory(settings.sentinel_db_path, embedding_client)
+    semantic_memory = SemanticMemory(pool)
+    episodic_memory = EpisodicMemory(pool, embedding_client)
     short_term_memory = ShortTermMemory()
 
     # ── LLM + SDK defaults ────────────────────────────────────────────────────
     apply_sdk_defaults(settings)
 
-    # ── Event bus + HITL ──────────────────────────────────────────────────────
+    # ── Event bus ─────────────────────────────────────────────────────────────
     event_bus = EventBus()
-    gate_registry = HitlGateRegistry()
-    api_approval_fn = make_api_approval_fn(event_bus, gate_registry)
 
     # ── Trajectory tracing ────────────────────────────────────────────────────
     trajectories_dir = Path("reports/trajectories")
     tracer = SentinelTracer(short_term_memory, trajectories_dir=trajectories_dir)
-    add_trace_processor(tracer)
 
     # ── Dashboard event emitter ───────────────────────────────────────────────
     dashboard_emitter = DashboardEventEmitter(event_bus)
-    add_trace_processor(dashboard_emitter)
 
-    # ── Runtime config (dashboard model switching) ─────────────────────────────
-    runtime_config = RuntimeConfig(settings)
+    # Exactly Sentinel's processors (+ the R14 LangFuse generation bridge): the SDK's
+    # default OpenAI trace exporter is dropped (decision 2026-10-15).
+    install_trace_processors(tracer, dashboard_emitter)
 
     # ── API wiring ────────────────────────────────────────────────────────────
-    # Agents are built per-incident inside make_pipeline_fn so scenario-based
-    # alerts get their synthetic log/deploy data injected into the tools.
-    deduplicator = AlertDeduplicator()
+    # Agents are built per-incident inside make_pipeline_fn.
     pipeline_fn = make_pipeline_fn(
-        runtime_config.effective_settings,
+        lambda: settings,
         semantic_memory,
         episodic_memory,
         short_term_memory,
-        max_turns=settings.sentinel_max_tool_calls + 5,
         event_bus=event_bus,
-        approval_fn=api_approval_fn,
+        pool=pool,
     )
 
-    app.include_router(make_alert_router(deduplicator, short_term_memory, pipeline_fn))
-    app.include_router(make_incidents_router(short_term_memory))
-    app.include_router(make_health_router(short_term_memory))
-    app.include_router(make_events_router(event_bus, gate_registry))
-    app.include_router(make_scenarios_router())
-    app.include_router(make_eval_report_router())
-    app.include_router(make_config_router(runtime_config))
-    app.include_router(make_trajectories_router(trajectories_dir))
+    protected: list[params.Depends] = [Depends(require_incident_write)]
+    dashboard: list[params.Depends] = [] if settings.sentinel_dev_open_dashboard else protected
+    if settings.sentinel_dev_open_dashboard:
+        logger.warning(
+            "dev_open_dashboard",
+            open_routes=list(DEV_OPEN_ROUTES),
+            effect="the dashboard pages and their read APIs serve WITHOUT auth: "
+            "local use only, never in the pod",
+        )
+    app.include_router(
+        make_health_router(db_readiness(pool, db_configured=database_configured(settings)))
+    )  # open (§3.5)
+    app.include_router(
+        make_incident_router(
+            short_term_memory,
+            episodic_memory,
+            pipeline_fn,
+            tasks=incident_tasks,
+            max_body_bytes=settings.sentinel_webhook_max_body_bytes,
+        ),
+        dependencies=protected,
+    )
+    app.include_router(
+        make_incidents_router(short_term_memory, episodic_memory), dependencies=protected
+    )
+    app.include_router(
+        make_generate_router(episodic_memory=episodic_memory, pool=pool, settings=settings),
+        dependencies=protected,
+    )
+    app.include_router(make_dashboard_router(), dependencies=dashboard)
+    app.include_router(make_scenarios_router(), dependencies=dashboard)
+    app.include_router(make_eval_report_router(), dependencies=dashboard)
+    app.include_router(make_config_router(settings), dependencies=dashboard)
+    app.include_router(make_trajectories_router(trajectories_dir), dependencies=dashboard)
 
-    logger.info("sentinel_ready")
-    yield
 
-    logger.info("sentinel_shutdown")
+def make_dashboard_router() -> APIRouter:
+    """Router for the dashboard pages: ``GET /`` (live incidents) and ``GET /eval``."""
+    router = APIRouter()
+
+    @router.get("/", response_class=HTMLResponse, include_in_schema=False)
+    async def dashboard() -> str:  # pyright: ignore[reportUnusedFunction]
+        """Serve the live incident dashboard."""
+        return _DASHBOARD_HTML.read_text(encoding="utf-8")
+
+    @router.get("/eval", response_class=HTMLResponse, include_in_schema=False)
+    async def eval_page() -> str:  # pyright: ignore[reportUnusedFunction]
+        """Serve the eval results page."""
+        return _EVAL_HTML.read_text(encoding="utf-8")
+
+    return router
 
 
 def create_app() -> FastAPI:
@@ -307,17 +346,6 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
-
-    @application.get("/", response_class=HTMLResponse, include_in_schema=False)
-    async def dashboard() -> str:  # pyright: ignore[reportUnusedFunction]
-        """Serve the live incident dashboard."""
-        return _DASHBOARD_HTML.read_text(encoding="utf-8")
-
-    @application.get("/eval", response_class=HTMLResponse, include_in_schema=False)
-    async def eval_page() -> str:  # pyright: ignore[reportUnusedFunction]
-        """Serve the eval results page."""
-        return _EVAL_HTML.read_text(encoding="utf-8")
-
     return application
 
 

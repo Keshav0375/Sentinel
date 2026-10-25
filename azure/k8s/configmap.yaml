@@ -1,0 +1,18 @@
+# Non-secret pod config (decisions 2026-10-24). Secrets, including the LLM
+# keys, are read from Key Vault at startup; there is no K8s Secret.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-config
+  labels:
+    app: sentinel-backend
+data:
+  SENTINEL_API_TENANT_ID: "${SENTINEL_API_TENANT_ID}"
+  SENTINEL_API_AUDIENCE: "${SENTINEL_API_AUDIENCE}"
+  DD_SITE: "us5.datadoghq.com"
+  KEY_VAULT_URL: "${KEY_VAULT_URL}"
+  PGHOST: "${PGHOST}"
+  PGDATABASE: "${PGDATABASE}"
+  PGUSER: "${PGUSER}"
+  SENTINEL_PRIMARY_PROVIDER: "anthropic"

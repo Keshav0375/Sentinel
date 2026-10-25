@@ -145,7 +145,7 @@ _This is the architectural view of Phase 2._ Deep-dive docs live in the
 
 ---
 
-**Autonomous DevOps incident response agent** — multi-agent pipeline that triages alerts, diagnoses root causes, drafts remediation plans, and communicates status, with a mandatory human-approval gate before any destructive action.
+**Autonomous DevOps incident response agent** — multi-agent pipeline that triages alerts, diagnoses root causes, drafts a rollback or an escalation, and writes the incident summary. The backend never acts on the world: it drafts a rollback spec, GitHub Actions opens the revert PR on Sentinel-deployment, and a human merges (or closes) it.
 
 Built as a portfolio project demonstrating production-grade agentic engineering: multi-agent orchestration, HITL safety, episodic memory, trajectory evaluation, and real-time observability.
 
@@ -158,27 +158,24 @@ Alert fires
     │
     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      Orchestrator Agent                      │
-│  (coordinates handoffs, enforces 15-call cap, writes STM)   │
+│          Orchestrator (Python code, not an LLM agent)        │
+│  plans on signal_type · reflexion ≤ 2 loops · decision gate  │
+│  reverification (1 retry) · hard 20-tool-call budget         │
 └──┬──────────┬──────────┬──────────┬──────────┬─────────────┘
-   │          │          │          │          │
    ▼          ▼          ▼          ▼          ▼
-Triage    Log      Deploy    Remediation  Comms
-Agent   Analyst  Correlator   Agent      Agent
-   │       │          │          │          │
-   │    fetch_     list_      draft_    draft_
-get_    logs    recent_   rollback_  slack_
-service_         deploys      pr     summary
-metadata                       │
-search_                 request_human_
-past_                   approval ◄── HITL gate
+Triage    Analysis   Reflexion  Resolution  Reverification
+   │          │      (critique,     │       (PASS / FAIL /
+get_      fetch_      no tools)  prepare_    ESCALATE,
+service_  logs                   rollback_   no tools)
+metadata  get_                   spec  or
+search_   deploy_                format_
+past_     details                escalation
 incidents                      │
                                ▼
-                        Human approves / rejects
+              Rollback spec ──► GitHub Actions opens the revert PR
                                │
                                ▼
-                     Incident resolved + stored
-                     in episodic memory
+                     A human merges (or closes) it on GitHub
 ```
 
 Every tool call is captured as a trajectory. After resolution, an LLM judge scores the trajectory across 6 dimensions and writes a report viewable in the web dashboard.
@@ -187,14 +184,14 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 
 ## Features
 
-- **Multi-agent pipeline** — 5 specialist agents (Triage, Log Analyst, Deploy Correlator, Remediation, Comms) orchestrated via OpenAI Agents SDK handoffs
-- **HITL safety gate** — `request_human_approval` is the only path to destructive actions; no agent can bypass it
-- **Episodic memory** — past incidents embedded and stored in SQLite; similar incidents surface automatically during triage
-- **Semantic memory** — service map, dependency graph, and runbooks loaded from seed data
-- **Live incident dashboard** — real-time SSE stream of agent activity at `http://localhost:8000/`; approve/reject HITL from the browser
+- **Multi-agent pipeline** — 5 pipeline agents (Triage, Analysis, Reflexion, Resolution, Reverification) run by a Python orchestrator that enforces every cap in code; a sixth, the PR content generator, writes the revert PR for `/generate/pr-content`
+- **HITL safety gate** — the backend only drafts a rollback spec or an escalation; GitHub Actions opens the revert PR and a human merges or closes it on GitHub. No agent has a tool that acts on the world
+- **Episodic memory** — past incidents embedded and stored in Postgres + pgvector; similar incidents surface automatically during triage
+- **Semantic memory** — service map, dependency graph, and runbooks held in Postgres
+- **Scenario catalog dashboard** — the 30 Sentinel-deployment scenario branches, read-only, at `http://localhost:8000/`
 - **Trajectory eval** — LLM-as-judge scores every incident across 6 dimensions (0–5), with a Markdown and JSON report
 - **Eval results dashboard** — browse per-scenario scores at `http://localhost:8000/eval`
-- **10 synthetic scenarios** — 5 failure classes (bad deploy, DB pool, downstream outage, memory leak, config regression)
+- **30 scenario branches** — 10 each of case i (healthy or runtime fault), ii (pipeline failure) and iii (post-deploy fault), in Sentinel-deployment
 
 ---
 
@@ -203,8 +200,8 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 ### Prerequisites
 
 - Python 3.12+
-- [Groq API key](https://console.groq.com/keys) (free tier is sufficient)
-- Docker + docker-compose (optional but recommended)
+- An Anthropic and/or OpenAI API key (not needed to boot; an incident without one escalates)
+- Docker (optional: a local Postgres + pgvector for memory and the DB tests)
 
 ### 1. Clone and configure
 
@@ -212,70 +209,54 @@ Every tool call is captured as a trajectory. After resolution, an LLM judge scor
 git clone https://github.com/keshxv/sentinel.git
 cd sentinel
 cp .env.example .env
-# Edit .env — add your GROQ_API_KEY
+# Edit .env — add ANTHROPIC_API_KEY and OPENAI_API_KEY
 ```
 
-### 2a. Run with Docker
+### 2a. Local Postgres (optional)
 
 ```bash
-docker-compose up --build
+docker run -d --name sentinel-pg -e POSTGRES_PASSWORD=test -p 55432:5432 pgvector/pgvector:pg16
+```
+
+Set `DATABASE_URL=postgresql://postgres:test@localhost:55432/postgres` in `.env` and run `poetry run alembic upgrade head`. Without `DATABASE_URL` the app still boots; memory reports unavailable.
+
+### 2b. Run
+
+```bash
+poetry install
+poetry run sentinel serve
 ```
 
 Dashboard: [http://localhost:8000](http://localhost:8000)
 
-### 2b. Run without Docker
+### 3. Switch the primary provider (optional)
 
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-python -m data.seed                # seed service map + runbooks
-uvicorn sentinel.main:app --reload
-```
+Each agent role runs a fixed Anthropic/OpenAI model pair (architecture §4.7, in
+`src/sentinel/providers/router.py`). Anthropic runs first by default; a rate limit, timeout
+or API error re-runs the agent once on OpenAI. To run OpenAI first:
 
-Dashboard: [http://localhost:8000](http://localhost:8000)
-
-### 3. Switch providers (optional)
-
-Model strings use the `provider/model` format. Swap any provider with 3 env vars — no code changes.
-
-**Switch analysis to Anthropic Claude:**
 ```env
-SENTINEL_ANALYSIS_MODEL=anthropic/claude-sonnet-4-6
-ANTHROPIC_API_KEY=sk-ant-...
+SENTINEL_PRIMARY_PROVIDER=openai
 ```
 
-**Switch everything to OpenAI:**
-```env
-SENTINEL_TRIAGE_MODEL=openai/gpt-4o-mini
-SENTINEL_ANALYSIS_MODEL=openai/gpt-4o
-SENTINEL_JUDGE_MODEL=openai/gpt-4o-mini
-OPENAI_API_KEY=sk-...
-```
+The eval judge always runs on the provider the agents do not use.
 
-See [available_models.md](available_models.md) for the full model table and provider capability matrix.
+### 4. Scenarios
 
-### 4. Fire a scenario
-
-**From the dashboard** — select a scenario from the dropdown and click ⚡ Fire Scenario.
-
-**From the CLI**:
-
-```bash
-python scripts/run_scenario.py bad_deploy_01
-python scripts/run_scenario.py --list   # see all 10 scenarios
-```
+Scenarios are the 30 branches of Sentinel-deployment (`scenarios/branches.yaml`, vendored at `src/sentinel/catalog/branches.yaml`). A human merges a scenario branch's PR; Datadog → bridge → `repository_dispatch` → `ci_incident_response.yml` runs the pipeline. `GET /api/scenarios` (bearer) lists the catalog; the dashboard shows it read-only.
 
 ### 5. Run the eval suite
 
 ```bash
-python scripts/run_eval.py
-# or a subset:
-python scripts/run_eval.py --scenarios bad_deploy_01 db_pool_01
+python3 scripts/run_eval.py --branches ../Sentinel-deployment/scenarios/branches.yaml
+# dataset (default sentinel-scenario-runs) and dataset-run name:
+python3 scripts/run_eval.py --branches <path> --dataset sentinel-scenario-runs --run-name prompt-v2
+python3 scripts/run_eval.py --branches <path> --no-store   # do not write incidents.eval_score
 ```
 
 Results → `reports/eval_report.json` + `reports/eval_report.md`  
-Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
+Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)  
+With `DATABASE_URL` set, each judged score is also stored on its incident (`incidents.eval_score`).
 
 ---
 
@@ -286,10 +267,9 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 **What you'll see:**
 
 1. Select `bad_deploy_01` from the dropdown — a critical API gateway alert fires
-2. Watch the five agent cards light up in sequence as each specialist completes its analysis
-3. An amber HITL overlay appears when the Remediation Agent requests rollback approval
-4. Click ✅ Approve — the pipeline continues and the incident resolves
-5. Switch to `/eval` to see the LLM judge's per-dimension scores
+2. Watch the agent cards light up as triage, analysis and the reflexion critique run
+3. The Resolution Agent drafts a rollback spec, reverification checks it, and the incident ends `rollback_proposed` (or `escalated`)
+4. Switch to `/eval` to see the LLM judge's per-dimension scores
 
 ---
 
@@ -298,17 +278,16 @@ Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)
 | Layer | Technology |
 |-------|-----------|
 | Agent framework | [openai-agents](https://github.com/openai/openai-agents-python) (Agents SDK) |
-| LLM | LiteLLM multi-provider — `groq/`, `openai/`, `anthropic/`, `azure/` via `provider/model` env var. Default: Groq (free tier). See [available_models.md](available_models.md). |
+| LLM | LiteLLM — Anthropic (default) and OpenAI, a fixed model pair per agent role with automatic fallback (§4.7). |
 | API layer | FastAPI + uvicorn |
-| Memory — episodic | SQLite via aiosqlite + cosine similarity |
-| Memory — semantic | SQLite (service map, runbooks) |
+| Memory — episodic | PostgreSQL + pgvector (asyncpg) |
+| Memory — semantic | PostgreSQL (`services` table) |
 | Embeddings | sentence-transformers `all-MiniLM-L6-v2` (local, 384 dims, zero cost) |
-| Real-time | Server-Sent Events (`EventSource` API) |
 | Models / validation | Pydantic v2 |
 | Config | pydantic-settings |
 | Logging | structlog (JSON) |
 | HTTP client | httpx |
-| Containerisation | Docker + docker-compose |
+| Containerisation | Docker |
 | Linting | ruff |
 | Type checking | pyright |
 | Tests | pytest + pytest-asyncio |
@@ -339,22 +318,17 @@ Pass threshold: **3.0 / 5.0** (60%)
 ```
 sentinel/
 ├── src/sentinel/
-│   ├── agents/          # 5 specialist agents + orchestrator
-│   ├── tools/           # Tool implementations (fetch_logs, draft_rollback_pr, …)
-│   ├── memory/          # Episodic (SQLite + embeddings), semantic, short-term
+│   ├── agents/          # 6 LLM agents + the Python orchestrator
+│   ├── tools/           # Tool implementations (fetch_logs, prepare_rollback_spec, …)
+│   ├── memory/          # Episodic (Postgres + pgvector), semantic, short-term
 │   ├── eval/            # Rubric, LLM-as-judge, batch runner, report generator
-│   ├── api/             # FastAPI routes (webhooks, SSE, HITL, incidents, scenarios)
+│   ├── api/             # FastAPI routes (webhooks, incidents, generate, scenarios)
 │   ├── infra/           # DB, logging, tracing, event bus, dashboard emitter
 │   ├── models/          # Pydantic domain models
-│   ├── generator/       # Synthetic alert + log + deploy data
+│   ├── catalog/         # branches.yaml: the vendored scenario catalog
 │   └── dashboard/       # index.html (live dashboard) + eval.html
-├── data/
-│   ├── scenarios/       # 10 JSON scenario files
-│   └── services/        # service_map.json, dependency_graph.json, runbooks.json
 ├── scripts/
-│   ├── run_scenario.py  # Fire a single scenario from CLI
-│   ├── run_eval.py      # Batch eval across all scenarios
-│   └── demo.py          # Interactive demo runner (coming soon)
+│   ├── run_eval.py      # Score LangFuse scenario runs against branches.yaml
 ├── tests/               # ~1 000 tests across all layers
 └── reports/             # Trajectory JSON, eval_report.json/md
 ```
@@ -363,11 +337,11 @@ sentinel/
 
 ## Architecture Decisions
 
-**Why multi-agent, not single agent?** Each specialist has a focused system prompt and constrained tool set. This makes each agent independently testable and improvable — changing the Log Analyst's prompt doesn't risk breaking Triage.
+**Why multi-agent, not single agent?** Each specialist has a focused system prompt and constrained tool set. This makes each agent independently testable and improvable — changing the Analysis prompt doesn't risk breaking Triage.
 
-**Why HITL at the tool level, not the prompt level?** There is no "execute rollback" tool — only `draft_rollback_pr` + `request_human_approval`. An agent can't bypass approval by ignoring a prompt instruction; it literally has no tool that acts without human sign-off.
+**Why HITL at the tool level, not the prompt level?** There is no "execute rollback" tool — only `prepare_rollback_spec` and `format_escalation`, which draft and return. An agent can't bypass the gate by ignoring a prompt instruction: it has no tool that acts, and the revert PR a human merges on GitHub is the only path to a rollback.
 
-**Why SQLite for episodic memory?** Zero infrastructure cost for the MVP. The embedding + cosine similarity approach works well at 10–100 incidents. Phase 2 swaps to Cosmos DB with a vector index for scale.
+**Why Postgres + pgvector for episodic memory?** One database holds services, deployments and incidents, and pgvector's `<=>` replaces in-process cosine similarity (backend.md §5, §13.2).
 
 **Why a separate judge model?** Using a different model family for evaluation avoids self-grading bias. The agents run on `llama-3.3-70b-versatile`; the judge runs on `llama-3.1-8b-instant`. In production, you'd use a different provider entirely.
 
@@ -380,11 +354,10 @@ _Documented here for interview conversations about production readiness:_
 | Capability | Phase 2 approach |
 |-----------|-----------------|
 | Cloud deployment | Azure Container Apps + Bicep IaC |
-| Database | Cosmos DB (vector + JSON) replacing SQLite |
+| Database | PostgreSQL + pgvector (asyncpg stores, Alembic migrations) |
 | Cache | Redis for short-term memory |
 | Model routing | LiteLLM done (Phase 9) — Kong AI Gateway for token budgets is Phase 2 |
 | Observability | Self-hosted LangFuse for trace dashboards |
-| HITL channel | Slack interactive buttons (real Slack app) |
 | PR creation | GitHub App for real PR creation |
 | Self-improvement | Nightly ACA Job — re-evals + auto-PR to improve failing prompts |
 | Alert source | Azure Service Bus + Datadog webhook for real alerts |

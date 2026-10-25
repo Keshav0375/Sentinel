@@ -2,16 +2,16 @@
 
 Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](CLAUDE.md).
 
-> Where a Phase-2 `ARCHITECTURE.md` differs from anything here (e.g. asyncpg + pgvector
-> replacing aiosqlite + numpy, scenario branches replacing `data/scenarios/`), **the
-> architecture wins**. This file is the default; the architecture is binding.
+> Where a Phase-2 `ARCHITECTURE.md` differs from anything here (e.g. asyncpg + pgvector, the
+> scenario branches of Sentinel-deployment), **the architecture wins**. This file is the default;
+> the architecture is binding.
 
 ## Tech Stack (do not change without asking)
 
 - Python 3.12+, `pyproject.toml` with hatchling
 - `openai-agents` (OpenAI Agents SDK) for orchestration + handoffs
-- `openai` for Groq-compatible LLM calls (base_url: api.groq.com/openai/v1)
-- `google-genai` for Gemini backup calls (NOT google-generativeai, deprecated)
+- `litellm` (via `openai-agents[litellm]`) for LLM calls — Anthropic and OpenAI only, routed
+  per role by `providers/router.py` (§4.7)
 - FastAPI + uvicorn for webhook API
 - Pydantic v2 for all models and tool schemas
 - `pydantic-settings` for config (env-var driven)
@@ -30,14 +30,16 @@ Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](
 - f-strings over `.format()` or `%`
 
 ### Architecture patterns
-- **Dependency injection** — memory clients, config, generators are injected, never singletons
+- **Dependency injection** — memory clients, config are injected, never singletons
 - **Separation of concerns** — models know nothing of agents; tools nothing of API; agents nothing of storage
 - **Protocol/ABC for abstractions** — `MemoryStore` protocol in `memory/base.py`, swappable impls
 - **No business logic in the API layer** — routes call services/orchestrator, nothing else
 - **Tools are pure functions** — `@function_tool`, typed I/O, side effects only through injected deps
 
 ### Error handling
-- Custom hierarchy: `SentinelError` → `ToolError`, `MemoryError`, `AgentError`, `EvalError`
+- Custom hierarchy in `src/sentinel/exceptions.py`: `SentinelError` → `ToolError`,
+  `SentinelMemoryError`, `AgentError`, `EvalError` (never `MemoryError` — that is the builtin)
+- Driver/library errors are wrapped at the owning boundary (`raise SentinelMemoryError(...) from exc`)
 - Tools never raise raw exceptions — catch and return structured error responses
 - `structlog` context binding for `incident_id` correlation across all logs
 - Retry with exponential backoff for LLM API calls (3 attempts, 1s/2s/4s)
@@ -46,6 +48,11 @@ Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](
 - Every tool gets a unit test with mock data; every agent an integration test with a canned scenario
 - Fixtures in `conftest.py`: mock memory, mock scenario, test config
 - Test file mirrors source: `src/sentinel/tools/log_fetcher.py` → `tests/test_tools/test_log_fetcher.py`
+- The suite never depends on the caller's shell or `.env`: `tests/conftest.py` disables `.env`
+  for `Settings`, unsets `DATABASE_URL` for the session and removes the LLM provider keys.
+  A test that needs `DATABASE_URL` sets it itself (`monkeypatch.setenv`) to the test database.
+- Database tests use `TEST_DATABASE_URL` only — never `DATABASE_URL` — and create/drop throwaway
+  databases on that server. Without it they skip locally; with `CI=true` they fail.
 
 ## Agent System Prompt Rules
 
@@ -91,7 +98,9 @@ result = await Runner.run(orchestrator, input="<alert payload>")
 ```bash
 poetry run sentinel serve            # run the app (Poetry)
 uvicorn sentinel.main:app --reload   # run the app (direct)
-pytest -xvs                          # run tests
+poetry run alembic upgrade head      # create/upgrade the Postgres schema (reads DATABASE_URL)
+pytest -xvs                          # run tests (DB tests skip without TEST_DATABASE_URL)
+TEST_DATABASE_URL=postgresql://postgres:test@localhost:55432/sentinel pytest  # + DB tests
 ruff check src/ tests/               # lint
 pyright src/                         # type check
 python scripts/run_eval.py           # run eval suite

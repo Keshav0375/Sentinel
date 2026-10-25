@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 class ServiceTier(StrEnum):
     """Operational tier determines alert escalation priority and SLA.
 
-    Values match the SQLite services.tier column (ARCHITECTURE.md §7.3).
+    Values match the services.tier column (backend.md §5.3).
     """
 
     CRITICAL = "critical"
@@ -21,7 +21,7 @@ class ServiceTier(StrEnum):
 class ServiceMetadata(BaseModel):
     """Ownership and topology data for a single microservice.
 
-    Loaded from the semantic memory store (SQLite services table) and passed
+    Loaded from the semantic memory store (PostgreSQL services table) and passed
     to the Triage and Log Analyst agents so they can route alerts and
     understand blast radius.
     """

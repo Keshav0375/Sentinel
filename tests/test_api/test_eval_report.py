@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -23,28 +24,26 @@ def _sample_report() -> dict[str, Any]:
                 "incident_id": "inc-001",
                 "scenario_id": "bad_deploy_01",
                 "dimension_scores": [
-                    {"dimension": "triage_accuracy", "score": 4.5, "reasoning": "Correct"},
-                    {"dimension": "root_cause_correctness", "score": 3.0, "reasoning": "Partial"},
-                    {"dimension": "tool_efficiency", "score": 4.0, "reasoning": "Good"},
-                    {"dimension": "mttr", "score": 3.5, "reasoning": "OK"},
-                    {"dimension": "remediation_safety", "score": 5.0, "reasoning": "Perfect"},
-                    {"dimension": "comms_quality", "score": 4.0, "reasoning": "Clear"},
+                    {"dimension": "triage_accuracy", "score": 0.9, "reasoning": "Correct"},
+                    {"dimension": "root_cause_correctness", "score": 0.6, "reasoning": "Partial"},
+                    {"dimension": "tool_efficiency", "score": 0.8, "reasoning": "Good"},
+                    {"dimension": "mttr", "score": 0.7, "reasoning": "OK"},
+                    {"dimension": "remediation_safety", "score": 1.0, "reasoning": "Perfect"},
                 ],
-                "total_score": 4.0,
+                "total_score": 0.8,
                 "judge_model": "llama-3.3-70b-versatile",
             },
             {
                 "incident_id": "inc-002",
                 "scenario_id": "db_pool_01",
                 "dimension_scores": [
-                    {"dimension": "triage_accuracy", "score": 2.0, "reasoning": "Wrong"},
-                    {"dimension": "root_cause_correctness", "score": 1.5, "reasoning": "Missed"},
-                    {"dimension": "tool_efficiency", "score": 3.0, "reasoning": "OK"},
-                    {"dimension": "mttr", "score": 2.0, "reasoning": "Slow"},
-                    {"dimension": "remediation_safety", "score": 4.0, "reasoning": "Safe"},
-                    {"dimension": "comms_quality", "score": 2.5, "reasoning": "Vague"},
+                    {"dimension": "triage_accuracy", "score": 0.4, "reasoning": "Wrong"},
+                    {"dimension": "root_cause_correctness", "score": 0.3, "reasoning": "Missed"},
+                    {"dimension": "tool_efficiency", "score": 0.6, "reasoning": "OK"},
+                    {"dimension": "mttr", "score": 0.4, "reasoning": "Slow"},
+                    {"dimension": "remediation_safety", "score": 0.8, "reasoning": "Safe"},
                 ],
-                "total_score": 2.5,
+                "total_score": 0.5,
                 "judge_model": "llama-3.3-70b-versatile",
             },
         ],
@@ -103,7 +102,7 @@ class TestEvalReportEndpoint:
             data = client.get("/api/eval-report").json()
         for r in data["results"]:
             assert "dimension_scores" in r
-            assert len(r["dimension_scores"]) == 6
+            assert len(r["dimension_scores"]) == 5
 
     def test_result_has_total_score(self, tmp_path: Path) -> None:
         report_file = tmp_path / "eval_report.json"
@@ -113,7 +112,7 @@ class TestEvalReportEndpoint:
             data = client.get("/api/eval-report").json()
         for r in data["results"]:
             assert "total_score" in r
-            assert 0.0 <= r["total_score"] <= 5.0
+            assert 0.0 <= r["total_score"] <= 1.0
 
     def test_result_has_judge_model(self, tmp_path: Path) -> None:
         report_file = tmp_path / "eval_report.json"
@@ -142,7 +141,7 @@ class TestEvalReportEndpoint:
             assert "reasoning" in ds
             assert len(ds["reasoning"]) > 0
 
-    def test_all_six_dimensions_present(self, tmp_path: Path) -> None:
+    def test_all_five_dimensions_present(self, tmp_path: Path) -> None:
         report_file = tmp_path / "eval_report.json"
         report_file.write_text(json.dumps(_sample_report()), encoding="utf-8")
         app = _report_app(report_file)
@@ -155,7 +154,6 @@ class TestEvalReportEndpoint:
             "tool_efficiency",
             "mttr",
             "remediation_safety",
-            "comms_quality",
         }
         assert dims == expected
 
@@ -164,6 +162,10 @@ class TestEvalReportEndpoint:
 
 
 class TestEvalPage:
+    @pytest.fixture(autouse=True)
+    def _open_dashboard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")
+
     def test_get_eval_returns_html(self) -> None:
         from sentinel.main import create_app
 
@@ -216,7 +218,7 @@ class TestEvalPage:
         assert "tool_efficiency" in html
         assert "mttr" in html
         assert "remediation_safety" in html
-        assert "comms_quality" in html
+        assert "comms_quality" not in html  # the comms agent and its dimension are gone
 
     def test_eval_page_contains_score_classes(self) -> None:
         from sentinel.main import create_app

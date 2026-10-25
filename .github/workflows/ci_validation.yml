@@ -1,0 +1,221 @@
+name: "[sentinel] PR — validation"
+
+# Fast PR gate (backend.md §9.1; decisions 2026-10-24 "Backend phase 8"). No ACR, no AKS, no
+# Azure login, no secrets: it runs on forks too. Deploy happens only on merge (ci_backend_deployment.yml).
+on:
+  pull_request:
+    branches: [main, release-phase-2]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - "Dockerfile"
+      - "azure/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "scripts/**"
+      - ".github/workflows/**"
+      - ".github/actions/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Pins match ci.yml and the Dockerfile.
+  POETRY_VERSION: "2.5.1"
+  POETRY_PLUGIN_EXPORT_VERSION: "1.10.1"
+  # linux_arm64 tarball; the sha256 is from the release checksums file.
+  ACTIONLINT_VERSION: "1.7.12"
+  ACTIONLINT_SHA256: "325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6"
+
+jobs:
+  # ── 1. Quality: lint, format, types ──────────────────────────────────────
+  run-quality:
+    name: Run Quality Checks
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: pip-${{ runner.os }}-${{ runner.arch }}-${{ env.PYTHON_VERSION }}-
+
+      # Poetry only exports the lock; it lives in its own venv (as pipx would put it, but pipx is
+      # not guaranteed on the arm image), so its dependencies never enter the interpreter below.
+      - name: Install Poetry + export plugin
+        run: |
+          python -m venv "$RUNNER_TEMP/poetry"
+          "$RUNNER_TEMP/poetry/bin/pip" install --disable-pip-version-check \
+            "poetry==${POETRY_VERSION}" "poetry-plugin-export==${POETRY_PLUGIN_EXPORT_VERSION}"
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$RUNNER_TEMP/poetry/bin/poetry" "$RUNNER_TEMP/bin/poetry"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # Exactly the poetry.lock set (main + dev), hash checked, CPU-only torch (see ci.yml).
+      - name: Install locked dependencies (CPU-only torch)
+        run: python scripts/install_locked.py
+
+      - name: Ruff lint
+        run: ruff check src/ tests/
+
+      - name: Ruff format
+        run: ruff format --check src/ tests/
+
+      - name: Pyright type check
+        run: pyright src/
+
+  # ── 2. Build, boot and test in ONE job (§9.1 single-runner rule) ─────────
+  # A locally built image or running container does not exist in another job's VM.
+  build-and-test:
+    name: Build Image and Run Tests
+    needs: run-quality
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: sentinel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sentinel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The container is on the bridge network (-p 8000:8000): it reaches the service through
+      # the host's published 5432. The host-side tests use localhost.
+      CONTAINER_DATABASE_URL: "postgresql://postgres:test@host.docker.internal:5432/sentinel"
+      TEST_DATABASE_URL: "postgresql://postgres:test@localhost:5432/sentinel"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Restore pip cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: pip-${{ runner.os }}-${{ runner.arch }}-${{ env.PYTHON_VERSION }}-
+
+      - name: Install Poetry + export plugin
+        run: |
+          python -m venv "$RUNNER_TEMP/poetry"
+          "$RUNNER_TEMP/poetry/bin/pip" install --disable-pip-version-check \
+            "poetry==${POETRY_VERSION}" "poetry-plugin-export==${POETRY_PLUGIN_EXPORT_VERSION}"
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$RUNNER_TEMP/poetry/bin/poetry" "$RUNNER_TEMP/bin/poetry"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Install locked dependencies (CPU-only torch)
+        run: python scripts/install_locked.py
+
+      # The pytest session migrates TEST_DATABASE_URL; 002_seed_services embeds with the real model.
+      - name: Cache embedding model
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-MiniLM-L6-v2
+
+      - name: Build image (local, no push)
+        id: build
+        run: docker build --tag sentinel-backend:test .
+
+      # The pool registers the pgvector codec on every connection, so the schema must exist
+      # before the app boots. Migrated by the image itself (baked model, offline).
+      - name: Migrate the database with the image
+        id: migrate
+        run: |
+          docker run --rm \
+            --add-host host.docker.internal:host-gateway \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            sentinel-backend:test alembic upgrade head
+
+      # Stub LLM (no key is read); dummy API tenant/audience GUIDs (the JWKS is fetched only
+      # when a bearer token is validated, which never happens here).
+      - name: Run the backend container
+        id: run
+        run: |
+          docker run -d --name sentinel-backend -p 8000:8000 \
+            --add-host host.docker.internal:host-gateway \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e SENTINEL_FAKE_LLM=1 \
+            -e SENTINEL_API_TENANT_ID=00000000-0000-0000-0000-000000000000 \
+            -e SENTINEL_API_AUDIENCE=00000000-0000-0000-0000-000000000001 \
+            sentinel-backend:test
+
+      - name: Wait for /health (max 30 s)
+        id: health
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fsS --connect-timeout 2 --max-time 2 -o /dev/null http://localhost:8000/health; then
+              echo "/health answered 200"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::/health did not answer 200 within 30 s"
+          exit 1
+
+      - name: Check /ready
+        id: ready
+        run: curl -fsS --connect-timeout 5 --max-time 5 http://localhost:8000/ready
+
+      - name: Install actionlint (pinned, checksum verified)
+        id: actionlint
+        run: |
+          set -euo pipefail
+          file="actionlint_${ACTIONLINT_VERSION}_linux_arm64.tar.gz"
+          curl -fsSL --connect-timeout 10 --max-time 120 -o "$RUNNER_TEMP/$file" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${file}"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$file" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          tar -xzf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP/actionlint" actionlint
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
+
+      - name: Unit tests
+        id: unit
+        run: python -m pytest tests/test_tools/ tests/test_models/ tests/test_scripts/ -x --tb=short -q
+
+      - name: Integration tests
+        id: integration
+        run: python -m pytest tests/test_agents/ tests/test_api/ tests/test_infra/ -x --tb=short -q
+
+      - name: Container logs
+        id: logs
+        if: failure()
+        run: docker logs sentinel-backend || true
+
+      - name: Stop and remove the container
+        id: teardown
+        if: always()
+        run: |
+          docker stop sentinel-backend || true
+          docker rm sentinel-backend || true

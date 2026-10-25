@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from sentinel.api.scenarios import ScenarioInfo, make_scenarios_router
+from sentinel.api.scenarios import make_scenarios_router
+from sentinel.catalog import load_catalog
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -21,84 +23,50 @@ def _scenarios_app() -> FastAPI:
 
 
 class TestScenariosEndpoint:
-    def test_returns_200(self) -> None:
+    def test_returns_the_catalog(self) -> None:
         with TestClient(_scenarios_app()) as client:
             resp = client.get("/api/scenarios")
         assert resp.status_code == 200
+        data = resp.json()
+        assert data == [t.model_dump(mode="json") for t in load_catalog()]
+        assert len(data) == 30
 
-    def test_returns_list(self) -> None:
-        with TestClient(_scenarios_app()) as client:
-            data = client.get("/api/scenarios").json()
-        assert isinstance(data, list)
-        assert len(data) > 0
-
-    def test_each_item_has_required_fields(self) -> None:
+    def test_each_item_has_exactly_the_catalog_fields(self) -> None:
         with TestClient(_scenarios_app()) as client:
             data = client.get("/api/scenarios").json()
         for item in data:
-            assert "id" in item
-            assert "label" in item
-            assert "failure_class" in item
-            assert "alert" in item
+            assert set(item) == {
+                "branch",
+                "case",
+                "fault",
+                "expected_signal_type",
+                "expected_resolution",
+                "expected_failed_stage",
+                "also_expected",
+                "expected_culprit",
+            }
 
-    def test_alert_has_service_and_severity(self) -> None:
+    def test_case_ii_item_shape(self) -> None:
         with TestClient(_scenarios_app()) as client:
             data = client.get("/api/scenarios").json()
-        for item in data:
-            alert = item["alert"]
-            assert "service" in alert
-            assert "severity" in alert
+        item = next(i for i in data if i["branch"] == "deployfail/03")
+        assert item["expected_failed_stage"] == "deploy"
+        assert item["also_expected"] == []
+        assert item["expected_culprit"] == "self"
 
-    def test_bad_deploy_01_present(self) -> None:
+    def test_is_read_only(self) -> None:
         with TestClient(_scenarios_app()) as client:
-            data = client.get("/api/scenarios").json()
-        ids = [s["id"] for s in data]
-        assert "bad_deploy_01" in ids
-
-    def test_all_10_scenarios_present(self) -> None:
-        with TestClient(_scenarios_app()) as client:
-            data = client.get("/api/scenarios").json()
-        assert len(data) == 10
-
-    def test_failure_classes_present(self) -> None:
-        with TestClient(_scenarios_app()) as client:
-            data = client.get("/api/scenarios").json()
-        classes = {s["failure_class"] for s in data}
-        assert "bad_deploy" in classes
-        assert "db_pool" in classes
-
-    def test_label_contains_id(self) -> None:
-        with TestClient(_scenarios_app()) as client:
-            data = client.get("/api/scenarios").json()
-        for item in data:
-            assert (
-                item["id"].replace("_", " ").lower() in item["label"].lower()
-                or "bad deploy" in item["label"].lower()
-                or item["id"] in item["label"].lower()
-                or True
-            )  # label just needs to be non-empty
-            assert len(item["label"]) > 0
-
-    def test_alert_source_is_valid(self) -> None:
-        with TestClient(_scenarios_app()) as client:
-            data = client.get("/api/scenarios").json()
-        for item in data:
-            assert item["alert"]["source"] in ("datadog", "pagerduty")
-
-    def test_scenario_info_model_validates(self) -> None:
-        with TestClient(_scenarios_app()) as client:
-            data = client.get("/api/scenarios").json()
-        # Each item should deserialize into ScenarioInfo without error
-        for item in data:
-            info = ScenarioInfo(**item)
-            assert info.id
-            assert info.alert.service
+            assert client.post("/api/scenarios").status_code == 405
 
 
 # ── GET / (dashboard HTML) ────────────────────────────────────────────────────
 
 
 class TestDashboardRoute:
+    @pytest.fixture(autouse=True)
+    def _open_dashboard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SENTINEL_DEV_OPEN_DASHBOARD", "1")
+
     def test_get_root_returns_html(self) -> None:
         from sentinel.main import create_app
 
@@ -116,45 +84,57 @@ class TestDashboardRoute:
             html = client.get("/").text
         assert "Sentinel" in html
 
-    def test_dashboard_contains_fire_button(self) -> None:
+    def test_dashboard_has_no_fire_control(self) -> None:
         from sentinel.main import create_app
 
         app = create_app()
         with TestClient(app) as client:
             html = client.get("/").text
-        assert "fire-btn" in html or "Fire Scenario" in html
+        assert "fire-btn" not in html
+        assert "fireScenario" not in html
+        assert "Fire Scenario" not in html
 
-    def test_dashboard_contains_eventsource(self) -> None:
+    def test_dashboard_has_no_live_view(self) -> None:
         from sentinel.main import create_app
 
         app = create_app()
         with TestClient(app) as client:
             html = client.get("/").text
-        assert "EventSource" in html
+        for gone in ("EventSource", "/events/", "resolve-modal", "inc-bar", "pipeline-flow"):
+            assert gone not in html
+        assert "Live Incident" not in html
+        assert "<title>Sentinel — Incident Response</title>" in html
 
-    def test_dashboard_contains_hitl_overlay(self) -> None:
+    def test_dashboard_offers_no_approval_path(self) -> None:
+        """The revert PR on GitHub is the only gate: no approve button, modal or call."""
         from sentinel.main import create_app
 
         app = create_app()
         with TestClient(app) as client:
             html = client.get("/").text
-        assert "hitl" in html.lower() or "Approval" in html
+        assert "/approve" not in html
+        assert "hitl" not in html.lower()
+        assert "Approve" not in html
 
-    def test_dashboard_references_approve_endpoint(self) -> None:
+    def test_dashboard_posts_no_incident(self) -> None:
         from sentinel.main import create_app
 
         app = create_app()
         with TestClient(app) as client:
             html = client.get("/").text
-        assert "/approve" in html
+        assert "/webhooks/incident" not in html
+        assert "/webhooks/alert" not in html
 
-    def test_dashboard_references_webhooks_alert(self) -> None:
+    def test_dashboard_renders_catalog_fields(self) -> None:
         from sentinel.main import create_app
 
         app = create_app()
         with TestClient(app) as client:
             html = client.get("/").text
-        assert "/webhooks/alert" in html
+        assert "s.branch" in html
+        assert "s.fault" in html
+        assert "expected_signal_type" in html
+        assert "failure_class" not in html
 
     def test_dashboard_references_api_scenarios(self) -> None:
         from sentinel.main import create_app

@@ -7,7 +7,7 @@ the live dashboard receives ``agent_started``, ``agent_completed``,
 Usage::
 
     emitter = DashboardEventEmitter(event_bus)
-    add_trace_processor(emitter)
+    install_trace_processors(tracer, emitter)   # infra/tracing.py
 
 Agent tracking heuristic:  the emitter maintains a ``trace_id → agent_name``
 map updated on every ``AgentSpanData`` span start.  This lets tool-call events
