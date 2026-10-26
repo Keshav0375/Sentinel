@@ -10,6 +10,7 @@
 #
 # No secret crosses a job output: every job logs in again and reads what it needs inside the job.
 # The mapping of the dispatch to the incident payload lives in scripts/incident_dispatch.py (unit tested).
+# Ops events (task 10.2): ops-start / ops-events append to the ops-ledger branch; never block the response.
 name: "[sentinel] incident — response pipeline"
 
 on:
@@ -807,3 +808,106 @@ jobs:
             root cause: ${{ needs.run-agent-pipeline.outputs.root-cause }}
             confidence: ${{ needs.run-agent-pipeline.outputs.confidence }}
             run: ${{ env.RUN_URL }}
+
+  # ── 6. Ops events (ops-dashboard §4.1, backend task 10.2) ────────────────
+  # Append-only facts for the ops dashboard on the ops-ledger branch. contents: write only here; no login,
+  # no secrets, no environment. Every step is continue-on-error and the ops-event action never fails, so a
+  # ledger fault never blocks the response. The outcome events are written after the facts they report.
+  ops-start:
+    name: Record the alert
+    needs: [preflight]
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+
+      - name: Shape the alert and agent start events
+        id: shape
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/emit.py incident-start >> "$GITHUB_OUTPUT"
+
+      - name: Record alert.received
+        id: alert
+        if: steps.shape.outputs.alert-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.alert-kind }}
+          source-id: ${{ steps.shape.outputs.alert-source-id }}
+          state: ${{ steps.shape.outputs.alert-state }}
+          chain: ${{ steps.shape.outputs.alert-chain }}
+          data: ${{ steps.shape.outputs.alert-data }}
+
+      - name: Record agent.started
+        id: agent
+        if: steps.shape.outputs.agent-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.agent-kind }}
+          source-id: ${{ steps.shape.outputs.agent-source-id }}
+          state: ${{ steps.shape.outputs.agent-state }}
+          chain: ${{ steps.shape.outputs.agent-chain }}
+          data: ${{ steps.shape.outputs.agent-data }}
+
+  ops-events:
+    name: Record the agent outcome
+    needs: [preflight, ensure-backend-up, fetch-pr-details, run-agent-pipeline]
+    if: always() && needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+
+      - name: Shape the agent outcome events
+        id: shape
+        continue-on-error: true
+        env:
+          ENSURE_RESULT: ${{ needs.ensure-backend-up.result }}
+          PIPELINE_RESULT: ${{ needs.run-agent-pipeline.result }}
+          RESOLUTION_TYPE: ${{ needs.run-agent-pipeline.outputs.resolution-type }}
+          CONFIDENCE: ${{ needs.run-agent-pipeline.outputs.confidence }}
+          ROOT_CAUSE: ${{ needs.run-agent-pipeline.outputs.root-cause }}
+          EVIDENCE: ${{ needs.run-agent-pipeline.outputs.evidence-summary }}
+          INCIDENT_ID: ${{ needs.run-agent-pipeline.outputs.incident-id }}
+          PR_DETAILS: ${{ needs.fetch-pr-details.outputs.pr-details }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/emit.py incident-result >> "$GITHUB_OUTPUT"
+
+      - name: Record the agent decision
+        id: decision
+        if: steps.shape.outputs.decision-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.decision-kind }}
+          source-id: ${{ steps.shape.outputs.decision-source-id }}
+          state: ${{ steps.shape.outputs.decision-state }}
+          chain: ${{ steps.shape.outputs.decision-chain }}
+          data: ${{ steps.shape.outputs.decision-data }}
+
+      - name: Record the escalation
+        id: escalation
+        if: steps.shape.outputs.escalation-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.escalation-kind }}
+          source-id: ${{ steps.shape.outputs.escalation-source-id }}
+          state: ${{ steps.shape.outputs.escalation-state }}
+          chain: ${{ steps.shape.outputs.escalation-chain }}
+          data: ${{ steps.shape.outputs.escalation-data }}

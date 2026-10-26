@@ -114,7 +114,7 @@ def test_permissions_minimal() -> None:
 
 def test_single_scale_job_in_sentinel_dev() -> None:
     doc = _doc()
-    assert list(doc["jobs"]) == ["preflight", "scale"]
+    assert list(doc["jobs"]) == ["preflight", "scale", "ops-events"]
     job = doc["jobs"]["scale"]
     assert job["needs"] == "preflight"
     assert job["if"] == "needs.preflight.outputs.configured == 'true'"
