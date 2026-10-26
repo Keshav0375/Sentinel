@@ -94,6 +94,30 @@ MATRIX: dict[str, list[Check]] = {
             ],
             True,
         ),
+        # ── web lane: dashboard-web/ (ops dashboard SPA, backend task 10.4) ──────────
+        # `pnpm --dir` keeps cwd at the repo root; the trailing "/" lets path pruning skip
+        # the lane where dashboard-web/ does not exist. Playwright e2e is not gated here
+        # (it needs browsers): `pnpm --dir dashboard-web e2e`, run by the Pages workflow.
+        # pnpm comes from Corepack (ships with Node). The version is named here because
+        # Corepack resolves `packageManager` from cwd (the repo root has no package.json);
+        # pnpm itself fails loudly if it drifts from dashboard-web/package.json.
+        (
+            "web-install",
+            ["corepack", "pnpm@10.34.9", "--dir", "dashboard-web/", "install", "--frozen-lockfile"],
+            True,
+        ),
+        (
+            "web-typecheck",
+            ["corepack", "pnpm@10.34.9", "--dir", "dashboard-web/", "run", "typecheck"],
+            True,
+        ),
+        ("web-lint", ["corepack", "pnpm@10.34.9", "--dir", "dashboard-web/", "run", "lint"], True),
+        ("web-test", ["corepack", "pnpm@10.34.9", "--dir", "dashboard-web/", "run", "test"], True),
+        (
+            "web-build",
+            ["corepack", "pnpm@10.34.9", "--dir", "dashboard-web/", "run", "build"],
+            True,
+        ),
     ],
     "deployment": [
         ("ruff-lint", ["ruff", "check", "app/", "tests/"], True),

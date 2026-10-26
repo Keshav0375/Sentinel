@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <script id="theme-init">(function(){try{var k='sentinel-ops-theme',p=localStorage.getItem(k);if(p!=='light'&&p!=='dark')p='system';var d=p==='dark'||(p==='system'&&window.matchMedia('(prefers-color-scheme: dark)').matches);var e=document.documentElement;e.classList.toggle('dark',d);e.style.colorScheme=d?'dark':'light';e.dataset.theme=p;}catch(_){}})();</script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#F7F8FA" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0A0E17" media="(prefers-color-scheme: dark)">
+    <meta name="description" content="Live, read-only view of Sentinel: builds, deploys, incidents, AI agent runs and revert PRs, correlated end to end.">
+    <link rel="icon" type="image/svg+xml" href="%BASE_URL%favicon.svg">
+    <title>Sentinel Ops · builds, incidents and agent runs</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>This dashboard needs JavaScript.</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
