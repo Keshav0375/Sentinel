@@ -1,0 +1,111 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 51000000601,
+      "run_id": 18800000601,
+      "workflow_name": "Sentinel Infra \u2014 Deploy",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000601",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000601",
+      "head_sha": "6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000601",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000601/job/51000000601",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-24T11:00:05Z",
+      "started_at": "2026-10-24T11:00:05Z",
+      "completed_at": "2026-10-24T11:00:20Z",
+      "name": "Check infra OIDC readiness",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000601",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 51000000602,
+      "run_id": 18800000601,
+      "workflow_name": "Sentinel Infra \u2014 Deploy",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000601",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000602",
+      "head_sha": "6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000602",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000601/job/51000000602",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-24T11:00:30Z",
+      "started_at": "2026-10-24T11:00:30Z",
+      "completed_at": "2026-10-24T11:26:00Z",
+      "name": "apply \u00b7 all",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-10-24T11:00:30Z",
+          "completed_at": "2026-10-24T11:00:32Z"
+        },
+        {
+          "name": "Check guards",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-10-24T11:00:40Z",
+          "completed_at": "2026-10-24T11:00:45Z"
+        },
+        {
+          "name": "Terraform apply",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-10-24T11:01:00Z",
+          "completed_at": "2026-10-24T11:25:00Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000602",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 51000000603,
+      "run_id": 18800000601,
+      "workflow_name": "Sentinel Infra \u2014 Deploy",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000601",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000603",
+      "head_sha": "6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000603",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000601/job/51000000603",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-10-24T11:26:10Z",
+      "started_at": "2026-10-24T11:26:10Z",
+      "completed_at": "2026-10-24T11:38:00Z",
+      "name": "Verify against Azure",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000603",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    }
+  ]
+}

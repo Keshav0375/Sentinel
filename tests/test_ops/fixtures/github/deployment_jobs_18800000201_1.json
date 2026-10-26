@@ -1,0 +1,145 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 52000000201,
+      "run_id": 18800000201,
+      "workflow_name": "[deployment] deploy \u2014 build and ship",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel-deployment/actions/runs/18800000201",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT52000000201",
+      "head_sha": "4f1d2a9c0b8e7d6f5a4b3c2d1e0f9a8b7c6d5e4f",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel-deployment/actions/jobs/52000000201",
+      "html_url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/18800000201/job/52000000201",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-23T09:59:50Z",
+      "started_at": "2026-10-23T09:59:50Z",
+      "completed_at": "2026-10-23T10:20:00Z",
+      "name": "Build Deploy and Verify",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-10-23T10:00:00Z",
+          "completed_at": "2026-10-23T10:02:00Z"
+        },
+        {
+          "name": "Checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-10-23T10:02:00Z",
+          "completed_at": "2026-10-23T10:04:00Z"
+        },
+        {
+          "name": "Extract PR metadata",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-10-23T10:04:00Z",
+          "completed_at": "2026-10-23T10:06:00Z"
+        },
+        {
+          "name": "Build zip package",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-10-23T10:06:00Z",
+          "completed_at": "2026-10-23T10:08:00Z"
+        },
+        {
+          "name": "Report build failure",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5,
+          "started_at": null,
+          "completed_at": null
+        },
+        {
+          "name": "Login to Azure",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-10-23T10:08:00Z",
+          "completed_at": "2026-10-23T10:10:00Z"
+        },
+        {
+          "name": "Deploy to App Service",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-10-23T10:10:00Z",
+          "completed_at": "2026-10-23T10:12:00Z"
+        },
+        {
+          "name": "Report deploy failure",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8,
+          "started_at": null,
+          "completed_at": null
+        },
+        {
+          "name": "Verify deployment",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-10-23T10:12:00Z",
+          "completed_at": "2026-10-23T10:14:00Z"
+        },
+        {
+          "name": "Report verify failure",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 10,
+          "started_at": null,
+          "completed_at": null
+        },
+        {
+          "name": "Login to Azure for the record",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-10-23T10:14:00Z",
+          "completed_at": "2026-10-23T10:16:00Z"
+        },
+        {
+          "name": "Record deployment in PostgreSQL",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-10-23T10:16:00Z",
+          "completed_at": "2026-10-23T10:18:00Z"
+        },
+        {
+          "name": "Report record failure",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": null,
+          "completed_at": null
+        },
+        {
+          "name": "Report final summary",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-10-23T10:18:00Z",
+          "completed_at": "2026-10-23T10:20:00Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel-deployment/check-runs/52000000201",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    }
+  ]
+}

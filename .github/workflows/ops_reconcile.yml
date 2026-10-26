@@ -1,0 +1,192 @@
+# Ops ledger reconciler and snapshot builder (backend task 10.3).
+# Source: architecture ops-dashboard.md sections 4.2, 5 and 8. Every 30 minutes, after each Sentinel workflow
+# run and weekly as a full sweep, scripts/ops/reconcile.py backfills the ops-ledger branch from the read-only
+# GitHub and LangFuse APIs (the same event_ids the workflows write at event time), then scripts/ops/snapshot.py
+# derives the dashboard snapshot, uploaded as the `ops-snapshot` artifact (Pages publish: task 10.5).
+# Never checks out workflow_run code (the default branch only; trigger fields reach scripts via env), reads
+# the APIs with GET only, and writes nothing but the ops-ledger branch. gitleaks scans the ledger and the
+# snapshot before anything is uploaded. LangFuse is optional: no identity or no keys -> skipped, not failed.
+name: "[ops] reconcile — ledger and snapshot"
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+    - cron: '17 3 * * 0'
+  workflow_run:
+    workflows:
+      - "[sentinel] backend — deployment"
+      - "[sentinel] incident — response pipeline"
+      - "[sentinel] backend — scale"
+      - "[sentinel] PR — validation"
+      - CI
+      - "Runner Image — Build & Deploy to ACR"
+      - "Sentinel Infra — Deploy"
+    types:
+      - requested
+      - completed
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Full sweep (ignore the cursor)
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: ops-ledger
+  cancel-in-progress: false
+
+env:
+  RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+jobs:
+  reconcile:
+    name: Reconcile the ops ledger
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # The only OIDC subject the Key Vault login accepts.
+    environment: sentinel-dev
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    steps:
+      - name: Checkout the default branch
+        id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      # The cursor lives in the cache, not on ops-ledger (ledger files are never edited); a miss forces a full sweep.
+      - name: Restore the reconcile cursor
+        id: cursor
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+        with:
+          path: meta/cursor.json
+          key: ops-cursor-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ops-cursor-
+
+      # LangFuse only on schedule/dispatch or after an incident run, and only once the identity exists.
+      - name: Decide whether to read LangFuse
+        id: lf-gate
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          KEY_VAULT_URI: ${{ vars.KEY_VAULT_URI }}
+          TRIGGER_WORKFLOW: ${{ github.event.workflow_run.name }}
+        run: |
+          set -euo pipefail
+          enabled=false
+          if [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_TENANT_ID" ] \
+            && [ -n "$AZURE_SUBSCRIPTION_ID" ] && [ -n "$KEY_VAULT_URI" ]; then
+            case "$GITHUB_EVENT_NAME" in
+              schedule|workflow_dispatch) enabled=true ;;
+              *)
+                if [ "$TRIGGER_WORKFLOW" = "[sentinel] incident — response pipeline" ]; then
+                  enabled=true
+                fi
+                ;;
+            esac
+          fi
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Azure
+        id: login
+        if: steps.lf-gate.outputs.enabled == 'true'
+        continue-on-error: true
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Read the LangFuse keys
+        id: kv
+        if: steps.login.outcome == 'success'
+        continue-on-error: true
+        uses: ./.github/actions/get-kv-secrets
+        with:
+          vault-uri: ${{ vars.KEY_VAULT_URI }}
+          names: langfuse-public-key,langfuse-secret-key,langfuse-base-url
+
+      - name: Clone the ops ledger
+        id: clone
+        run: |
+          set -euo pipefail
+          git clone --quiet --single-branch --branch ops-ledger https://github.com/Keshav0375/Sentinel.git \
+            "$RUNNER_TEMP/ledger" || mkdir -p "$RUNNER_TEMP/ledger"
+
+      - name: Backfill the ledger from GitHub and LangFuse
+        id: reconcile
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OPS_LEDGER_TOKEN: ${{ github.token }}
+          LANGFUSE_BASE_URL: ${{ steps.kv.outputs.langfuse-base-url }}
+          LANGFUSE_PUBLIC_KEY: ${{ steps.kv.outputs.langfuse-public-key }}
+          LANGFUSE_SECRET_KEY: ${{ steps.kv.outputs.langfuse-secret-key }}
+          OPS_FULL_SWEEP: ${{ inputs.full }}
+          OPS_SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/reconcile.py run --ledger "$RUNNER_TEMP/ledger" --cursor meta/cursor.json \
+            --status "$RUNNER_TEMP/ops-status.json"
+
+      - name: Refresh the ledger clone
+        id: refresh
+        run: |
+          set -euo pipefail
+          if [ -d "$RUNNER_TEMP/ledger/.git" ]; then
+            git -C "$RUNNER_TEMP/ledger" pull --quiet --ff-only
+          else
+            git clone --quiet --single-branch --branch ops-ledger https://github.com/Keshav0375/Sentinel.git \
+              "$RUNNER_TEMP/ledger" || true
+          fi
+
+      - name: Install gitleaks (pinned, checksum verified)
+        id: gitleaks-install
+        run: |
+          set -euo pipefail
+          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --connect-timeout 10 --max-time 120 -o "$RUNNER_TEMP/$file" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${file}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$file" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP/gitleaks" gitleaks
+          echo "$RUNNER_TEMP/gitleaks" >> "$GITHUB_PATH"
+
+      - name: Scan the ledger history for secrets
+        id: gitleaks-ledger
+        run: |
+          set -euo pipefail
+          if [ ! -d "$RUNNER_TEMP/ledger/.git" ]; then
+            echo "No ops-ledger branch yet; nothing to scan."
+            exit 0
+          fi
+          gitleaks git "$RUNNER_TEMP/ledger" --no-banner --redact
+
+      - name: Build the snapshot
+        id: snapshot
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/snapshot.py --ledger "$RUNNER_TEMP/ledger" --out snapshot \
+            --status "$RUNNER_TEMP/ops-status.json" --run-url "$RUN_URL"
+
+      - name: Scan the snapshot for secrets
+        id: gitleaks-snapshot
+        run: |
+          set -euo pipefail
+          gitleaks dir snapshot --no-banner --redact
+
+      - name: Upload the snapshot
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ops-snapshot
+          path: snapshot/
+          retention-days: 7
+          if-no-files-found: error

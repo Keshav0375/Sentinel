@@ -1,0 +1,201 @@
+{
+  "total_count": 6,
+  "jobs": [
+    {
+      "id": 51000000001,
+      "run_id": 18800000101,
+      "workflow_name": "[sentinel] backend \u2014 deployment",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000101",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000001",
+      "head_sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000001",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101/job/51000000001",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-25T09:00:05Z",
+      "started_at": "2026-10-25T09:00:05Z",
+      "completed_at": "2026-10-25T09:00:20Z",
+      "name": "Check Azure CI identity",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-10-25T09:00:05Z",
+          "completed_at": "2026-10-25T09:00:07Z"
+        },
+        {
+          "name": "Check the variables",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-10-25T09:00:07Z",
+          "completed_at": "2026-10-25T09:00:19Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000001",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 51000000002,
+      "run_id": 18800000101,
+      "workflow_name": "[sentinel] backend \u2014 deployment",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000101",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000002",
+      "head_sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000002",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101/job/51000000002",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-25T09:00:30Z",
+      "started_at": "2026-10-25T09:00:30Z",
+      "completed_at": "2026-10-25T09:08:00Z",
+      "name": "Run Quality Checks",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-10-25T09:00:30Z",
+          "completed_at": "2026-10-25T09:00:33Z"
+        },
+        {
+          "name": "Run the quality gate",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-10-25T09:00:40Z",
+          "completed_at": "2026-10-25T09:07:55Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000002",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 51000000003,
+      "run_id": 18800000101,
+      "workflow_name": "[sentinel] backend \u2014 deployment",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000101",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000003",
+      "head_sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000003",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101/job/51000000003",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-25T09:08:10Z",
+      "started_at": "2026-10-25T09:08:10Z",
+      "completed_at": "2026-10-25T09:15:00Z",
+      "name": "Build and Push Image",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000003",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 51000000004,
+      "run_id": 18800000101,
+      "workflow_name": "[sentinel] backend \u2014 deployment",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000101",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000004",
+      "head_sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000004",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101/job/51000000004",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-25T09:15:10Z",
+      "started_at": "2026-10-25T09:15:10Z",
+      "completed_at": "2026-10-25T09:25:00Z",
+      "name": "Deploy to AKS",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000004",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 51000000005,
+      "run_id": 18800000101,
+      "workflow_name": "[sentinel] backend \u2014 deployment",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000101",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000005",
+      "head_sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000005",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101/job/51000000005",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-25T09:25:10Z",
+      "started_at": "2026-10-25T09:25:10Z",
+      "completed_at": "2026-10-25T09:38:00Z",
+      "name": "Run Tests Against Live Deployment",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000005",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 51000000006,
+      "run_id": 18800000101,
+      "workflow_name": "[sentinel] backend \u2014 deployment",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000101",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000006",
+      "head_sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000006",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000101/job/51000000006",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-25T09:38:10Z",
+      "started_at": "2026-10-25T09:38:10Z",
+      "completed_at": "2026-10-25T09:40:30Z",
+      "name": "Promote or Rollback",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000006",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    }
+  ]
+}

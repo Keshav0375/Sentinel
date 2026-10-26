@@ -1,0 +1,41 @@
+{
+  "url": "https://api.github.com/repos/Keshav0375/Sentinel-deployment/pulls/62",
+  "id": 2100000062,
+  "node_id": "PR_kwDOT62",
+  "html_url": "https://github.com/Keshav0375/Sentinel-deployment/pull/62",
+  "number": 62,
+  "state": "closed",
+  "locked": false,
+  "title": "Tidy the health route",
+  "user": {
+    "login": "Keshav0375",
+    "id": 90000001,
+    "type": "User",
+    "site_admin": false
+  },
+  "body": "",
+  "created_at": "2026-10-24T08:00:00Z",
+  "updated_at": "2026-10-24T09:59:30Z",
+  "closed_at": "2026-10-24T09:59:30Z",
+  "merged_at": "2026-10-24T09:59:30Z",
+  "merge_commit_sha": null,
+  "draft": false,
+  "head": {
+    "label": "Keshav0375:tidy-health",
+    "ref": "tidy-health",
+    "sha": "7a3c9e1b2d4f6a80b1c2d3e4f5a6b7c8d9e0f1a2",
+    "repo": {
+      "full_name": "Keshav0375/Sentinel-deployment"
+    }
+  },
+  "base": {
+    "label": "Keshav0375:main",
+    "ref": "main",
+    "sha": "4f1d2a9c0b8e7d6f5a4b3c2d1e0f9a8b7c6d5e4f",
+    "repo": {
+      "full_name": "Keshav0375/Sentinel-deployment"
+    }
+  },
+  "author_association": "OWNER",
+  "labels": []
+}

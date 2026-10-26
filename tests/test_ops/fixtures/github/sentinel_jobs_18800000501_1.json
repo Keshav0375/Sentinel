@@ -1,0 +1,86 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 51000000501,
+      "run_id": 18800000501,
+      "workflow_name": "Runner Image \u2014 Build & Deploy to ACR",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000501",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000501",
+      "head_sha": "6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000501",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000501/job/51000000501",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-24T10:00:05Z",
+      "started_at": "2026-10-24T10:00:05Z",
+      "completed_at": "2026-10-24T10:00:20Z",
+      "name": "Check infra OIDC readiness",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000501",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 51000000502,
+      "run_id": 18800000501,
+      "workflow_name": "Runner Image \u2014 Build & Deploy to ACR",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000501",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000502",
+      "head_sha": "6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000502",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000501/job/51000000502",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-24T10:00:30Z",
+      "started_at": "2026-10-24T10:00:30Z",
+      "completed_at": "2026-10-24T10:18:30Z",
+      "name": "Build and Push Runner Image",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000502",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 51000000503,
+      "run_id": 18800000501,
+      "workflow_name": "Runner Image \u2014 Build & Deploy to ACR",
+      "head_branch": "main",
+      "run_url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/runs/18800000501",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOT51000000503",
+      "head_sha": "6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4",
+      "url": "https://api.github.com/repos/Keshav0375/Sentinel/actions/jobs/51000000503",
+      "html_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000501/job/51000000503",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-24T10:18:40Z",
+      "started_at": "2026-10-24T10:18:40Z",
+      "completed_at": "2026-10-24T10:19:00Z",
+      "name": "Record the runner build outcome",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/Keshav0375/Sentinel/check-runs/51000000503",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1,
+      "runner_name": "GitHub Actions 1",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    }
+  ]
+}

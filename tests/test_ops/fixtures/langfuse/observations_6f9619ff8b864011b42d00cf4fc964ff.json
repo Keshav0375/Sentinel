@@ -1,0 +1,244 @@
+{
+  "data": [
+    {
+      "id": "obs-tool-logs",
+      "traceId": "6f9619ff8b864011b42d00cf4fc964ff",
+      "type": "SPAN",
+      "name": "tool:search_logs",
+      "startTime": "2026-10-25T10:00:20.000Z",
+      "endTime": "2026-10-25T10:00:24.500Z",
+      "completionStartTime": null,
+      "model": null,
+      "modelParameters": {},
+      "input": {
+        "messages": "RAW-INPUT-MUST-NOT-LEAK"
+      },
+      "output": {
+        "content": "RAW-OUTPUT-MUST-NOT-LEAK"
+      },
+      "metadata": {
+        "note": "RAW-METADATA-MUST-NOT-LEAK"
+      },
+      "level": "ERROR",
+      "statusMessage": "RAW-STATUS-MESSAGE-MUST-NOT-LEAK",
+      "parentObservationId": "obs-investigate",
+      "version": null,
+      "promptId": null,
+      "environment": "default",
+      "calculatedTotalCost": null,
+      "latency": 1.0
+    },
+    {
+      "id": "obs-root",
+      "traceId": "6f9619ff8b864011b42d00cf4fc964ff",
+      "type": "SPAN",
+      "name": "incident-pipeline",
+      "startTime": "2026-10-25T10:00:00.000Z",
+      "endTime": "2026-10-25T10:01:14.200Z",
+      "completionStartTime": null,
+      "model": null,
+      "modelParameters": {},
+      "input": {
+        "messages": "RAW-INPUT-MUST-NOT-LEAK"
+      },
+      "output": {
+        "content": "RAW-OUTPUT-MUST-NOT-LEAK"
+      },
+      "metadata": {
+        "note": "RAW-METADATA-MUST-NOT-LEAK"
+      },
+      "level": "DEFAULT",
+      "statusMessage": null,
+      "parentObservationId": null,
+      "version": null,
+      "promptId": null,
+      "environment": "default",
+      "calculatedTotalCost": null,
+      "latency": 1.0
+    },
+    {
+      "id": "obs-triage",
+      "traceId": "6f9619ff8b864011b42d00cf4fc964ff",
+      "type": "GENERATION",
+      "name": "triage",
+      "startTime": "2026-10-25T10:00:01.000Z",
+      "endTime": "2026-10-25T10:00:08.250Z",
+      "completionStartTime": null,
+      "model": "claude-sonnet-4-5",
+      "modelParameters": {},
+      "input": {
+        "messages": "RAW-INPUT-MUST-NOT-LEAK"
+      },
+      "output": {
+        "content": "RAW-OUTPUT-MUST-NOT-LEAK"
+      },
+      "metadata": {
+        "note": "RAW-METADATA-MUST-NOT-LEAK"
+      },
+      "level": "DEFAULT",
+      "statusMessage": null,
+      "parentObservationId": "obs-root",
+      "version": null,
+      "promptId": null,
+      "environment": "default",
+      "calculatedTotalCost": 0.001,
+      "latency": 1.0,
+      "usage": {
+        "input": 1200,
+        "output": 180,
+        "total": 1380,
+        "unit": "TOKENS"
+      }
+    },
+    {
+      "id": "obs-investigate",
+      "traceId": "6f9619ff8b864011b42d00cf4fc964ff",
+      "type": "SPAN",
+      "name": "investigate",
+      "startTime": "2026-10-25T10:00:09.000Z",
+      "endTime": "2026-10-25T10:00:50.000Z",
+      "completionStartTime": null,
+      "model": null,
+      "modelParameters": {},
+      "input": {
+        "messages": "RAW-INPUT-MUST-NOT-LEAK"
+      },
+      "output": {
+        "content": "RAW-OUTPUT-MUST-NOT-LEAK"
+      },
+      "metadata": {
+        "note": "RAW-METADATA-MUST-NOT-LEAK"
+      },
+      "level": "DEFAULT",
+      "statusMessage": null,
+      "parentObservationId": "obs-root",
+      "version": null,
+      "promptId": null,
+      "environment": "default",
+      "calculatedTotalCost": null,
+      "latency": 1.0
+    },
+    {
+      "id": "obs-tool-deploys",
+      "traceId": "6f9619ff8b864011b42d00cf4fc964ff",
+      "type": "SPAN",
+      "name": "tool:recent_deploys",
+      "startTime": "2026-10-25T10:00:10.000Z",
+      "endTime": "2026-10-25T10:00:12.000Z",
+      "completionStartTime": null,
+      "model": null,
+      "modelParameters": {},
+      "input": {
+        "messages": "RAW-INPUT-MUST-NOT-LEAK"
+      },
+      "output": {
+        "content": "RAW-OUTPUT-MUST-NOT-LEAK"
+      },
+      "metadata": {
+        "note": "RAW-METADATA-MUST-NOT-LEAK"
+      },
+      "level": "WARNING",
+      "statusMessage": "RAW-STATUS-MESSAGE-MUST-NOT-LEAK",
+      "parentObservationId": "obs-investigate",
+      "version": null,
+      "promptId": null,
+      "environment": "default",
+      "calculatedTotalCost": null,
+      "latency": 1.0
+    },
+    {
+      "id": "obs-reason",
+      "traceId": "6f9619ff8b864011b42d00cf4fc964ff",
+      "type": "GENERATION",
+      "name": "reason",
+      "startTime": "2026-10-25T10:00:30.000Z",
+      "endTime": "2026-10-25T10:00:49.000Z",
+      "completionStartTime": null,
+      "model": "claude-sonnet-4-5",
+      "modelParameters": {},
+      "input": {
+        "messages": "RAW-INPUT-MUST-NOT-LEAK"
+      },
+      "output": {
+        "content": "RAW-OUTPUT-MUST-NOT-LEAK"
+      },
+      "metadata": {
+        "note": "RAW-METADATA-MUST-NOT-LEAK"
+      },
+      "level": "DEFAULT",
+      "statusMessage": null,
+      "parentObservationId": "obs-investigate",
+      "version": null,
+      "promptId": null,
+      "environment": "default",
+      "calculatedTotalCost": 0.001,
+      "latency": 1.0,
+      "usageDetails": {
+        "input": 2400,
+        "output": 410
+      }
+    },
+    {
+      "id": "obs-report",
+      "traceId": "6f9619ff8b864011b42d00cf4fc964ff",
+      "type": "EVENT",
+      "name": "report",
+      "startTime": "2026-10-25T10:01:10.000Z",
+      "endTime": "2026-10-25T10:01:14.200Z",
+      "completionStartTime": null,
+      "model": null,
+      "modelParameters": {},
+      "input": {
+        "messages": "RAW-INPUT-MUST-NOT-LEAK"
+      },
+      "output": {
+        "content": "RAW-OUTPUT-MUST-NOT-LEAK"
+      },
+      "metadata": {
+        "note": "RAW-METADATA-MUST-NOT-LEAK"
+      },
+      "level": "DEFAULT",
+      "statusMessage": null,
+      "parentObservationId": "obs-root",
+      "version": null,
+      "promptId": null,
+      "environment": "default",
+      "calculatedTotalCost": null,
+      "latency": 1.0
+    },
+    {
+      "id": "bad id!",
+      "traceId": "6f9619ff8b864011b42d00cf4fc964ff",
+      "type": "SPAN",
+      "name": "rogue",
+      "startTime": "2026-10-25T10:00:05.000Z",
+      "endTime": "2026-10-25T10:00:06.000Z",
+      "completionStartTime": null,
+      "model": null,
+      "modelParameters": {},
+      "input": {
+        "messages": "RAW-INPUT-MUST-NOT-LEAK"
+      },
+      "output": {
+        "content": "RAW-OUTPUT-MUST-NOT-LEAK"
+      },
+      "metadata": {
+        "note": "RAW-METADATA-MUST-NOT-LEAK"
+      },
+      "level": "DEFAULT",
+      "statusMessage": null,
+      "parentObservationId": "obs-root",
+      "version": null,
+      "promptId": null,
+      "environment": "default",
+      "calculatedTotalCost": null,
+      "latency": 1.0
+    }
+  ],
+  "meta": {
+    "page": 1,
+    "limit": 100,
+    "totalItems": 8,
+    "totalPages": 1
+  }
+}

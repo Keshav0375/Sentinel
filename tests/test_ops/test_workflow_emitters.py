@@ -46,6 +46,14 @@ PREFLIGHT_GATE = "needs.preflight.outputs.configured == 'true'"
 OIDC_GATE = "needs.oidc-ready.outputs.ready == 'true'"
 CHECKOUT = "actions/checkout@"
 WITH_KEYS = {"kind", "source-id", "state", "chain", "data"}
+# The one non-emitter job that writes: the reconciler appends to ops-ledger (task 10.3, D12).
+RECONCILER: dict[tuple[str, str], dict[str, str]] = {
+    ("ops_reconcile.yml", "reconcile"): {
+        "contents": "write",
+        "actions": "read",
+        "id-token": "write",
+    },
+}
 
 
 def _doc(path: Path) -> dict[str, Any]:
@@ -108,9 +116,17 @@ def test_only_ops_jobs_write() -> None:
         assert not _writes_contents(doc.get("permissions")), path.name
         for job_id, job in doc["jobs"].items():
             if _writes_contents(job.get("permissions")):
+                if (path.name, job_id) in RECONCILER:
+                    assert job["permissions"] == RECONCILER[(path.name, job_id)]
+                    continue
                 assert (path.name, job_id) in ops, f"{path.name}:{job_id}"
     for wf, job_id, job in _ops_jobs():
         assert job["permissions"] == {"contents": "write"}, f"{wf}:{job_id}"
+    for wf, _ in RECONCILER:
+        on = _on(_doc(WORKFLOW_DIR / wf))
+        triggers = {on} if isinstance(on, str) else set(on)
+        # Fork safety: a contents-write job never runs on PR-controlled triggers.
+        assert not triggers & {"pull_request", "pull_request_target"}, wf
 
 
 @pytest.mark.parametrize(("workflow", "job_id", "job"), _ops_jobs(), ids=OPS_IDS)
