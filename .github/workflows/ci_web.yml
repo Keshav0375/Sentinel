@@ -1,0 +1,146 @@
+# Ops dashboard web CI (ops-dashboard §6; backend task 10.5).
+# Cloud-free: contents: read, no environment, no id-token, no secrets. Its push-to-main run triggers ops_pages.yml.
+# The site check runs on the bundle before any fixture is staged; the fixture snapshot copied in for
+# Lighthouse exists only in this workspace and is never uploaded.
+name: "[ops] dashboard — web CI"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "dashboard-web/**"
+      - "scripts/ops/check_site.py"
+      - ".github/workflows/ci_web.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "dashboard-web/**"
+      - "scripts/ops/check_site.py"
+      - ".github/workflows/ci_web.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "ci-web-${{ github.ref }}"
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  web:
+    name: Dashboard web — build, test, e2e, Lighthouse
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: dashboard-web
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      # No root package.json, so the package-manager cache is off; the pnpm store is cached below.
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: dashboard-web/.node-version
+          package-manager-cache: false
+
+      # Run in dashboard-web/ so Corepack resolves packageManager (pnpm@10.34.9) from package.json.
+      - name: Enable pnpm (Corepack)
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm --version
+
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: |
+          set -euo pipefail
+          echo "dir=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+        with:
+          path: ${{ steps.pnpm-store.outputs.dir }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('dashboard-web/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
+      - name: Install
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: |
+          set -euo pipefail
+          pnpm run typecheck
+
+      - name: Lint
+        run: |
+          set -euo pipefail
+          pnpm run lint
+
+      - name: Unit tests
+        run: |
+          set -euo pipefail
+          pnpm run test
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          pnpm run build
+
+      - name: Check the build (base path, no fixtures)
+        working-directory: .
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/check_site.py dashboard-web/dist --base /Sentinel/ --fixtures dashboard-web/src/fixtures
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('dashboard-web/pnpm-lock.yaml') }}
+
+      - name: Install Playwright Chromium
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: |
+          set -euo pipefail
+          pnpm exec playwright install-deps chromium
+
+      # The 10.4 Playwright config builds and previews the site itself (three projects).
+      - name: End-to-end tests (Playwright)
+        run: |
+          set -euo pipefail
+          pnpm run e2e
+
+      - name: Stage the fixture snapshot for Lighthouse
+        run: |
+          set -euo pipefail
+          rm -rf dist/snapshot
+          mkdir -p dist/snapshot
+          cp -R src/fixtures/populated/. dist/snapshot/
+
+      # Default Lighthouse settings (mobile, simulated throttling), median of 3 runs on vite preview.
+      - name: Lighthouse CI (performance and accessibility ≥ 90)
+        run: |
+          set -euo pipefail
+          pnpm run lighthouse

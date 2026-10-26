@@ -43,16 +43,21 @@ by the writer and, here, by `src/test/schema.test.ts` against every fixture.
 
 ## Publishing (GitHub Pages)
 
+The dashboard is published at <https://keshav0375.github.io/Sentinel/> (base path `/Sentinel/`).
+`.github/workflows/ops_pages.yml` deploys after every successful reconcile run (snapshot artifact
+`ops-snapshot`) and after `ci_web.yml` passes on main (snapshot rebuilt from the `ops-ledger`
+branch; empty snapshot when the branch does not exist yet). `scripts/ops/check_site.py` blocks a
+publish whose bundle misses the `/Sentinel/` base, contains a fixture, or whose snapshot is
+invalid. View state lives in the query string only, so no 404 fallback page is needed.
+
 ```sh
-corepack pnpm --dir dashboard-web install --frozen-lockfile
-corepack pnpm --dir dashboard-web build
+corepack pnpm build
+python3 ../scripts/ops/check_site.py dist --fixtures src/fixtures
+mkdir -p dist/snapshot && cp -R src/fixtures/populated/. dist/snapshot/
+corepack pnpm lighthouse   # needs a local Chrome; budget: performance and accessibility ≥ 0.90
 ```
 
-The site is built for the base path `/Sentinel/`. Publish `dashboard-web/dist/` with the
-snapshot copied in at `dist/snapshot/{meta,chains,metrics}.json` and
-`dist/snapshot/entities/<chain_id>.json`. View state lives in the query string only, so no
-404 fallback page is needed. In CI, run e2e with
-`corepack pnpm --dir dashboard-web exec playwright install --with-deps chromium` first, then
-`corepack pnpm --dir dashboard-web e2e`.
+`ci_web.yml` runs install, typecheck, lint, unit tests, build, the site check, Playwright
+(Chromium) and Lighthouse CI on every PR and push to main that touches dashboard-web/.
 
 Read-only; public data only: no logs, secrets or raw tool output.

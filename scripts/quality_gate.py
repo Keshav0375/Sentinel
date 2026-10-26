@@ -97,7 +97,7 @@ MATRIX: dict[str, list[Check]] = {
         # ── web lane: dashboard-web/ (ops dashboard SPA, backend task 10.4) ──────────
         # `pnpm --dir` keeps cwd at the repo root; the trailing "/" lets path pruning skip
         # the lane where dashboard-web/ does not exist. Playwright e2e is not gated here
-        # (it needs browsers): `pnpm --dir dashboard-web e2e`, run by the Pages workflow.
+        # (it needs browsers): `pnpm --dir dashboard-web e2e`, run by .github/workflows/ci_web.yml.
         # pnpm comes from Corepack (ships with Node). The version is named here because
         # Corepack resolves `packageManager` from cwd (the repo root has no package.json);
         # pnpm itself fails loudly if it drifts from dashboard-web/package.json.

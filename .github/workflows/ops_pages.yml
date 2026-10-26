@@ -1,0 +1,153 @@
+# Publishes the ops dashboard to GitHub Pages (ops-dashboard §4.2/§7/§8; backend task 10.5).
+# Runs after a successful reconcile (snapshot artifact) or a successful web-CI push run on main (snapshot
+# rebuilt from ops-ledger), or by hand. Never builds workflow_run head code; only the deploy job gets
+# pages: write + id-token: write. scripts/ops/check_site.py gates every publish: an invalid or (with the
+# ledger present) empty snapshot fails the build and the previously published site stays.
+name: "[ops] dashboard — Pages deploy"
+
+on:
+  workflow_run:
+    workflows:
+      - "[ops] reconcile — ledger and snapshot"
+      - "[ops] dashboard — web CI"
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  LEDGER_REMOTE: "https://github.com/Keshav0375/Sentinel.git"
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # A PR run (a fork's branch may be named main) never deploys.
+    if: >-
+      github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      contains(fromJSON('["push","schedule","workflow_run","workflow_dispatch"]'), github.event.workflow_run.event))
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # The default branch, never the triggering run's head.
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: dashboard-web/.node-version
+          package-manager-cache: false
+
+      - name: Enable pnpm (Corepack)
+        working-directory: dashboard-web
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm --version
+
+      # Uncached on the deploy path (no cache-poisoning surface); the lockfile pins integrity.
+      - name: Install
+        working-directory: dashboard-web
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+
+      - name: Build
+        working-directory: dashboard-web
+        run: |
+          set -euo pipefail
+          pnpm run build
+
+      # exit 2 = no such branch (first run: publish the empty snapshot); any other failure keeps the old site.
+      - name: Check whether the ledger exists
+        id: ledger-state
+        run: |
+          set -euo pipefail
+          rc=0
+          timeout 60 git ls-remote --exit-code --heads "$LEDGER_REMOTE" ops-ledger > /dev/null || rc=$?
+          case "$rc" in
+            0) echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+            2) echo "exists=false" >> "$GITHUB_OUTPUT"
+               echo "::notice::ops-ledger does not exist yet; publishing the empty snapshot" ;;
+            *) echo "::error::git ls-remote failed (exit $rc); the published site is unchanged"; exit 1 ;;
+          esac
+
+      - name: Download the reconciled snapshot
+        id: snapshot-artifact
+        if: github.event.workflow_run.path == '.github/workflows/ops_reconcile.yml'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ops-snapshot
+          path: dashboard-web/dist/snapshot
+          run-id: "${{ github.event.workflow_run.id }}"
+          github-token: "${{ github.token }}"
+
+      # Web-CI run or dispatch: the ledger is the truth; no source was pulled in this run.
+      - name: Rebuild the snapshot from the ledger
+        id: snapshot-ledger
+        if: github.event.workflow_run.path != '.github/workflows/ops_reconcile.yml'
+        env:
+          LEDGER_EXISTS: "${{ steps.ledger-state.outputs.exists }}"
+        run: |
+          set -euo pipefail
+          ledger="$RUNNER_TEMP/ledger"
+          if [ "$LEDGER_EXISTS" = "true" ]; then
+            timeout 120 git clone --quiet --single-branch --branch ops-ledger "$LEDGER_REMOTE" "$ledger"
+          else
+            mkdir -p "$ledger"
+          fi
+          printf '%s\n' '{"github": "skipped", "langfuse": "skipped"}' > "$RUNNER_TEMP/ops-status.json"
+          python3 scripts/ops/snapshot.py --ledger "$ledger" --out dashboard-web/dist/snapshot \
+            --status "$RUNNER_TEMP/ops-status.json"
+
+      - name: Check the site before publishing
+        id: check
+        env:
+          LEDGER_EXISTS: "${{ steps.ledger-state.outputs.exists }}"
+        run: |
+          set -euo pipefail
+          args=(dashboard-web/dist --base /Sentinel/ --fixtures dashboard-web/src/fixtures --snapshot)
+          if [ "$LEDGER_EXISTS" = "true" ]; then args+=(--require-events); fi
+          python3 scripts/ops/check_site.py "${args[@]}"
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: dashboard-web/dist/
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: "${{ steps.deploy.outputs.page_url }}"
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
+
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
