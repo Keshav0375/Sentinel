@@ -47,7 +47,7 @@ test('smoke_populated_and_axe', async ({ page }, info) => {
   await expect(page.locator('[data-needs-action]')).toHaveCount(3);
   await expect(page.locator('html')).toHaveClass(info.project.name === 'dark' ? /\bdark\b/ : /^(?!.*\bdark\b)/);
   // Let the lazy chart chunk settle before scanning.
-  await expect(page.locator('.recharts-responsive-container')).toBeVisible();
+  await expect(page.locator('[data-trend-chart] svg')).toBeVisible();
   await axe(page);
 });
 
