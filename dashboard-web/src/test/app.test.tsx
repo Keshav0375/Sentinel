@@ -85,10 +85,12 @@ describe('app', () => {
     freezeNow();
     const base = createFixtureClient('populated');
     let calls = 0;
+    const fresh: (boolean | undefined)[] = [];
     const client = stubClient(
       {
-        chains: (s) => {
+        chains: (s, f) => {
           calls += 1;
+          fresh.push(f);
           return calls === 1 ? base.chains(s) : Promise.reject(new SnapshotError('http', 'chains.json', 500));
         },
       },
@@ -102,6 +104,8 @@ describe('app', () => {
     expect(alert).toHaveTextContent('Server returned 500');
     expect(container.querySelectorAll('[data-row-index]')).toHaveLength(6);
     expect(screen.getByRole('region', { name: 'Overview' })).toBeInTheDocument();
+    // The first load may use the preload; the reload bypasses the HTTP cache.
+    expect(fresh).toEqual([false, true]);
   });
 
   it('test_staleness_banner', async () => {

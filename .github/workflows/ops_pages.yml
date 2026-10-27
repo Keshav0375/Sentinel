@@ -101,7 +101,34 @@ jobs:
           run-id: "${{ github.event.workflow_run.id }}"
           github-token: "${{ github.token }}"
 
-      # Web-CI run or dispatch: the ledger is the truth; no source was pulled in this run.
+      # Web-CI run or dispatch: no source is pulled here, so the source statuses are carried from the
+      # last successful reconcile's snapshot (read-only: actions: read). Best effort: none found is
+      # handled by the rebuild.
+      - name: Find the last successful reconcile
+        id: last-reconcile
+        if: github.event.workflow_run.path != '.github/workflows/ops_reconcile.yml'
+        continue-on-error: true
+        env:
+          GH_TOKEN: "${{ github.token }}"
+        run: |
+          set -euo pipefail
+          run_id="$(timeout 60 gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ops_reconcile.yml/runs?branch=main&status=success&per_page=1" \
+            --jq '.workflow_runs[0].id // empty')"
+          echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download the last reconcile's snapshot
+        id: last-snapshot
+        if: steps.last-reconcile.outputs.run-id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ops-snapshot
+          path: "${{ runner.temp }}/last-snapshot"
+          run-id: "${{ steps.last-reconcile.outputs.run-id }}"
+          github-token: "${{ github.token }}"
+
+      # The ledger is the truth for events; meta.json's sources come from the last reconcile.
       - name: Rebuild the snapshot from the ledger
         id: snapshot-ledger
         if: github.event.workflow_run.path != '.github/workflows/ops_reconcile.yml'
@@ -115,9 +142,16 @@ jobs:
           else
             mkdir -p "$ledger"
           fi
-          printf '%s\n' '{"github": "skipped", "langfuse": "skipped"}' > "$RUNNER_TEMP/ops-status.json"
+          status="$RUNNER_TEMP/last-snapshot/meta.json"
+          if [ ! -f "$status" ]; then
+            # No successful reconcile run, or its artifact expired: this rebuild pulled no source, so
+            # "skipped" is the truthful v1 status (snapshot.v1 has no "unknown"); the warning flags it.
+            echo "::warning::no reconcile snapshot to carry the source statuses from"
+            status="$RUNNER_TEMP/ops-status.json"
+            printf '%s\n' '{"github": "skipped", "langfuse": "skipped"}' > "$status"
+          fi
           python3 scripts/ops/snapshot.py --ledger "$ledger" --out dashboard-web/dist/snapshot \
-            --status "$RUNNER_TEMP/ops-status.json"
+            --status "$status"
 
       - name: Check the site before publishing
         id: check

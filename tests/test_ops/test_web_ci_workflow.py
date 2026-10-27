@@ -20,7 +20,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WF = REPO_ROOT / ".github/workflows"
 WORKFLOW = WF / "ci_web.yml"
 WEB = REPO_ROOT / "dashboard-web"
-PATHS = ["dashboard-web/**", "scripts/ops/check_site.py", ".github/workflows/ci_web.yml"]
+# check_site.py validates against scripts/ops/schema/, so a schema change reruns web CI.
+PATHS = [
+    "dashboard-web/**",
+    "scripts/ops/check_site.py",
+    "scripts/ops/schema/**",
+    ".github/workflows/ci_web.yml",
+]
 PINS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
     "actions/setup-node": "949feb2413d6458794dcd2491c4babbbce0c15c1",

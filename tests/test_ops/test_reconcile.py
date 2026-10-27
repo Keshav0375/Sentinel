@@ -1108,3 +1108,23 @@ def test_revert_pr_requires_marker(reconcile: ModuleType) -> None:
     assert reconcile.revert_pr_accepted(_pull(61), reconcile.DEFAULT_AUTHORS) == (
         "not a revert branch"
     )
+
+
+def test_only_trust_rejections_warn(
+    reconcile: ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An ordinary PR (#61, branch runtime/04) is skipped silently; a rejected revert PR warns."""
+    outcome = _collect_with(reconcile, FakeFetch())
+
+    err = capsys.readouterr().err
+    assert "#61" not in err and "not a revert branch" not in err
+    assert "::warning::" not in err
+    assert "Keshav0375/Sentinel-deployment#61" not in _source_ids(outcome)
+
+    pulls = _fixture("github/deployment_pulls.json")
+    pulls[0]["user"]["login"] = "mallory"  # #57
+    pulls_route = _route(f"{D}/pulls", state="all", sort="updated", direction="desc", **PAGE1)
+    _collect_with(reconcile, FakeFetch(bodies={pulls_route: pulls}))
+
+    lines = [line for line in capsys.readouterr().err.splitlines() if "::warning::" in line]
+    assert lines == ["::warning::ops-reconcile: PR #57 skipped: author not allowed"]

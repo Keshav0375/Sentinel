@@ -113,6 +113,7 @@ RATE_LIMIT_MAX_WAIT_S = 60
 DEFAULT_REVERT_AUTHORS = ("Keshav0375", "github-actions[bot]")
 DEFAULT_AUTHORS = frozenset(a.lower() for a in DEFAULT_REVERT_AUTHORS)
 REVERT_REPO = rules.DEPLOYMENT
+NOT_REVERT_BRANCH = "not a revert branch"  # most PRs; skipped without a warning
 # event.v1.json data_pr_gate.conclusion.
 PR_GATE_CONCLUSIONS = (
     "success",
@@ -533,7 +534,7 @@ def revert_pr_accepted(pull: Mapping[str, Any], authors: frozenset[str]) -> str 
     head: Any = pull.get("head")
     head = head if isinstance(head, Mapping) else {}
     if not REVERT_BRANCH_RE.match(str(head.get("ref") or "")):
-        return "not a revert branch"
+        return NOT_REVERT_BRANCH
     repo: Any = head.get("repo")
     if not isinstance(repo, Mapping) or repo.get("full_name") != REVERT_REPO:
         return f"head is not {REVERT_REPO}"
@@ -983,11 +984,11 @@ def _collect_github(
             if since and str(pull.get("updated_at") or "") < since:
                 stop = True
                 break
-            if not REVERT_BRANCH_RE.match(str((pull.get("head") or {}).get("ref") or "")):
-                continue
             number = pull.get("number")
             reason = revert_pr_accepted(pull, authors)
-            if reason is not None:
+            if reason == NOT_REVERT_BRANCH:
+                continue  # an ordinary PR: silent
+            if reason is not None:  # a trust rejection (fork, marker, author)
                 warn(f"PR #{number} skipped: {reason}")
                 continue
             try:

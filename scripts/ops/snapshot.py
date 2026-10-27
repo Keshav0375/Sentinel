@@ -19,6 +19,8 @@ incidents and MTTR are per correlation_id (an incident), not per chain.
 
 CLI:
   snapshot.py --ledger DIR --out DIR [--status PATH] [--run-url URL] [--now RFC3339]
+--status is the reconciler's status file, or a previous snapshot's meta.json (its `sources` are
+carried over: a Pages rebuild pulls no source, so it reports the last reconcile's statuses).
 Exit codes: 0 written, 2 a document failed validation (nothing written) or bad arguments.
 """
 
@@ -274,7 +276,10 @@ def chain_status(events: list[Event], now: datetime) -> str:
         return "awaiting_review"
     if "escalation.raised" in kinds:
         return "escalated"
-    if "agent.failed" in kinds:
+    # The latest agent outcome wins: a re-run that decided after an earlier agent.failed is judged
+    # by its decision (a rollback with no PR yet stays running below).
+    agent = _last(events, "agent.decided", "agent.failed")
+    if agent is not None and agent["kind"] == "agent.failed":
         return "failed"
     if _open_stage(events):
         stale = (now - _ts(events[-1]["ts"])).total_seconds() > STALE_RUNNING_S
@@ -972,6 +977,8 @@ def _read_status(path: Path | None) -> dict[str, str] | None:
         status = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if isinstance(status, dict) and status.get("file") == "meta":  # a previous snapshot's meta.json
+        status = status.get("sources")
     return status if isinstance(status, dict) else None
 
 

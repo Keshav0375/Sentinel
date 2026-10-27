@@ -20,6 +20,16 @@ describe('derive', () => {
     expect(filter({ range: '24h' })).toEqual(['0a1b', '4f1d', '7a3c', '9b2e']);
   });
 
+  it('test_range_keys_on_event_ts', () => {
+    // Started 3 days ago, deployed an hour ago: the 24h deploys KPI counts it, so the row is listed.
+    const base = chains[0];
+    if (!base) throw new Error('fixture chains missing');
+    const late: ChainSummary = { ...base, chain_id: 'c_ffff000000000001', started_at: '2026-10-22T12:00:00Z', updated_at: '2026-10-25T11:00:00Z' };
+    const old: ChainSummary = { ...base, chain_id: 'c_ffff000000000002', started_at: '2026-10-22T12:00:00Z', updated_at: '2026-10-22T13:00:00Z' };
+    expect(ids(filterChains([late, old], view({ range: '24h' }), GEN))).toEqual(['ffff']);
+    expect(filterChains([late, old], view({ range: '24h' }), GEN).map((c) => c.chain_id)).toEqual(['c_ffff000000000001']);
+  });
+
   it('test_focus_predicates', () => {
     const by = (f: Parameters<typeof focusPredicate>[0]) => ids(chains.filter(focusPredicate(f)));
     expect(by('incidents')).toEqual(['7a3c', '9b2e', '2c8f']);

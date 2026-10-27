@@ -286,6 +286,10 @@ def backend_deploy_events(
         events.append(deploy_terminal("deploy.failed", deploy, "deploy"))
     elif deploy.result == "success" and tests.result == "success":
         events.append(deploy_terminal("deploy.succeeded", tests))
+    elif deploy.result == "success" and tests.result == "skipped":
+        # Deployed, tests skipped: a terminal outcome (v1 has no field for "tests skipped"), so the
+        # chain never stays running or goes stale.
+        events.append(deploy_terminal("deploy.succeeded", deploy))
     elif deploy.result == "success" and tests.result in BAD:
         events.append(deploy_terminal("deploy.failed", tests, "test"))
     return events

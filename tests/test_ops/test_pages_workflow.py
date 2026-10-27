@@ -48,6 +48,8 @@ BUILD_STEPS = [
     "Build",
     "Check whether the ledger exists",
     "Download the reconciled snapshot",
+    "Find the last successful reconcile",
+    "Download the last reconcile's snapshot",
     "Rebuild the snapshot from the ledger",
     "Check the site before publishing",
     "Upload the Pages artifact",
@@ -271,6 +273,34 @@ def test_ledger_state_behaviour(tmp_path: Path, stub_rc: str, rc: int, line: str
         assert "the published site is unchanged" in proc.stdout
     else:
         assert lines == [line]
+
+
+def test_rebuild_carries_reconcile_status() -> None:
+    """A web-CI deploy never invents source statuses: it carries the last reconcile's meta.json."""
+    find = _by_id("last-reconcile")
+    download = _by_id("last-snapshot")
+    rebuild = _by_id("snapshot-ledger")
+
+    condition = "github.event.workflow_run.path != '.github/workflows/ops_reconcile.yml'"
+    assert find["if"] == condition == rebuild["if"]
+    assert find["continue-on-error"] is True and download["continue-on-error"] is True
+    assert find["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    assert "actions/workflows/ops_reconcile.yml/runs?branch=main&status=success" in find["run"]
+    assert "gh api" in find["run"] and "-X" not in find["run"]  # a GET
+    assert download["if"] == "steps.last-reconcile.outputs.run-id != ''"
+    assert download["with"] == {
+        "name": "ops-snapshot",
+        "path": "${{ runner.temp }}/last-snapshot",
+        "run-id": "${{ steps.last-reconcile.outputs.run-id }}",
+        "github-token": "${{ github.token }}",
+    }
+    run = rebuild["run"]
+    assert 'status="$RUNNER_TEMP/last-snapshot/meta.json"' in run
+    assert '--status "$status"' in run
+    names = [s["name"] for s in _steps(_doc(), "build")]
+    assert names.index("Download the last reconcile's snapshot") < names.index(
+        "Rebuild the snapshot from the ledger"
+    )
 
 
 def test_no_expression_in_run() -> None:

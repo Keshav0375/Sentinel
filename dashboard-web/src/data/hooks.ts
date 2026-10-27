@@ -18,8 +18,13 @@ export function useSnapshot(client: SnapshotClient): { state: SnapshotState; rel
 
   useEffect(() => {
     const ac = new AbortController();
-    if (nonce > 0) setRefreshing(true);
-    void Promise.allSettled([client.meta(ac.signal), client.chains(ac.signal), client.metrics(ac.signal)]).then(
+    const fresh = nonce > 0; // a reload or Retry bypasses the HTTP cache
+    if (fresh) setRefreshing(true);
+    void Promise.allSettled([
+      client.meta(ac.signal, fresh),
+      client.chains(ac.signal, fresh),
+      client.metrics(ac.signal, fresh),
+    ]).then(
       ([meta, chains, metrics]) => {
         if (ac.signal.aborted) return;
         setRefreshing(false);

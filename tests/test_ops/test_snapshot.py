@@ -606,6 +606,58 @@ def test_open_stage_rerun_same_run_id(snapshot: ModuleType) -> None:
     assert snapshot.chain_status(events, now) == "succeeded"
 
 
+def _agent_failed(snapshot: ModuleType, ts: str) -> dict:
+    return ev(
+        snapshot,
+        "agent.failed",
+        INCIDENT_WF,
+        CORR,
+        ts,
+        {"correlation_id": CORR},
+        {"error_class": "pipeline_fault", "run_url": INCIDENT_RUN},
+    )
+
+
+def test_later_decision_beats_earlier_failure(snapshot: ModuleType) -> None:
+    """A re-run that decided a rollback after an earlier agent.failed is judged by its decision."""
+    events = [
+        alert(snapshot, _at(60)),
+        _agent_failed(snapshot, _at(50)),
+        decided(snapshot, _at(20)),  # rollback, no revert PR yet
+    ]
+
+    assert snapshot.chain_status(events, NOW) == "running"
+    opened = [*events, revert(snapshot, "revert_pr.opened", _at(10), state="open")]
+    assert snapshot.chain_status(opened, NOW) == "awaiting_review"
+    # The reverse order still fails: the latest outcome is the failure.
+    reverse = [
+        alert(snapshot, _at(60)),
+        decided(snapshot, _at(50)),
+        _agent_failed(snapshot, _at(20)),
+    ]
+    assert snapshot.chain_status(reverse, NOW) == "failed"
+
+
+def test_deploy_with_tests_skipped_is_terminal(snapshot: ModuleType, rules: ModuleType) -> None:
+    fact = rules.JobFact
+    jobs = {
+        "run-quality": fact("success", _at(9 * 60), _at(9 * 60 - 3)),
+        "build-and-push": fact("success", _at(9 * 60 - 3), _at(9 * 60 - 10)),
+        "deploy-to-aks": fact("success", _at(9 * 60 - 10), _at(9 * 60 - 20)),
+        "run-tests": fact("skipped"),
+    }
+    specs = rules.backend_deploy_events(
+        jobs, sha=MAIN_SHA, run_id=778, run_attempt=1, with_started=True
+    )
+    events = [spec_event(snapshot, s) for s in specs]
+
+    # Nine hours later: past STALE_RUNNING_S, yet a finished deploy is neither running nor stale.
+    assert snapshot.chain_status(events, NOW) == "succeeded"
+    (summary,) = _summaries(snapshot, events)
+    assert summary["ended_at"] is not None
+    assert summary["stages"][0]["status"] == "succeeded"
+
+
 def test_entity_contents(snapshot: ModuleType, tmp_path: Path) -> None:
     trace = ev(
         snapshot,
@@ -785,6 +837,29 @@ def test_cli_writes_dir(
     assert meta["generated_at"] == "2026-10-25T12:00:00Z"
     assert snapshot.main(argv) == 0
     assert {p.name for p in (out / "entities").iterdir()} == entities
+
+
+def test_status_carried_from_previous_meta(snapshot: ModuleType, tmp_path: Path) -> None:
+    """A Pages rebuild passes the last reconcile's meta.json: its sources are carried over."""
+    previous = tmp_path / "last" / "meta.json"
+    previous.parent.mkdir()
+    reconciled = snapshot.build(
+        tmp_path / "absent",
+        now=NOW,
+        status={"github": "error", "langfuse": "ok"},
+        run_url=None,
+        ledger_head=None,
+    )["meta.json"]
+    previous.write_text(json.dumps(reconciled))
+    out = tmp_path / "snapshot"
+
+    argv = ["--ledger", str(tmp_path / "absent"), "--out", str(out), "--status", str(previous)]
+    assert snapshot.main([*argv, "--now", "2026-10-25T12:30:00Z"]) == 0
+
+    meta = json.loads((out / "meta.json").read_text())
+    assert meta["sources"] == {"github": "error", "langfuse": "ok"}
+    assert meta["generated_at"] == "2026-10-25T12:30:00Z"
+    assert snapshot._read_status(tmp_path / "missing.json") is None
 
 
 def test_invalid_event_skipped(snapshot: ModuleType, tmp_path: Path) -> None:

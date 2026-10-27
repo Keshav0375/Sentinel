@@ -52,7 +52,6 @@ export function FilterBar({ total, shown }: { total: number; shown: number }) {
             <input
               id={SEARCH_INPUT_ID}
               type="search"
-              aria-label="Search chains"
               placeholder="Search title, summary, SHA or #PR"
               autoComplete="off"
               spellCheck={false}

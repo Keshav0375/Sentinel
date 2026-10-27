@@ -34,6 +34,16 @@ describe('http client', () => {
     expect(result).toEqual(meta);
   });
 
+  it('test_reload_bypasses_the_cache', async () => {
+    const f = vi.fn<typeof fetch>(async () => response(meta));
+    const client = createHttpClient('/Sentinel/snapshot/', f);
+    await client.meta();
+    await client.meta(undefined, true);
+    await client.chains(undefined, true).catch(() => null);
+    await client.metrics(undefined, true).catch(() => null);
+    expect(f.mock.calls.map(([, init]) => init?.cache)).toEqual(['default', 'no-cache', 'no-cache', 'no-cache']);
+  });
+
   it('test_entity_fetch_is_no_cache', async () => {
     const f = vi.fn<typeof fetch>(async () => response({ schema: 'ops.snapshot.v1', file: 'entity' }));
     const client = createHttpClient('/Sentinel/snapshot/', f);

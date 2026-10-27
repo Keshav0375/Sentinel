@@ -64,13 +64,19 @@ export function matchesQuery(c: ChainSummary, q: string): boolean {
   return c.title.toLowerCase().includes(needle) || (c.summary ?? '').toLowerCase().includes(needle);
 }
 
+/**
+ * The range keys on event ts, like the KPI windows (metrics.json counts events whose ts is in the
+ * window): a chain is in range when its latest event (`updated_at`) is, so every chain holding an
+ * event a KPI counted is listed. Keying on `started_at` would drop a chain that started before the
+ * window but deployed or alerted inside it.
+ */
 export function filterChains(chains: ChainSummary[], v: ViewState, generatedAt: Timestamp): ChainSummary[] {
   const window = RANGE_SECONDS[v.range];
   const end = parseISO(generatedAt).getTime();
   const focus = v.focus ? focusPredicate(v.focus) : null;
   return chains.filter(
     (c) =>
-      (window === null || parseISO(c.started_at).getTime() >= end - window * 1000) &&
+      (window === null || parseISO(c.updated_at).getTime() >= end - window * 1000) &&
       (focus === null || focus(c)) &&
       (v.repo === null || c.repo === v.repo) &&
       (v.kind === null || c.kinds.includes(v.kind)) &&

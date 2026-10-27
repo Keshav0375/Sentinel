@@ -37,9 +37,10 @@ export class SnapshotError extends Error {
 }
 
 export interface SnapshotClient {
-  meta(s?: AbortSignal): Promise<MetaFile>;
-  chains(s?: AbortSignal): Promise<ChainsFile>;
-  metrics(s?: AbortSignal): Promise<MetricsFile>;
+  /** `fresh`: a reload or Retry, which must bypass the HTTP cache. */
+  meta(s?: AbortSignal, fresh?: boolean): Promise<MetaFile>;
+  chains(s?: AbortSignal, fresh?: boolean): Promise<ChainsFile>;
+  metrics(s?: AbortSignal, fresh?: boolean): Promise<MetricsFile>;
   entity(chainId: string, s?: AbortSignal): Promise<EntityFile>;
 }
 
@@ -92,12 +93,14 @@ export function createHttpClient(base: string, fetchImpl: typeof fetch = (...a) 
     return checkFile<T>(json, file, url);
   }
 
-  // The first-load files use the default mode so the index.html preload is consumed (a no-cache
-  // request may not reuse it); Pages' max-age=600 is under the 30-min reconcile cadence.
+  // The first load uses the default mode so the index.html preload is consumed (a no-cache request
+  // may not reuse it); Pages' max-age=600 is under the 30-min reconcile cadence. A reload or Retry
+  // (fresh) revalidates, so it never shows the cached copy it was asked to replace.
+  const mode = (fresh?: boolean): RequestCache => (fresh ? 'no-cache' : 'default');
   return {
-    meta: (s) => load<MetaFile>('meta.json', 'meta', s, 'default'),
-    chains: (s) => load<ChainsFile>('chains.json', 'chains', s, 'default'),
-    metrics: (s) => load<MetricsFile>('metrics.json', 'metrics', s, 'default'),
+    meta: (s, fresh) => load<MetaFile>('meta.json', 'meta', s, mode(fresh)),
+    chains: (s, fresh) => load<ChainsFile>('chains.json', 'chains', s, mode(fresh)),
+    metrics: (s, fresh) => load<MetricsFile>('metrics.json', 'metrics', s, mode(fresh)),
     entity: (chainId, s) => {
       const path = `entities/${chainId}.json`;
       if (!CHAIN_ID_RE.test(chainId)) return Promise.reject(new SnapshotError('not_found', `${base}${path}`));

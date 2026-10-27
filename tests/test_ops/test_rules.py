@@ -171,6 +171,10 @@ def test_backend_unconfigured_emits_nothing(rules: ModuleType) -> None:
             ("success", "success", "success", "failure"),
             [("build.succeeded", None), ("deploy.failed", "test")],
         ),
+        (
+            ("success", "success", "success", "skipped"),
+            [("build.succeeded", None), ("deploy.succeeded", None)],
+        ),
         (("success", "success", "success", ""), [("build.succeeded", None)]),
     ],
 )
@@ -234,6 +238,17 @@ def test_backend_with_started_and_times(rules: ModuleType) -> None:
     jobs["deploy-to-aks"] = rules.JobFact("skipped")
     kinds = [s.kind for s in rules.backend_deploy_events(jobs, **RUN, with_started=True)]
     assert kinds == ["build.started", "build.failed"]
+
+
+def test_backend_tests_skipped_is_terminal(rules: ModuleType) -> None:
+    jobs = _timed_jobs(rules)
+    jobs["run-tests"] = rules.JobFact("skipped")
+    specs = rules.backend_deploy_events(jobs, **RUN, with_started=True)
+    assert [s.kind for s in specs][-1] == "deploy.succeeded"
+    succeeded = specs[-1]
+    assert succeeded.ts == "2026-10-25T12:20:00Z"  # the deploy job's end, not the skipped tests
+    assert succeeded.data["duration_s"] == 595.0
+    assert "failed_stage" not in succeeded.data
 
 
 def test_seconds_between(rules: ModuleType) -> None:
