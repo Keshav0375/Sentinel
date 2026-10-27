@@ -149,7 +149,9 @@ def test_build_gate() -> None:
 
     assert "github.event.workflow_run.conclusion == 'success'" in condition
     assert "github.event.workflow_run.head_repository.full_name == github.repository" in condition
-    assert "github.event_name == 'workflow_dispatch'" in condition
+    assert (
+        "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')" in condition
+    )
     match = re.search(r"fromJSON\('(\[.*?\])'\), github\.event\.workflow_run\.event\)", condition)
     assert match is not None, condition
     events = json.loads(match.group(1))

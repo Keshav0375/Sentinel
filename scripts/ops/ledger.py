@@ -61,7 +61,12 @@ CAPPED_TEXT: dict[str, tuple[str, ...]] = {
 }
 
 MAX_PUSH_ATTEMPTS = 5
-GIT_TIMEOUT_S = 60
+# One append is bounded in total (attempts + backoff sleeps share the budget) and per git call;
+# every per-call timeout is capped at what is left of the budget.
+APPEND_DEADLINE_S = 120.0
+GIT_NETWORK_TIMEOUT_S = 30.0
+GIT_LOCAL_TIMEOUT_S = 10.0
+NETWORK_OPS = frozenset({"ls-remote", "fetch", "push"})
 BOT_NAME = "github-actions[bot]"
 BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -131,6 +136,19 @@ _REF = re.compile(r"^#/\$defs/[A-Za-z0-9_]+$")
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 _sleep = time.sleep  # looked up at call time so tests can monkeypatch ledger._sleep
+_monotonic = time.monotonic  # likewise ledger._monotonic
+
+# A push the remote refused because the tip moved: rebuild on the new tip and retry.
+NON_FF_RE = re.compile(
+    r"non-fast-forward|fetch first|stale info|cannot lock ref|incorrect old value", re.I
+)
+# A push refused for auth or branch protection: retrying cannot help.
+FATAL_PUSH_RE = re.compile(
+    r"\[remote rejected\]|\[rejected\]|permission to \S+ denied|authentication failed"
+    r"|could not read username|returned error: 40[134]|protected branch|GH0\d\d"
+    r"|refusing to allow|write access to repository not granted|invalid username or password",
+    re.I,
+)
 
 
 # ── Errors ────────────────────────────────────────────────────────────────────
@@ -162,6 +180,10 @@ class LedgerGitError(LedgerError):
 
 class LedgerPushError(LedgerError):
     """Every push attempt failed."""
+
+
+class LedgerPushRejectedError(LedgerPushError):
+    """push rejected (auth or protection); not retried."""
 
 
 @dataclass(frozen=True)
@@ -537,10 +559,22 @@ def _git_env(token: str | None) -> dict[str, str]:
     return env
 
 
+def op_timeout(op: str, deadline: float | None, now: float) -> float:
+    """The timeout for one git call: per-op, capped at what is left of the append deadline."""
+    timeout = GIT_NETWORK_TIMEOUT_S if op in NETWORK_OPS else GIT_LOCAL_TIMEOUT_S
+    if deadline is None:
+        return timeout
+    left = deadline - now
+    if left <= 0:
+        raise LedgerGitError(f"git {op} failed: append deadline reached")
+    return min(timeout, left)
+
+
 class _Git:
-    def __init__(self, cwd: Path, token: str | None) -> None:
+    def __init__(self, cwd: Path, token: str | None, deadline: float | None = None) -> None:
         self.cwd = cwd
         self.env = _git_env(token)
+        self.deadline = deadline
         self._redact: list[str] = []
         if token:
             self._redact = [token, base64.b64encode(f"x-access-token:{token}".encode()).decode()]
@@ -554,9 +588,14 @@ class _Git:
             env={**self.env, **(env_extra or {})},
             input=stdin,
             capture_output=True,
-            timeout=GIT_TIMEOUT_S,
+            timeout=op_timeout(args[0], self.deadline, _monotonic()),
             check=False,
         )
+
+    def redact(self, text: str) -> str:
+        for secret in self._redact:
+            text = text.replace(secret, "***")
+        return text
 
     def run(
         self, *args: str, stdin: bytes | None = None, env_extra: Mapping[str, str] | None = None
@@ -567,11 +606,18 @@ class _Git:
             raise LedgerGitError(f"git {args[0]} failed: timed out") from None
         if proc.returncode != 0:
             lines = proc.stderr.decode("utf-8", "replace").strip().splitlines()
-            detail = lines[-1] if lines else f"exit {proc.returncode}"
-            for secret in self._redact:
-                detail = detail.replace(secret, "***")
+            detail = self.redact(lines[-1] if lines else f"exit {proc.returncode}")
             raise LedgerGitError(f"git {args[0]} failed: {detail}")
         return proc.stdout.decode("utf-8", "replace").strip()
+
+    def attempt(self, *args: str) -> tuple[int, str]:
+        """(returncode, stdout + stderr, redacted); a timeout is (124, "timed out")."""
+        try:
+            proc = self._call(args, None, None)
+        except subprocess.TimeoutExpired:
+            return 124, "timed out"
+        output = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+        return proc.returncode, self.redact(output)
 
     def ok(self, *args: str) -> bool:
         try:
@@ -614,7 +660,19 @@ def _bootstrap_commit(git: _Git) -> str:
 
 
 def _push(git: _Git, remote: str, commit: str, branch: str) -> bool:
-    return git.ok("push", "-q", remote, f"{commit}:refs/heads/{branch}")
+    """True pushed; False the tip moved (retry). A refusal for auth or protection raises
+    LedgerPushRejectedError (not retried); anything else is a retryable LedgerGitError."""
+    code, output = git.attempt("push", "-q", remote, f"{commit}:refs/heads/{branch}")
+    if code == 0:
+        return True
+    if NON_FF_RE.search(output):
+        return False
+    lines = output.strip().splitlines()
+    fatal = next((line for line in lines if FATAL_PUSH_RE.search(line)), None)
+    if fatal is not None:
+        raise LedgerPushRejectedError(f"push to {branch} rejected: {fatal.strip()[:200]}")
+    detail = lines[-1].strip() if lines else f"exit {code}"
+    raise LedgerGitError(f"git push failed: {detail}")
 
 
 def append(
@@ -626,8 +684,12 @@ def append(
     max_attempts: int = MAX_PUSH_ATTEMPTS,
     sleep: Callable[[float], None] | None = None,
     schema: Mapping[str, Any] | None = None,
+    deadline_s: float = APPEND_DEADLINE_S,
 ) -> AppendResult:
-    """Append `event` to the ledger branch; idempotent by event_id, bounded retry on races."""
+    """Append `event` to the ledger branch; idempotent by event_id, bounded retry on races.
+
+    Attempts and backoff share one `deadline_s` budget; a push refused for auth or protection
+    raises LedgerPushRejectedError at once."""
     schema = load_schema() if schema is None else schema
     errors = validate(event, schema)
     if errors:
@@ -641,10 +703,17 @@ def append(
     payload = serialize(event)
     path = event_path(event)
     last = ""
+    attempts = 0
+    expired = False
+    deadline = _monotonic() + deadline_s
     with tempfile.TemporaryDirectory(prefix="ops-ledger-") as tmp:
-        git = _Git(Path(tmp), token)
+        git = _Git(Path(tmp), token, deadline)
         git.run("init", "-q")
         for attempt in range(1, max_attempts + 1):
+            if _monotonic() >= deadline:
+                expired = True
+                break
+            attempts = attempt
             try:
                 tip = _fetch_tip(git, remote, branch)
                 if tip and _event_exists(git, tip, event_id):
@@ -658,9 +727,12 @@ def append(
             except LedgerGitError as exc:
                 last = str(exc)
             if attempt < max_attempts:
-                (sleep or _sleep)(min(2 ** (attempt - 1), 8) + random.uniform(0, 0.5))
+                backoff = min(2 ** (attempt - 1), 8) + random.uniform(0, 0.5)
+                (sleep or _sleep)(min(backoff, max(0.0, deadline - _monotonic())))
+    budget = f" (deadline {deadline_s:g} s reached)" if expired else ""
     raise LedgerPushError(
-        f"append to {branch} failed after {max_attempts} attempts" + (f": {last}" if last else "")
+        f"append to {branch} failed after {attempts} attempts{budget}"
+        + (f": {last}" if last else "")
     )
 
 

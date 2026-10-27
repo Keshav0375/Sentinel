@@ -4,10 +4,12 @@
 Bundle: base path and no fixtures. Snapshot: schema-valid, complete, secret-free.
 
 The bundle check runs in web CI and before every Pages publish: index.html exists, every
-root-absolute `src`/`href` sits under the base path and exists in the build, at least one
-`<base>assets/` file is referenced, and nothing outside `snapshot/` is a source or fixture path or
-contains a fixture chain id. The snapshot check (Pages only) validates `snapshot/` against
-snapshot.v1 with ledger.py and refuses an empty snapshot when the ops-ledger branch exists.
+root-absolute `src`/`href` sits under the base path and exists in the build (snapshot/ refs, the
+index.html preloads, are checked by --snapshot, not the bundle check: the snapshot is added at
+publish time), at least one `<base>assets/` file is referenced, and nothing outside `snapshot/` is
+a source or fixture path or contains a fixture chain id. The snapshot check (Pages only) validates
+`snapshot/` against snapshot.v1 with ledger.py and refuses an empty snapshot when the ops-ledger
+branch exists.
 
 CLI:
   check_site.py DIST --fixtures DIR [--base /Sentinel/] [--snapshot [--require-events]]
@@ -87,6 +89,8 @@ def check_bundle(dist: Path, *, base: str, markers: Iterable[str]) -> list[str]:
             continue
         target = ref.split("?", 1)[0].split("#", 1)[0]
         if target.startswith(base):
+            if target.startswith(f"{base}{SNAPSHOT_DIR}/"):
+                continue  # added at publish time; --snapshot checks it
             if not (dist / target[len(base) :]).is_file():
                 problems.append(f"index.html: {ref} is not in the build")
         elif target.startswith("/"):

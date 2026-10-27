@@ -103,6 +103,26 @@ def test_missing_asset(check_site: ModuleType, markers: set[str], tmp_path: Path
     assert problems == ["index.html: /Sentinel/assets/gone.js?v=1 is not in the build"]
 
 
+def test_snapshot_preload_refs_allowed(
+    check_site: ModuleType, markers: set[str], tmp_path: Path
+) -> None:
+    """snapshot/ is added at publish time: its preloads are not "in the build" yet."""
+    html = (
+        '<script type="module" src="/Sentinel/assets/index-b2.js"></script>'
+        '<link rel="preload" as="fetch" crossorigin href="/Sentinel/snapshot/meta.json">'
+    )
+    dist = _dist(tmp_path, html)
+    assert not (dist / "snapshot").exists()
+
+    assert check_site.check_bundle(dist, base=BASE, markers=markers) == []
+
+    relative = html + '<link rel="preload" as="fetch" href="snapshot/meta.json">'
+    (dist / "index.html").write_text(relative, encoding="utf-8")
+    assert check_site.check_bundle(dist, base=BASE, markers=markers) == [
+        "index.html: snapshot/meta.json is relative; expected /Sentinel/…"
+    ]
+
+
 def test_relative_ref(check_site: ModuleType, markers: set[str], tmp_path: Path) -> None:
     dist = _dist(tmp_path, GOOD_HTML + '<script src="assets/x.js"></script>')
 

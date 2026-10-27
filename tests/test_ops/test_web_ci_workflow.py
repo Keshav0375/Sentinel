@@ -175,7 +175,7 @@ def test_lighthouse_budget() -> None:
 
     assert rc["collect"]["url"] == ["http://localhost:4173/Sentinel/"]
     assert rc["collect"]["startServerCommand"] == "pnpm run preview"
-    assert rc["collect"]["numberOfRuns"] == 3
+    assert rc["collect"]["numberOfRuns"] == 5
     assert rc["assert"]["assertions"] == {
         "categories:performance": BUDGET,
         "categories:accessibility": BUDGET,

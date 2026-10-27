@@ -582,12 +582,14 @@ jobs:
   # ledger fault never blocks the apply. The outcome event is written after the facts it reports.
   # Apply only: plan and destroy emit nothing (no ops.v1 kind describes a teardown). The scope is not
   # recorded (no v1 field for it); the run_url leads to it.
+  # Job-level continue-on-error: a timeout or runner fault never reds the run.
   ops-start:
     name: Record the infra apply start
     runs-on: ubuntu-latest
     needs: [oidc-ready]
     if: needs.oidc-ready.outputs.ready == 'true' && inputs.action == 'apply'
-    timeout-minutes: 5
+    timeout-minutes: 8
+    continue-on-error: true
     permissions:
       contents: write
     defaults:
@@ -626,7 +628,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [oidc-ready, run, verify]
     if: always() && needs.oidc-ready.outputs.ready == 'true' && inputs.action == 'apply'
-    timeout-minutes: 5
+    timeout-minutes: 8
+    continue-on-error: true
     permissions:
       contents: write
     defaults:

@@ -4,7 +4,7 @@
       "startServerCommand": "pnpm run preview",
       "startServerReadyPattern": "Local",
       "url": ["http://localhost:4173/Sentinel/"],
-      "numberOfRuns": 3
+      "numberOfRuns": 5
     },
     "assert": {
       "assertions": {

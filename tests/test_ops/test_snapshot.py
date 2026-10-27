@@ -540,6 +540,72 @@ def test_metrics(snapshot: ModuleType, tmp_path: Path) -> None:
     assert metrics["current"]["escalations_open"] == 0  # escalated decisions, no escalation.raised
 
 
+def _kpis_of(snapshot: ModuleType, events: list[dict]) -> dict[str, Any]:
+    ordered = sorted(events, key=lambda e: (e["ts"], e["recorded_at"], e["event_id"]))
+    chains = []
+    for members in snapshot.group_chains(ordered):
+        cid = snapshot.chain_id(members)
+        chains.append((snapshot.summarize(members, cid, NOW), members))
+    out: dict[str, Any] = snapshot.metrics(chains, ordered, NOW)
+    return out
+
+
+def test_two_incidents_same_sha(snapshot: ModuleType) -> None:
+    """One deploy sha, two incidents two days apart: one chain, but two incidents and per-incident
+    MTTR (not decided − the chain's first alert)."""
+    day_1, day_2 = "2026-10-21T00:00:00Z", "2026-10-23T00:00:00Z"
+    events = [
+        alert(snapshot, day_1, corr=CORR),
+        decided(snapshot, "2026-10-21T00:05:00Z", corr=CORR),
+        alert(snapshot, day_2, corr=CORR_2),
+        decided(snapshot, "2026-10-23T00:05:00Z", corr=CORR_2),
+    ]
+    assert all(e["chain"].get("sha") == SHA for e in events if e["kind"] == "agent.decided")
+
+    metrics = _kpis_of(snapshot, events)
+
+    assert len(snapshot.group_chains(events)) == 1
+    all_time = metrics["ranges"]["all"]
+    assert all_time["incidents"] == 2
+    assert (all_time["mttr_p50_s"], all_time["mttr_p90_s"]) == (300.0, 300.0)
+    assert {p["date"]: p["incidents"] for p in metrics["daily"]} == {
+        "2026-10-21": 1,
+        "2026-10-23": 1,
+    }
+
+
+def test_incident_without_correlation_falls_back_to_chain(snapshot: ModuleType) -> None:
+    chain = {"incident_id": INCIDENT, "sha": SHA}
+    events = [
+        {**alert(snapshot, _at(100)), "chain": chain},
+        {**decided(snapshot, _at(90), resolution="escalated"), "chain": chain},
+    ]
+
+    all_time = _kpis_of(snapshot, events)["ranges"]["all"]
+
+    assert all_time["incidents"] == 1
+    assert all_time["mttr_p50_s"] == 600.0
+
+
+def test_open_stage_rerun_same_run_id(snapshot: ModuleType) -> None:
+    """A re-run (same run_id, new attempt) after a terminal is open until its own terminal."""
+    backend = "gha:Keshav0375/Sentinel/ci_backend_deployment.yml"
+    chain = {"sha": MAIN_SHA, "run_id": 9}
+    run = {"run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/9"}
+    t0, t1, t2, t3 = _at(30), _at(25), _at(20), _at(10)
+    events = [
+        ev(snapshot, "build.started", backend, "9.1", t0, chain, run),
+        ev(snapshot, "build.failed", backend, "9.1", t1, chain, {**run, "failed_stage": "test"}),
+        ev(snapshot, "build.started", backend, "9.2", t2, chain, run),
+    ]
+    at_t2 = datetime.strptime(t2, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    now = at_t2 + timedelta(seconds=60)
+
+    assert snapshot.chain_status(events, now) == "running"
+    events.append(ev(snapshot, "build.succeeded", backend, "9.2", t3, chain, run))
+    assert snapshot.chain_status(events, now) == "succeeded"
+
+
 def test_entity_contents(snapshot: ModuleType, tmp_path: Path) -> None:
     trace = ev(
         snapshot,

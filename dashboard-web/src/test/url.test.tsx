@@ -67,4 +67,29 @@ describe('url state', () => {
     expect(window.location.search).toBe('?range=7d');
     expect(screen.getByRole('status')).toHaveTextContent('none');
   });
+
+  it('test_close_restores_toggles_and_filters', async () => {
+    let api: ReturnType<typeof useView> | null = null;
+    function Probe() {
+      api = useView();
+      return <output>{api.view.chain ?? 'none'}</output>;
+    }
+    window.history.replaceState(null, '', '/Sentinel/?range=7d&status=failed');
+    render(
+      <ViewStateProvider>
+        <Probe />
+      </ViewStateProvider>,
+    );
+    act(() => api?.update({ chain: 'c_2c8f0e7a5b1d3f94' }, { push: true }));
+    act(() => api?.update({ raw: true, traces: true }));
+    expect(window.location.search).toBe('?range=7d&status=failed&chain=c_2c8f0e7a5b1d3f94&raw=1&traces=1');
+
+    act(() => api?.closeChain());
+    await waitFor(() => expect(window.location.search).toBe('?range=7d&status=failed&raw=1&traces=1'));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('none'));
+    const current = (): ViewState | undefined => api?.view;
+    expect(current()?.chain).toBeNull();
+    expect(current()?.raw).toBe(true);
+    expect((window.history.state as { drawer?: boolean } | null)?.drawer).not.toBe(true);
+  });
 });

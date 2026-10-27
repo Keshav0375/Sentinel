@@ -26,13 +26,26 @@ metadata.correlation_id and htmlPath, and the observation's id, parentObservatio
 startTime, endTime, level and usage (usageDetails) input/output. Never input, output,
 statusMessage or any other metadata.
 
+Revert-PR trust: a PR is a Sentinel revert PR only when its branch is `revert-<sha>`, its head repo
+is Keshav0375/Sentinel-deployment (a fork or a deleted head repo is rejected), its body carries the
+"Drafted by Sentinel for incident <id>." line ci_incident_response.yml writes, and its author is in
+OPS_REVERT_PR_AUTHORS (comma-separated logins; default Keshav0375, github-actions[bot]).
+
 Cursor (`--cursor`, persisted by actions/cache, never on ops-ledger):
   {"version": 1, "updated_at": ts, "last_full_sweep_at": ts|null,
-   "since": {"github": ts|null, "langfuse": ts|null}}
-Full sweep when OPS_FULL_SWEEP is "true", on the weekly cron, when the cursor is missing or invalid,
-or when the last full sweep is older than 8 days; else incremental from `since - OVERLAP_S`. A
-source's `since` advances to this run's start only when that source fully succeeded and every
-append landed.
+   "last_full_sweep_attempt_at": ts|null, "since": {"github": ts|null, "langfuse": ts|null},
+   "settled": {"<run_id>": "<run.updated_at>"}}
+Every window starts no earlier than 90 days ago (GitHub's default Actions retention). Full sweep
+when OPS_FULL_SWEEP is "true", when the cursor is missing or invalid, or when the last full sweep is
+over 7 days old (weekly, date-triggered) unless a full sweep was attempted under a day ago, so a
+failing sweep retries daily; else incremental from `since - OVERLAP_S`. A source's `since` advances
+to this run's start only when that source fully succeeded, nothing was truncated or skipped on an
+API error, and every append landed. A completed run whose events all landed is settled: while its
+updated_at is unchanged, later runs skip its attempts and jobs.
+
+One bad item (a run, a revert PR, a trace) is warned about and skipped, never the whole pull; a
+failed listing marks the source "error" and the next listing still runs. A rate limit (429, or 403
+with Retry-After or X-RateLimit-Remaining 0) is waited out when the wait is at most 60 s.
 
 Read-only: GET requests only; the one write is ledger.append to ops-ledger. Always exits 0 once the
 arguments parse (a pull failure is a status in `--status`, not a failed job).
@@ -40,7 +53,8 @@ arguments parse (a pull failure is a status in `--status`, not a failed job).
 CLI:
   reconcile.py run --ledger DIR --cursor PATH --status PATH [--now RFC3339]
   env GITHUB_TOKEN, OPS_LEDGER_TOKEN (default GITHUB_TOKEN), LANGFUSE_BASE_URL,
-      LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, OPS_FULL_SWEEP, OPS_SCHEDULE, OPS_LEDGER_REMOTE
+      LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, OPS_FULL_SWEEP, OPS_LEDGER_REMOTE,
+      OPS_REVERT_PR_AUTHORS
 """
 
 from __future__ import annotations
@@ -92,8 +106,13 @@ MAX_PAGES = 5
 MAX_PAGES_FULL = 30
 PER_PAGE = 100
 MAX_APPENDS_PER_RUN = 300
-FULL_SWEEP_CRON = "17 3 * * 0"
-FULL_SWEEP_MAX_AGE_S = 8 * 86400
+FULL_SWEEP_WINDOW_S = 90 * 86400  # GitHub's default Actions retention
+FULL_SWEEP_MAX_AGE_S = 7 * 86400
+FULL_SWEEP_RETRY_S = 86400
+RATE_LIMIT_MAX_WAIT_S = 60
+DEFAULT_REVERT_AUTHORS = ("Keshav0375", "github-actions[bot]")
+DEFAULT_AUTHORS = frozenset(a.lower() for a in DEFAULT_REVERT_AUTHORS)
+REVERT_REPO = rules.DEPLOYMENT
 # event.v1.json data_pr_gate.conclusion.
 PR_GATE_CONCLUSIONS = (
     "success",
@@ -124,8 +143,12 @@ _TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _EVENT_FILE_RE = re.compile(r"-([0-9a-f]{64})\.json$")
 
 _sleep = time.sleep  # looked up at call time so tests can monkeypatch reconcile._sleep
+_clock = time.time  # likewise reconcile._clock
 
-Fetch = Callable[[str, Mapping[str, str]], tuple[int, bytes]]
+# (status, body, lower-cased response headers)
+Fetch = Callable[[str, Mapping[str, str]], tuple[int, bytes, Mapping[str, str]]]
+# Deterministic faults in one item's data: retrying cannot help, so the item is skipped.
+DATA_ERRORS = (ValueError, KeyError, TypeError, AttributeError)
 
 
 def warn(message: str) -> None:
@@ -139,14 +162,35 @@ class ApiError(Exception):
     """An API call failed (the message names the path only, never headers or query)."""
 
 
-def urllib_fetch(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
-    """One GET; (status, body). An HTTP error status is returned, a transport error raised."""
+def _lower(headers: Any) -> dict[str, str]:
+    items = headers.items() if headers is not None else []
+    return {str(k).lower(): str(v) for k, v in items}
+
+
+def urllib_fetch(url: str, headers: Mapping[str, str]) -> tuple[int, bytes, Mapping[str, str]]:
+    """One GET; (status, body, headers). An HTTP error status is returned, a transport error
+    raised."""
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_S) as response:
-            return int(response.status), response.read()
+            return int(response.status), response.read(), _lower(response.headers)
     except urllib.error.HTTPError as exc:
-        return int(exc.code), exc.read() or b""
+        return int(exc.code), exc.read() or b"", _lower(exc.headers)
+
+
+def _rate_wait(status: int, headers: Mapping[str, str], attempt: int) -> float | None:
+    """Seconds to wait out a rate limit; None when the answer is not a rate limit."""
+    remaining = headers.get("x-ratelimit-remaining")
+    if not (status == 429 or (status == 403 and ("retry-after" in headers or remaining == "0"))):
+        return None
+    try:
+        return float(max(0, int(headers.get("retry-after", ""))))
+    except ValueError:
+        pass
+    try:
+        return max(0.0, int(headers.get("x-ratelimit-reset", "")) - _clock()) + 1
+    except ValueError:
+        return float(RETRY_DELAYS_S[min(attempt, len(RETRY_DELAYS_S) - 1)])
 
 
 class Api:
@@ -160,13 +204,21 @@ class Api:
         if params:
             url += "?" + urllib.parse.urlencode({k: str(v) for k, v in params.items()})
         failure = f"GET {path} failed"
+        wait: float | None = None  # a rate-limit wait replaces the next retry delay
         for attempt in range(len(RETRY_DELAYS_S) + 1):
             if attempt:
-                _sleep(RETRY_DELAYS_S[attempt - 1])
+                _sleep(RETRY_DELAYS_S[attempt - 1] if wait is None else wait)
+                wait = None
             try:
-                status, body = self.fetch(url, self.headers)
+                status, body, headers = self.fetch(url, self.headers)
             except OSError:  # URLError, timeouts, resets
                 failure = f"GET {path} failed: unreachable"
+                continue
+            wait = _rate_wait(status, headers, attempt)
+            if wait is not None:
+                failure = f"GET {path} rate limited"
+                if wait > RATE_LIMIT_MAX_WAIT_S:
+                    raise ApiError(failure)
                 continue
             if status >= 500:
                 failure = f"GET {path} answered HTTP {status}"
@@ -219,7 +271,8 @@ def _seconds(start: Any, end: Any) -> float | None:
 
 def list_runs(
     api: Api, repo: str, workflow_file: str, *, created_since: str | None, max_pages: int
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
+    """(runs, truncated): truncated when the last allowed page was full."""
     runs: list[dict[str, Any]] = []
     for page in range(1, max_pages + 1):
         params: dict[str, str | int] = {"per_page": PER_PAGE, "page": page}
@@ -229,8 +282,8 @@ def list_runs(
         batch = [r for r in body.get("workflow_runs") or [] if isinstance(r, dict)]
         runs += batch
         if len(batch) < PER_PAGE:
-            break
-    return runs
+            return runs, False
+    return runs, True
 
 
 def run_attempts(api: Api, repo: str, run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -461,10 +514,45 @@ def _login(user: Any) -> str | None:
     return login if isinstance(login, str) and LOGIN_RE.match(login) else None
 
 
+def parse_authors(text: str | None) -> frozenset[str]:
+    """The revert-PR author allow-list (lower-cased); the default when empty or all invalid."""
+    authors: set[str] = set()
+    for entry in (text or "").split(","):
+        login = entry.strip()
+        if not login:
+            continue
+        if LOGIN_RE.match(login):
+            authors.add(login.lower())
+        else:
+            warn("OPS_REVERT_PR_AUTHORS entry dropped (not a GitHub login)")
+    return frozenset(authors) or DEFAULT_AUTHORS
+
+
+def revert_pr_accepted(pull: Mapping[str, Any], authors: frozenset[str]) -> str | None:
+    """None when `pull` is a Sentinel revert PR, else why it is not."""
+    head: Any = pull.get("head")
+    head = head if isinstance(head, Mapping) else {}
+    if not REVERT_BRANCH_RE.match(str(head.get("ref") or "")):
+        return "not a revert branch"
+    repo: Any = head.get("repo")
+    if not isinstance(repo, Mapping) or repo.get("full_name") != REVERT_REPO:
+        return f"head is not {REVERT_REPO}"
+    if not INCIDENT_LINE_RE.search(str(pull.get("body") or "")):
+        return "no Sentinel marker"
+    login = _login(pull.get("user"))
+    if login is None or login.lower() not in authors:
+        return "author not allowed"
+    return None
+
+
 def revert_pr_events(
-    pull: Mapping[str, Any], reviews: list[dict[str, Any]]
+    pull: Mapping[str, Any],
+    reviews: list[dict[str, Any]],
+    authors: frozenset[str] = DEFAULT_AUTHORS,
 ) -> list[rules.EventSpec]:
-    """revert_pr.* for one Sentinel-deployment PR whose branch is `revert-<sha>` (D6)."""
+    """revert_pr.* for one Sentinel revert PR (D6); [] for any other PR (revert_pr_accepted)."""
+    if revert_pr_accepted(pull, authors) is not None:
+        return []
     head: Any = pull.get("head")
     head = head if isinstance(head, Mapping) else {}
     match = REVERT_BRANCH_RE.match(str(head.get("ref") or ""))
@@ -645,15 +733,16 @@ def trace_event(
 
 def _langfuse_pages(
     api: Api, path: str, params: dict[str, str | int], max_pages: int
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
+    """(items, truncated): truncated when pages remained after the last allowed one."""
     items: list[dict[str, Any]] = []
     for page in range(1, max_pages + 1):
         body = api.get(path, {**params, "page": page, "limit": PER_PAGE})
         items += [d for d in body.get("data") or [] if isinstance(d, dict)]
         meta = body.get("meta") if isinstance(body.get("meta"), Mapping) else {}
         if page >= int(meta.get("totalPages") or 0):
-            break
-    return items
+            return items, False
+    return items, True
 
 
 # ── Cursor ────────────────────────────────────────────────────────────────────
@@ -672,28 +761,51 @@ def load_cursor(path: Path) -> dict[str, Any] | None:
     for key in ("github", "langfuse"):
         if since.get(key) is not None and _parse(since.get(key)) is None:
             return None
-    last = cursor.get("last_full_sweep_at")
-    if last is not None and _parse(last) is None:
-        return None
+    for key in ("last_full_sweep_at", "last_full_sweep_attempt_at"):
+        if cursor.get(key) is not None and _parse(cursor.get(key)) is None:
+            return None
+    settled = cursor.get("settled")
+    if not isinstance(settled, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in settled.items()
+    ):
+        cursor["settled"] = {}
     return cursor
 
 
 def choose_mode(
-    cursor: Mapping[str, Any] | None, *, full_flag: str, schedule: str, now: datetime
+    cursor: Mapping[str, Any] | None, *, full_flag: str, now: datetime
 ) -> tuple[bool, str | None, str | None]:
-    """(full sweep?, GitHub window start, LangFuse window start)."""
-    if full_flag.strip().lower() == "true" or schedule.strip() == FULL_SWEEP_CRON or not cursor:
-        return True, None, None
+    """(full sweep?, GitHub window start, LangFuse window start); no window starts before
+    FULL_SWEEP_WINDOW_S ago."""
+    floor = now - timedelta(seconds=FULL_SWEEP_WINDOW_S)
+    if full_flag.strip().lower() == "true" or not cursor:
+        return True, _fmt(floor), _fmt(floor)
     last = _parse(cursor.get("last_full_sweep_at"))
     if last is None or (now - last).total_seconds() > FULL_SWEEP_MAX_AGE_S:
-        return True, None, None
+        attempt = _parse(cursor.get("last_full_sweep_attempt_at"))
+        if attempt is None or (now - attempt).total_seconds() >= FULL_SWEEP_RETRY_S:
+            return True, _fmt(floor), _fmt(floor)
     since = cursor.get("since") or {}
 
-    def window(key: str) -> str | None:
+    def window(key: str) -> str:
         value = _parse(since.get(key))
-        return _fmt(value - timedelta(seconds=OVERLAP_S)) if value is not None else None
+        if value is None:
+            return _fmt(floor)
+        return _fmt(max(value - timedelta(seconds=OVERLAP_S), floor))
 
     return False, window("github"), window("langfuse")
+
+
+def prune_settled(settled: Mapping[str, str], keep: Iterable[str], now: datetime) -> dict[str, str]:
+    """Drop settled runs last updated before the window floor (they are never listed again)."""
+    floor = now - timedelta(seconds=FULL_SWEEP_WINDOW_S)
+    seen = set(keep)
+    out: dict[str, str] = {}
+    for run_id, updated in settled.items():
+        at = _parse(updated)
+        if run_id in seen or (at is not None and at >= floor):
+            out[run_id] = updated
+    return out
 
 
 def save_cursor(path: Path, cursor: Mapping[str, Any]) -> None:
@@ -721,6 +833,12 @@ class Outcome:
     specs: list[rules.EventSpec] = field(default_factory=list)
     github: str = "ok"
     langfuse: str = "skipped"
+    # False when a listing was truncated or an item was skipped on an API error.
+    github_complete: bool = True
+    langfuse_complete: bool = True
+    # Completed runs whose item succeeded (settled once their appends land), and every run seen.
+    settled: dict[str, str] = field(default_factory=dict)
+    run_ids: set[str] = field(default_factory=set)
 
 
 def _sentinel_specs(
@@ -744,13 +862,68 @@ def _sentinel_specs(
     return specs
 
 
-def _collect_github(gh: Api, out: Outcome, since: str | None, max_pages: int) -> None:
+def _reason(exc: Exception) -> str:
+    return str(exc) if isinstance(exc, ApiError) else type(exc).__name__
+
+
+def _runs_listing(
+    gh: Api, out: Outcome, repo: str, workflow: str, since: str | None, max_pages: int
+) -> list[dict[str, Any]]:
+    """One workflow's runs; a failed listing marks github "error" and yields nothing."""
+    try:
+        runs, truncated = list_runs(gh, repo, workflow, created_since=since, max_pages=max_pages)
+    except (ApiError, *DATA_ERRORS) as exc:
+        warn(f"{workflow} runs not listed ({_reason(exc)})")
+        out.github = "error"
+        return []
+    if truncated:
+        out.github_complete = False
+    return runs
+
+
+def _run_item(
+    out: Outcome,
+    run: Mapping[str, Any],
+    settled: Mapping[str, str],
+    derive: Callable[[], list[rules.EventSpec]],
+) -> None:
+    """Derive one run (all attempts) in isolation; a settled, unchanged run is skipped."""
+    run_id, updated = str(run.get("id")), run.get("updated_at")
+    out.run_ids.add(run_id)
+    if isinstance(updated, str) and settled.get(run_id) == updated:
+        return
+    try:
+        specs = derive()
+    except ApiError as exc:
+        warn(f"run {run_id} skipped ({exc})")
+        out.github_complete = False
+        return
+    except DATA_ERRORS as exc:
+        warn(f"run {run_id} skipped ({type(exc).__name__})")
+        return
+    out.specs += specs
+    if run.get("status") == "completed" and isinstance(updated, str):
+        out.settled[run_id] = updated
+
+
+def _collect_github(
+    gh: Api,
+    out: Outcome,
+    since: str | None,
+    max_pages: int,
+    *,
+    settled: Mapping[str, str],
+    authors: frozenset[str],
+) -> None:
     for workflow in SENTINEL_RUN_WORKFLOWS:
-        for run in list_runs(
-            gh, rules.SENTINEL, workflow, created_since=since, max_pages=max_pages
-        ):
-            out.specs += _sentinel_specs(
-                gh, workflow, run, lambda run=run: run_attempts(gh, rules.SENTINEL, run)
+        for run in _runs_listing(gh, out, rules.SENTINEL, workflow, since, max_pages):
+            _run_item(
+                out,
+                run,
+                settled,
+                lambda workflow=workflow, run=run: _sentinel_specs(
+                    gh, workflow, run, lambda: run_attempts(gh, rules.SENTINEL, run)
+                ),
             )
 
     scenarios: dict[int, str | None] = {}
@@ -764,18 +937,17 @@ def _collect_github(gh: Api, out: Outcome, since: str | None, max_pages: int) ->
             scenarios[number] = ref if rules.SCENARIO_RE.match(ref) else None
         return scenarios[number]
 
-    for run in list_runs(
-        gh, rules.DEPLOYMENT, APP_WORKFLOW, created_since=since, max_pages=max_pages
-    ):
+    def app_specs(run: Mapping[str, Any]) -> list[rules.EventSpec]:
         sha = str(run["head_sha"])
         commit: Any = run.get("head_commit")
         commit = commit if isinstance(commit, Mapping) else {}
         number, version = app_version(sha, commit.get("message"))
         scenario = scenario_of(number)
+        specs: list[rules.EventSpec] = []
         for n in range(1, int(run.get("run_attempt") or 1) + 1):
             job = _job(attempt_jobs(gh, rules.DEPLOYMENT, int(run["id"]), n), APP_JOB)
             if job is not None:
-                out.specs += app_deploy_events(
+                specs += app_deploy_events(
                     job,
                     run_id=int(run["id"]),
                     run_attempt=n,
@@ -783,18 +955,29 @@ def _collect_github(gh: Api, out: Outcome, since: str | None, max_pages: int) ->
                     version=version,
                     scenario=scenario,
                 )
+        return specs
+
+    for run in _runs_listing(gh, out, rules.DEPLOYMENT, APP_WORKFLOW, since, max_pages):
+        _run_item(out, run, settled, lambda run=run: app_specs(run))
 
     for page in range(1, max_pages + 1):
-        pulls = gh.get(
-            f"/repos/{rules.DEPLOYMENT}/pulls",
-            {
-                "state": "all",
-                "sort": "updated",
-                "direction": "desc",
-                "per_page": PER_PAGE,
-                "page": page,
-            },
-        )
+        try:
+            pulls = gh.get(
+                f"/repos/{rules.DEPLOYMENT}/pulls",
+                {
+                    "state": "all",
+                    "sort": "updated",
+                    "direction": "desc",
+                    "per_page": PER_PAGE,
+                    "page": page,
+                },
+            )
+            if not isinstance(pulls, list):
+                raise TypeError("pulls")
+        except (ApiError, *DATA_ERRORS) as exc:
+            warn(f"pulls not listed ({_reason(exc)})")
+            out.github = "error"
+            return
         stop = len(pulls) < PER_PAGE
         for pull in pulls:
             if since and str(pull.get("updated_at") or "") < since:
@@ -802,12 +985,27 @@ def _collect_github(gh: Api, out: Outcome, since: str | None, max_pages: int) ->
                 break
             if not REVERT_BRANCH_RE.match(str((pull.get("head") or {}).get("ref") or "")):
                 continue
-            reviews = gh.get(
-                f"/repos/{rules.DEPLOYMENT}/pulls/{pull['number']}/reviews", {"per_page": PER_PAGE}
-            )
-            out.specs += revert_pr_events(pull, [r for r in reviews if isinstance(r, dict)])
+            number = pull.get("number")
+            reason = revert_pr_accepted(pull, authors)
+            if reason is not None:
+                warn(f"PR #{number} skipped: {reason}")
+                continue
+            try:
+                reviews = gh.get(
+                    f"/repos/{rules.DEPLOYMENT}/pulls/{int(number)}/reviews",
+                    {"per_page": PER_PAGE},
+                )
+                out.specs += revert_pr_events(
+                    pull, [r for r in reviews if isinstance(r, dict)], authors
+                )
+            except ApiError as exc:
+                warn(f"PR #{number} skipped ({exc})")
+                out.github_complete = False
+            except DATA_ERRORS as exc:
+                warn(f"PR #{number} skipped ({type(exc).__name__})")
         if stop:
-            break
+            return
+    out.github_complete = False  # the last allowed page was full
 
 
 def _collect_langfuse(
@@ -816,13 +1014,30 @@ def _collect_langfuse(
     params: dict[str, str | int] = {"name": TRACE_NAME}
     if since:
         params["fromTimestamp"] = since
-    for trace in _langfuse_pages(lf, "/api/public/traces", params, max_pages):
+    try:
+        traces, truncated = _langfuse_pages(lf, "/api/public/traces", params, max_pages)
+    except (ApiError, *DATA_ERRORS) as exc:
+        warn(f"traces not listed ({_reason(exc)})")
+        out.langfuse = "error"
+        return
+    if truncated:
+        out.langfuse_complete = False
+    for trace in traces:
         if not isinstance(trace.get("id"), str):
             continue
-        observations = _langfuse_pages(
-            lf, "/api/public/observations", {"traceId": trace["id"]}, MAX_PAGES_FULL
-        )
-        spec = trace_event(trace, observations, base_url=base, now=now)
+        try:
+            # Observation truncation is ignored: MAX_SPANS caps the summary anyway.
+            observations, _ = _langfuse_pages(
+                lf, "/api/public/observations", {"traceId": trace["id"]}, MAX_PAGES_FULL
+            )
+            spec = trace_event(trace, observations, base_url=base, now=now)
+        except ApiError as exc:
+            warn(f"trace {trace['id'][:12]} skipped ({exc})")
+            out.langfuse_complete = False
+            continue
+        except DATA_ERRORS as exc:
+            warn(f"trace {trace['id'][:12]} skipped ({type(exc).__name__})")
+            continue
         if spec is None:
             continue
         try:
@@ -842,17 +1057,26 @@ def collect(
     max_pages: int,
     now: datetime,
     lf_base: str = "",
+    settled: Mapping[str, str] | None = None,
+    revert_authors: frozenset[str] | None = None,
 ) -> Outcome:
     out = Outcome()
     try:
-        _collect_github(gh, out, github_since, max_pages)
+        _collect_github(
+            gh,
+            out,
+            github_since,
+            max_pages,
+            settled=settled or {},
+            authors=DEFAULT_AUTHORS if revert_authors is None else revert_authors,
+        )
     except (ApiError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         warn(f"github pull failed ({exc if isinstance(exc, ApiError) else type(exc).__name__})")
         out.github = "error"
     if lf is not None:
         try:
+            out.langfuse = "ok"  # a failed traces listing sets "error"
             _collect_langfuse(lf, out, langfuse_since, max_pages, now, lf_base)
-            out.langfuse = "ok"
         except (ApiError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             warn(
                 f"langfuse pull failed ({exc if isinstance(exc, ApiError) else type(exc).__name__})"
@@ -930,11 +1154,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cursor = load_cursor(args.cursor)
         full, gh_since, lf_since = choose_mode(
-            cursor,
-            full_flag=env.get("OPS_FULL_SWEEP") or "",
-            schedule=env.get("OPS_SCHEDULE") or "",
-            now=now,
+            cursor, full_flag=env.get("OPS_FULL_SWEEP") or "", now=now
         )
+        old_settled: dict[str, str] = (cursor or {}).get("settled") or {}
         mode = "full" if full else "incremental"
         lf_base = env.get("LANGFUSE_BASE_URL") or ""
         lf_public = env.get("LANGFUSE_PUBLIC_KEY") or ""
@@ -953,6 +1175,8 @@ def main(argv: list[str] | None = None) -> int:
             max_pages=MAX_PAGES_FULL if full else MAX_PAGES,
             now=now,
             lf_base=lf_base,
+            settled=old_settled,
+            revert_authors=parse_authors(env.get("OPS_REVERT_PR_AUTHORS")),
         )
         status = {"github": outcome.github, "langfuse": outcome.langfuse}
         derived = len(outcome.specs)
@@ -962,25 +1186,30 @@ def main(argv: list[str] | None = None) -> int:
             token=env.get("OPS_LEDGER_TOKEN") or token,
             remote=env.get("OPS_LEDGER_REMOTE") or ledger.LEDGER_REMOTE,
         )
-        old_since = (cursor or {}).get("since") or {}
+        old = cursor or {}
+        old_since = old.get("since") or {}
         stamp = _fmt(now)
-        swept_ok = complete and outcome.github == "ok" and outcome.langfuse != "error"
+        github_ok = complete and outcome.github == "ok" and outcome.github_complete
+        langfuse_ok = complete and outcome.langfuse == "ok" and outcome.langfuse_complete
+        # A skipped (unconfigured) LangFuse does not hold the sweep back.
+        swept_ok = github_ok and (langfuse_ok or outcome.langfuse == "skipped")
+        settled = {**old_settled, **(outcome.settled if complete else {})}
         save_cursor(
             args.cursor,
             {
                 "version": 1,
                 "updated_at": stamp,
                 "last_full_sweep_at": (
-                    stamp if full and swept_ok else (cursor or {}).get("last_full_sweep_at")
+                    stamp if full and swept_ok else old.get("last_full_sweep_at")
+                ),
+                "last_full_sweep_attempt_at": (
+                    stamp if full else old.get("last_full_sweep_attempt_at")
                 ),
                 "since": {
-                    "github": stamp
-                    if complete and outcome.github == "ok"
-                    else old_since.get("github"),
-                    "langfuse": stamp
-                    if complete and outcome.langfuse == "ok"
-                    else old_since.get("langfuse"),
+                    "github": stamp if github_ok else old_since.get("github"),
+                    "langfuse": stamp if langfuse_ok else old_since.get("langfuse"),
                 },
+                "settled": prune_settled(settled, outcome.run_ids, now),
             },
         )
     except Exception as exc:  # noqa: BLE001 - a pull failure is a status, never a failed job

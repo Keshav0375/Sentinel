@@ -7,9 +7,15 @@ handed to Pages (10.5). The file is read as YAML; nothing here calls GitHub.
 
 from __future__ import annotations
 
+import json
+import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -65,7 +71,7 @@ def _steps() -> dict[str, dict[str, Any]]:
 def test_triggers() -> None:
     on = _on(_doc())
 
-    assert [entry["cron"] for entry in on["schedule"]] == ["*/30 * * * *", "17 3 * * 0"]
+    assert [entry["cron"] for entry in on["schedule"]] == ["*/30 * * * *"]
     assert on["workflow_run"]["workflows"] == TRIGGER_WORKFLOWS
     names = {
         yaml.safe_load(path.read_text(encoding="utf-8"))["name"]
@@ -101,9 +107,110 @@ def test_checkout_is_default_branch() -> None:
     assert str(checkout["uses"]).startswith("actions/checkout@")
     assert set(checkout["with"]) == {"persist-credentials"}
     assert checkout["with"]["persist-credentials"] is False
-    assert "workflow_run.head" not in WORKFLOW.read_text(encoding="utf-8")
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "workflow_run.head_sha" not in text and "workflow_run.head_branch" not in text
     gate_env = _steps()["lf-gate"]["env"]
     assert gate_env["TRIGGER_WORKFLOW"] == "${{ github.event.workflow_run.name }}"
+
+
+def test_job_gate() -> None:
+    """Schedule, a dispatch from main, or a same-repo run of one of the trigger workflow files."""
+    condition = " ".join(_job()["if"].split())
+
+    assert condition.startswith("github.event_name == 'schedule' || ")
+    assert "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')" in (
+        condition
+    )
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in condition
+    match = re.search(r"fromJSON\('(\[.*?\])'\), github\.event\.workflow_run\.path\)", condition)
+    assert match is not None, condition
+    paths = json.loads(match.group(1))
+    assert len(paths) == 7
+    names = []
+    for path in paths:
+        assert (REPO_ROOT / path).is_file(), path
+        names.append(yaml.safe_load((REPO_ROOT / path).read_text(encoding="utf-8"))["name"])
+    assert names == TRIGGER_WORKFLOWS
+
+
+def _stub_bin(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    git = (
+        'echo "$*" >> "$STUB_LOG"\n'
+        'case "$1" in ls-remote) exit "$STUB_RC" ;; clone) mkdir -p "$7/.git" ;; esac\n'
+        "exit 0"
+    )
+    for name, body in (("timeout", 'shift; exec "$@"'), ("git", git)):
+        stub = bin_dir / name
+        stub.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        stub.chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.parametrize("step_id", ["clone", "refresh"])
+@pytest.mark.parametrize(("stub_rc", "rc"), [("0", 0), ("2", 0), ("128", 1)])
+def test_clone_state_behaviour(tmp_path: Path, step_id: str, stub_rc: str, rc: int) -> None:
+    bash = shutil.which("bash")
+    assert bash is not None
+    run = _steps()[step_id]["run"]
+    assert "|| true" not in run
+    runner_temp = tmp_path / "runner"
+    runner_temp.mkdir()
+    if step_id == "refresh":
+        (runner_temp / "ledger").mkdir()  # the clone step left an empty dir, no .git
+    log = tmp_path / "git.log"
+    env = {
+        "PATH": f"{_stub_bin(tmp_path)}{os.pathsep}{os.environ.get('PATH', '')}",
+        "STUB_RC": stub_rc,
+        "STUB_LOG": str(log),
+        "RUNNER_TEMP": str(runner_temp),
+    }
+
+    proc = subprocess.run(
+        [bash, "-c", run], env=env, capture_output=True, text=True, timeout=30, check=False
+    )
+
+    assert proc.returncode == rc, proc.stdout + proc.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert calls[0].startswith("ls-remote --exit-code --heads ")
+    cloned = [c for c in calls if c.startswith("clone ")]
+    if stub_rc == "0":
+        assert cloned and cloned[0].endswith(f"{runner_temp}/ledger")
+    else:
+        assert not cloned
+    if stub_rc == "2":
+        assert (runner_temp / "ledger").is_dir()
+    if stub_rc == "128":
+        assert "::error::" in proc.stdout
+
+
+def test_refresh_pulls_an_existing_clone(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    assert bash is not None
+    runner_temp = tmp_path / "runner"
+    (runner_temp / "ledger" / ".git").mkdir(parents=True)
+    log = tmp_path / "git.log"
+    env = {
+        "PATH": f"{_stub_bin(tmp_path)}{os.pathsep}{os.environ.get('PATH', '')}",
+        "STUB_RC": "0",
+        "STUB_LOG": str(log),
+        "RUNNER_TEMP": str(runner_temp),
+    }
+
+    proc = subprocess.run(
+        [bash, "-c", _steps()["refresh"]["run"]],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        f"-C {runner_temp}/ledger pull --quiet --ff-only"
+    ]
 
 
 def test_steps_order() -> None:
@@ -179,7 +286,8 @@ def test_langfuse_optional() -> None:
     assert env["LANGFUSE_SECRET_KEY"] == "${{ steps.kv.outputs.langfuse-secret-key }}"
     assert env["LANGFUSE_BASE_URL"] == "${{ steps.kv.outputs.langfuse-base-url }}"
     assert env["OPS_FULL_SWEEP"] == "${{ inputs.full }}"
-    assert env["OPS_SCHEDULE"] == "${{ github.event.schedule }}"
+    assert "OPS_SCHEDULE" not in env
+    assert env["OPS_REVERT_PR_AUTHORS"] == "${{ vars.OPS_REVERT_PR_AUTHORS }}"
     gate = steps["lf-gate"]["run"]
     assert "schedule|workflow_dispatch" in gate
     assert '"[sentinel] incident — response pipeline"' in gate

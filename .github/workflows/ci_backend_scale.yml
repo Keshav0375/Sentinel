@@ -166,13 +166,15 @@ jobs:
   # Ops events (ops-dashboard §4.1, backend task 10.2): scale.changed on the ops-ledger branch after the scale
   # job. contents: write only here; no login and no secret. The environment makes SENTINEL_KEEP_WARM visible.
   # Every step is continue-on-error and the ops-event action never fails, so a ledger fault never reds the run.
+  # Job-level continue-on-error: a timeout or runner fault never reds the run.
   ops-events:
     name: Record the scale change
     needs: [preflight, scale]
     if: always() && needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-24.04
     environment: sentinel-dev
-    timeout-minutes: 5
+    timeout-minutes: 8
+    continue-on-error: true
     permissions:
       contents: write
     steps:

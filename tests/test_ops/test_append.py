@@ -237,3 +237,73 @@ def test_ledger_never_force_pushes() -> None:
     text = LEDGER_PATH.read_text()
     assert "--force" not in text
     assert "+{commit}" not in text
+
+
+def test_op_timeout_caps_at_deadline(ledger: ModuleType) -> None:
+    assert ledger.op_timeout("push", None, 0) == 30
+    assert ledger.op_timeout("write-tree", None, 0) == 10
+    assert ledger.op_timeout("fetch", 100.0, 95.0) == 5.0
+    with pytest.raises(ledger.LedgerGitError, match="deadline"):
+        ledger.op_timeout("push", 100.0, 100.0)
+
+
+def test_append_stops_at_deadline(
+    ledger: ModuleType, make_event: MakeEvent, remote: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = {"now": 0.0}
+
+    def tick() -> float:
+        clock["now"] += 50.0
+        return clock["now"]
+
+    pushes: list[str] = []
+
+    def rejected(git: Any, remote_url: str, commit: str, branch: str) -> bool:
+        pushes.append(commit)
+        return False
+
+    monkeypatch.setattr(ledger, "_monotonic", tick)
+    monkeypatch.setattr(ledger, "_push", rejected)
+    sleeps: list[float] = []
+    with pytest.raises(ledger.LedgerPushError) as caught:
+        ledger.append(make_event(), remote=remote.uri, max_attempts=10, sleep=sleeps.append)
+    assert "deadline" in str(caught.value)
+    assert len(pushes) < 10
+    assert all(s <= ledger.APPEND_DEADLINE_S for s in sleeps)
+
+
+def test_push_rejected_by_hook_fails_fast(
+    ledger: ModuleType, make_event: MakeEvent, remote: Any
+) -> None:
+    hook = remote.path / "hooks/pre-receive"
+    hook.write_text('#!/bin/sh\necho "GH013: Repository rule violations found" >&2\nexit 1\n')
+    hook.chmod(0o755)
+    sleeps: list[float] = []
+    with pytest.raises(ledger.LedgerPushRejectedError) as caught:
+        ledger.append(
+            make_event(), remote=remote.uri, token="s3cr3t-tok", max_attempts=5, sleep=sleeps.append
+        )
+    assert sleeps == []
+    assert "rejected" in str(caught.value)
+    assert "s3cr3t-tok" not in str(caught.value)
+    assert isinstance(caught.value, ledger.LedgerPushError)  # CLI exit 3 still applies
+    assert remote.git("ls-remote", "--heads", str(remote.path)) == ""
+
+
+def test_push_non_fast_forward_retries(
+    ledger: ModuleType, make_event: MakeEvent, remote: Any, tmp_path: Path
+) -> None:
+    """A push whose parent is behind the tip is a race (False → rebuild and retry), not fatal."""
+    assert ledger.append(make_event(source_id="1.1"), remote=remote.uri).status == "written"
+    work = tmp_path / "stale"
+    work.mkdir()
+    git = ledger._Git(work, None)
+    git.run("init", "-q")
+    tip = ledger._fetch_tip(git, remote.uri, ledger.LEDGER_BRANCH)
+    git.run("read-tree", tip)
+    ledger._add_blob(git, "events/stale.json", b"{}")
+    stale = ledger._commit(git, tip, "stale")
+    assert ledger.append(make_event(source_id="2.1"), remote=remote.uri).status == "written"
+
+    assert ledger._push(git, remote.uri, stale, ledger.LEDGER_BRANCH) is False
+    assert "events/stale.json" not in remote.files()

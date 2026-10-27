@@ -40,6 +40,20 @@ INCIDENT = "0b6c3d2e-1f4a-4b5c-8d9e-0a1b2c3d4e5f"
 APP_SOURCE = "gha:Keshav0375/Sentinel-deployment/ci_app_deployment.yml"
 # Window filters: served from the same fixture, recorded in the URL.
 IGNORED_PARAMS = ("created", "fromTimestamp")
+# Every fixture run except 18800000102 (in progress).
+COMPLETED_RUNS = {
+    "18800000101",
+    "18800000301",
+    "18800000302",
+    "18800000401",
+    "18800000402",
+    "18800000501",
+    "18800000601",
+    "18800000602",
+    "18800000201",
+    "18800000202",
+    "18800000203",
+}
 
 
 def _route(path: str, **params: str) -> tuple[str, tuple[tuple[str, str], ...]]:
@@ -95,23 +109,42 @@ ROUTES: dict[tuple[str, tuple[tuple[str, str], ...]], str] = {
 }
 
 
-class FakeFetch:
-    """A Fetch serving fixtures by (path, query); records every request; fails on the unmapped."""
+Route = tuple[str, tuple[tuple[str, str], ...]]
+Answer = tuple[int, bytes, Mapping[str, str]]
 
-    def __init__(self, fail_hosts: tuple[str, ...] = ()) -> None:
+
+class FakeFetch:
+    """A Fetch serving fixtures by (path, query); records every request; fails on the unmapped.
+
+    `responses` overrides a route with (status, headers) answers, served in order before the
+    fixture; `bodies` replaces a route's fixture body."""
+
+    def __init__(
+        self,
+        fail_hosts: tuple[str, ...] = (),
+        responses: dict[Route, list[tuple[int, dict[str, str]]]] | None = None,
+        bodies: dict[Route, Any] | None = None,
+    ) -> None:
         self.calls: list[tuple[str, str, dict[str, str]]] = []
         self.fail_hosts = fail_hosts
+        self.responses = responses or {}
+        self.bodies = bodies or {}
 
-    def __call__(self, url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
+    def __call__(self, url: str, headers: Mapping[str, str]) -> Answer:
         self.calls.append(("GET", url, dict(headers)))
         parts = urllib.parse.urlsplit(url)
         if parts.hostname in self.fail_hosts:
             raise urllib.error.URLError("connection refused")
         params = {k: v for k, v in urllib.parse.parse_qsl(parts.query) if k not in IGNORED_PARAMS}
         key = (parts.path, tuple(sorted(params.items())))
+        if self.responses.get(key):
+            status, answer_headers = self.responses[key].pop(0)
+            return status, b"{}", answer_headers
+        if key in self.bodies:
+            return 200, json.dumps(self.bodies[key]).encode(), {}
         if key not in ROUTES:
             raise AssertionError(f"unmapped request {key}")
-        return 200, (FIXTURES / ROUTES[key]).read_bytes()
+        return 200, (FIXTURES / ROUTES[key]).read_bytes(), {}
 
 
 @pytest.fixture(autouse=True)
@@ -262,8 +295,8 @@ def test_scale_manual_down_is_event_time_only(reconcile: ModuleType) -> None:
         if step["name"].startswith("Scale the backend down (manual"):
             step["conclusion"] = "success"
 
-    def fetch(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
-        return 200, json.dumps({"total_count": len(jobs), "jobs": jobs}).encode()
+    def fetch(url: str, headers: Mapping[str, str]) -> Answer:
+        return 200, json.dumps({"total_count": len(jobs), "jobs": jobs}).encode(), {}
 
     assert reconcile.scale_run_events(reconcile.github(None, fetch), manual, 1) == []
 
@@ -391,7 +424,11 @@ def test_revert_pr_events(reconcile: ModuleType) -> None:
         "reviewer": "Keshav0375",
         "waited_s": 2400.0,
     }
-    assert "incident_id" not in merged[0].chain
+    assert merged[0].chain == {
+        "pr": 55,
+        "sha": "2c8f0e7",
+        "incident_id": "a1b2c3d4-0000-4000-8000-000000000055",
+    }
     assert [s.kind for s in closed] == ["revert_pr.opened", "revert_pr.closed"]
     assert closed[-1].data["waited_s"] == 3600.0
     assert events(61) == []
@@ -494,9 +531,10 @@ def test_secret_like_span_name_skips_the_trace(
     observations[0]["name"] = "Bearer abcdefghijklmnopqrstuvwxyz0123"
     lf_fetch = FakeFetch()
 
-    def fetch(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
+    def fetch(url: str, headers: Mapping[str, str]) -> Answer:
         if "traceId=" + T1 in url:
-            return 200, json.dumps({"data": observations, "meta": {"totalPages": 1}}).encode()
+            body = json.dumps({"data": observations, "meta": {"totalPages": 1}}).encode()
+            return 200, body, {}
         return lf_fetch(url, headers)
 
     out = reconcile.Outcome()
@@ -536,17 +574,17 @@ def test_every_derived_spec_builds(reconcile: ModuleType) -> None:
 def test_api_retries_then_fails_with_path_only(
     reconcile: ModuleType, no_sleep: list[float]
 ) -> None:
-    answers = [(502, b""), (503, b""), (200, b'{"ok": true}')]
+    answers: list[Answer] = [(502, b"", {}), (503, b"", {}), (200, b'{"ok": true}', {})]
 
-    def flaky(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
+    def flaky(url: str, headers: Mapping[str, str]) -> Answer:
         return answers.pop(0)
 
     api = reconcile.Api("https://api.github.com", {}, flaky)
     assert api.get("/x", {"q": "secret-query"}) == {"ok": True}
     assert no_sleep == [2, 4]
 
-    def missing(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
-        return 404, b"{}"
+    def missing(url: str, headers: Mapping[str, str]) -> Answer:
+        return 404, b"{}", {}
 
     with pytest.raises(reconcile.ApiError) as err:
         reconcile.Api("https://api.github.com", {"Authorization": "x"}, missing).get(
@@ -554,7 +592,7 @@ def test_api_retries_then_fails_with_path_only(
         )
     assert str(err.value) == "GET /repos/a/b answered HTTP 404"
 
-    def down(url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
+    def down(url: str, headers: Mapping[str, str]) -> Answer:
         raise urllib.error.URLError("refused")
 
     with pytest.raises(reconcile.ApiError):
@@ -570,6 +608,7 @@ def test_only_get_requests(reconcile: ModuleType, monkeypatch: pytest.MonkeyPatc
         def __init__(self, body: bytes) -> None:
             self.status = 200
             self.body = body
+            self.headers: dict[str, str] = {}
 
         def read(self) -> bytes:
             return self.body
@@ -583,7 +622,7 @@ def test_only_get_requests(reconcile: ModuleType, monkeypatch: pytest.MonkeyPatc
     def urlopen(request: urllib.request.Request, timeout: float) -> Response:
         assert timeout == 30
         seen.append(request)
-        _, body = fake(request.full_url, dict(request.header_items()))
+        _, body, _ = fake(request.full_url, dict(request.header_items()))
         return Response(body)
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
@@ -630,25 +669,55 @@ def _cursor(since: str = "2026-10-25T06:00:00Z", swept: str = "2026-10-24T03:17:
     }
 
 
+FLOOR = "2026-07-27T12:00:00Z"  # NOW - 90 days
+
+
 def test_cursor_modes(reconcile: ModuleType, tmp_path: Path) -> None:
+    """The weekly full sweep is date-triggered: over 7 days since the last one."""
     choose = reconcile.choose_mode
 
     assert reconcile.load_cursor(tmp_path / "missing.json") is None
     (tmp_path / "bad.json").write_text('{"version": 2}')
     assert reconcile.load_cursor(tmp_path / "bad.json") is None
-    assert choose(None, full_flag="", schedule="", now=NOW) == (True, None, None)
+    assert choose(None, full_flag="", now=NOW) == (True, FLOOR, FLOOR)
     fresh = _cursor()
-    assert choose(fresh, full_flag="true", schedule="", now=NOW)[0] is True
-    assert choose(fresh, full_flag="", schedule="17 3 * * 0", now=NOW)[0] is True
-    stale = _cursor(swept="2026-10-16T11:00:00Z")
-    assert choose(stale, full_flag="", schedule="*/30 * * * *", now=NOW)[0] is True
-    assert choose(fresh, full_flag="false", schedule="*/30 * * * *", now=NOW) == (
+    assert choose(fresh, full_flag="true", now=NOW)[0] is True
+    assert choose(_cursor(swept="2026-10-19T12:00:00Z"), full_flag="", now=NOW)[0] is False
+    assert choose(_cursor(swept="2026-10-18T12:00:00Z"), full_flag="", now=NOW)[0] is False
+    assert choose(_cursor(swept="2026-10-18T11:59:59Z"), full_flag="", now=NOW)[0] is True
+    assert choose(fresh, full_flag="false", now=NOW) == (
         False,
         "2026-10-25T00:00:00Z",
         "2026-10-25T00:00:00Z",
     )
     reconcile.save_cursor(tmp_path / "meta" / "cursor.json", fresh)
-    assert reconcile.load_cursor(tmp_path / "meta" / "cursor.json") == fresh
+    assert reconcile.load_cursor(tmp_path / "meta" / "cursor.json") == {**fresh, "settled": {}}
+    settled = {**fresh, "settled": {"18800000101": "2026-10-25T09:41:00Z"}}
+    reconcile.save_cursor(tmp_path / "s.json", settled)
+    assert reconcile.load_cursor(tmp_path / "s.json") == settled
+    reconcile.save_cursor(tmp_path / "x.json", {**fresh, "settled": ["not", "a", "map"]})
+    assert reconcile.load_cursor(tmp_path / "x.json") == {**fresh, "settled": {}}
+    reconcile.save_cursor(tmp_path / "y.json", {**fresh, "last_full_sweep_attempt_at": "soon"})
+    assert reconcile.load_cursor(tmp_path / "y.json") is None
+    assert not hasattr(reconcile, "FULL_SWEEP_CRON")
+
+
+def test_full_sweep_window_is_90_days(reconcile: ModuleType) -> None:
+    assert reconcile.choose_mode(None, full_flag="", now=NOW) == (True, FLOOR, FLOOR)
+    old = _cursor(since="2026-04-08T12:00:00Z", swept="2026-10-24T03:17:00Z")  # 200 days ago
+    assert reconcile.choose_mode(old, full_flag="", now=NOW) == (False, FLOOR, FLOOR)
+    unset = {**_cursor(), "since": {"github": None, "langfuse": None}}
+    assert reconcile.choose_mode(unset, full_flag="", now=NOW) == (False, FLOOR, FLOOR)
+
+
+def test_failed_sweep_retried_daily(reconcile: ModuleType) -> None:
+    due = _cursor(swept="2026-10-17T12:00:00Z")  # 8 days old
+    recent = {**due, "last_full_sweep_attempt_at": "2026-10-25T11:00:00Z"}  # 1 h ago
+    day_old = {**due, "last_full_sweep_attempt_at": "2026-10-24T11:00:00Z"}  # 25 h ago
+
+    assert reconcile.choose_mode(recent, full_flag="", now=NOW)[0] is False
+    assert reconcile.choose_mode(day_old, full_flag="", now=NOW)[0] is True
+    assert reconcile.choose_mode(recent, full_flag="true", now=NOW)[0] is True
 
 
 def _ledger_with(tmp_path: Path, ids: list[str]) -> Path:
@@ -665,7 +734,7 @@ def _main_env(monkeypatch: pytest.MonkeyPatch, **extra: str) -> None:
         "LANGFUSE_PUBLIC_KEY",
         "LANGFUSE_SECRET_KEY",
         "OPS_FULL_SWEEP",
-        "OPS_SCHEDULE",
+        "OPS_REVERT_PR_AUTHORS",
         "OPS_LEDGER_TOKEN",
         "OPS_LEDGER_REMOTE",
     ):
@@ -714,6 +783,8 @@ def test_cursor_not_advanced_on_error(
     saved = json.loads(cursor_path.read_text())
     assert saved["since"] == {"github": "2026-10-25T12:00:00Z", "langfuse": "2026-10-25T06:00:00Z"}
     assert saved["last_full_sweep_at"] == "2026-10-24T03:17:00Z"  # incremental run
+    assert saved["last_full_sweep_attempt_at"] is None
+    assert set(saved["settled"]) == COMPLETED_RUNS  # every append landed (nothing was missing)
     assert any("created=" in url for _, url, _ in fetch.calls)
 
 
@@ -779,7 +850,9 @@ def test_main_end_to_end(
     assert json.loads(status.read_text()) == {"github": "ok", "langfuse": "skipped"}
     saved = json.loads(cursor.read_text())
     assert saved["last_full_sweep_at"] == "2026-10-25T12:00:00Z"
+    assert saved["last_full_sweep_attempt_at"] == "2026-10-25T12:00:00Z"
     assert saved["since"] == {"github": "2026-10-25T12:00:00Z", "langfuse": None}
+    assert set(saved["settled"]) == COMPLETED_RUNS
 
     clone = tmp_path / "clone"
     subprocess.run(
@@ -788,9 +861,18 @@ def test_main_end_to_end(
         check=True,
         capture_output=True,
     )
+    fetch = FakeFetch()
+    monkeypatch.setattr(reconcile, "urllib_fetch", fetch)
     second = run(clone)
     assert "mode=incremental" in second
     assert "written=0" in second
+    # Settled runs are skipped: only the in-progress run's attempts are fetched again.
+    fetched = {
+        url.split("/actions/runs/")[1].split("/")[0]
+        for _, url, _ in fetch.calls
+        if "/attempts/" in url
+    }
+    assert fetched == {"18800000102"}
     assert len(remote.events()) == derived
     revert = [
         json.loads(remote.git("show", f"ops-ledger:{p}"))
@@ -804,3 +886,225 @@ def test_bad_arguments_exit_2(reconcile: ModuleType) -> None:
     with pytest.raises(SystemExit) as exc:
         reconcile.main(["run", "--ledger", "x"])
     assert exc.value.code == 2
+
+
+# ── Rate limits ───────────────────────────────────────────────────────────────
+
+
+def test_rate_limit_retry_after_honoured(reconcile: ModuleType, no_sleep: list[float]) -> None:
+    answers: list[Answer] = [(429, b"", {"retry-after": "7"}), (200, b'{"ok": true}', {})]
+
+    def fetch(url: str, headers: Mapping[str, str]) -> Answer:
+        return answers.pop(0)
+
+    assert reconcile.Api("https://api.github.com", {}, fetch).get("/x") == {"ok": True}
+    assert no_sleep == [7]
+
+
+def test_rate_limit_reset_bounded(
+    reconcile: ModuleType, no_sleep: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = 1_800_000_000
+    monkeypatch.setattr(reconcile, "_clock", lambda: float(now))
+
+    def limited(reset: int) -> Any:
+        answers: list[Answer] = [
+            (403, b"", {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(reset)}),
+            (200, b'{"ok": true}', {}),
+        ]
+
+        def fetch(url: str, headers: Mapping[str, str]) -> Answer:
+            return answers.pop(0)
+
+        return reconcile.Api("https://api.github.com", {}, fetch)
+
+    assert limited(now + 10).get("/x") == {"ok": True}
+    assert no_sleep == [11]
+    no_sleep.clear()
+    with pytest.raises(reconcile.ApiError, match="rate limited"):
+        limited(now + 3600).get("/repos/a/b")
+    assert no_sleep == []
+
+    def forbidden(url: str, headers: Mapping[str, str]) -> Answer:
+        return 403, b"{}", {"x-ratelimit-remaining": "4999"}
+
+    with pytest.raises(reconcile.ApiError, match="HTTP 403"):
+        reconcile.Api("https://api.github.com", {}, forbidden).get("/y")
+    assert no_sleep == []
+
+
+# ── Item isolation, settled runs, truncation ──────────────────────────────────
+
+
+def _collect_with(reconcile: ModuleType, fetch: FakeFetch, **kwargs: Any) -> Any:
+    return reconcile.collect(
+        reconcile.github("test-gh-value", fetch),
+        None,
+        github_since=None,
+        langfuse_since=None,
+        max_pages=kwargs.pop("max_pages", reconcile.MAX_PAGES_FULL),
+        now=NOW,
+        lf_base=LF_BASE,
+        **kwargs,
+    )
+
+
+def _source_ids(outcome: Any) -> set[str]:
+    return {s.source_id for s in outcome.specs}
+
+
+def test_settled_runs_skip_jobs(reconcile: ModuleType) -> None:
+    baseline = _collect(reconcile, langfuse=False)
+    fetch = FakeFetch()
+
+    outcome = _collect_with(reconcile, fetch, settled={"18800000101": "2026-10-25T09:41:00Z"})
+
+    assert not [u for _, u, _ in fetch.calls if "/runs/18800000101/attempts/" in u]
+    assert "18800000101.1" not in _source_ids(outcome)
+    others = [s for s in baseline.specs if s.source_id != "18800000101.1"]
+    assert _ids(outcome.specs) == _ids(others)
+    assert set(outcome.settled) == COMPLETED_RUNS - {"18800000101"}
+    assert "18800000101" in outcome.run_ids
+    # A changed updated_at (a re-run) is fetched again.
+    rerun = _collect_with(reconcile, FakeFetch(), settled={"18800000101": "2026-10-01T00:00:00Z"})
+    assert "18800000101.1" in _source_ids(rerun)
+
+
+def test_bad_item_is_skipped(
+    reconcile: ModuleType, no_sleep: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    baseline = _ids(_collect(reconcile, langfuse=False).specs)
+    jobs_102 = _jobs(S, 18800000102)
+    fetch = FakeFetch(responses={jobs_102: [(500, {}), (500, {}), (500, {})]})
+
+    outcome = _collect_with(reconcile, fetch)
+
+    assert (outcome.github, outcome.github_complete) == ("ok", False)
+    assert "18800000102.1" not in _source_ids(outcome)
+    assert "18800000101.1" in _source_ids(outcome)
+    assert len(outcome.specs) == len(baseline) - 1  # 102 yields build.started only
+    assert "run 18800000102 skipped" in capsys.readouterr().err
+
+    runs = _fixture("github/sentinel_runs_ci_backend_deployment.json")
+    for run in runs["workflow_runs"]:
+        if run["id"] == 18800000101:
+            del run["head_sha"]
+    fetch = FakeFetch(bodies={_runs(S, "ci_backend_deployment.yml"): runs})
+
+    outcome = _collect_with(reconcile, fetch)
+
+    assert (outcome.github, outcome.github_complete) == ("ok", True)
+    assert "18800000101.1" not in _source_ids(outcome)
+    assert "18800000102.1" in _source_ids(outcome)
+    assert "18800000101" not in outcome.settled
+    assert "KeyError" in capsys.readouterr().err
+
+
+def test_listing_failure_continues(reconcile: ModuleType) -> None:
+    fetch = FakeFetch(responses={_runs(S, "ci.yml"): [(404, {})]})
+
+    outcome = _collect_with(reconcile, fetch)
+
+    assert outcome.github == "error"
+    assert {"18800000301.1", "18800000302.1", "18800000501.1"} <= _source_ids(outcome)
+    assert "18800000401.1" in _source_ids(outcome)  # ci_validation.yml, listed after ci.yml
+    assert any(s.kind.startswith("revert_pr.") for s in outcome.specs)
+
+
+def _hundred_runs() -> dict[str, Any]:
+    run = _run("sentinel_runs_ci_validation.json", 18800000402)
+    runs = [{**run, "id": 18800009000 + i} for i in range(100)]
+    return {"total_count": 250, "workflow_runs": runs}
+
+
+def test_truncation_holds_cursor(
+    reconcile: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bodies = {_runs(S, "ci.yml"): _hundred_runs()}
+
+    outcome = _collect_with(reconcile, FakeFetch(bodies=bodies), max_pages=1)
+
+    assert (outcome.github, outcome.github_complete) == ("ok", False)
+    assert outcome.specs
+
+    ledger_dir = _ledger_with(tmp_path, _ids(outcome.specs))
+    cursor_path = tmp_path / "meta" / "cursor.json"
+    reconcile.save_cursor(cursor_path, _cursor())
+    monkeypatch.setattr(reconcile, "urllib_fetch", FakeFetch(bodies=bodies))
+    monkeypatch.setattr(reconcile, "MAX_PAGES", 1)
+    _main_env(monkeypatch, OPS_LEDGER_REMOTE=(tmp_path / "no-remote.git").as_uri())
+    argv = ["run", "--ledger", str(ledger_dir), "--cursor", str(cursor_path)]
+    argv += ["--status", str(tmp_path / "status.json"), "--now", "2026-10-25T12:00:00Z"]
+
+    assert reconcile.main(argv) == 0
+
+    saved = json.loads(cursor_path.read_text())
+    assert saved["since"]["github"] == "2026-10-25T06:00:00Z"  # held
+    assert saved["settled"]  # the runs that were read are still settled
+
+
+# ── Revert-PR trust ───────────────────────────────────────────────────────────
+
+
+def _pull(number: int) -> dict[str, Any]:
+    return next(p for p in _fixture("github/deployment_pulls.json") if p["number"] == number)
+
+
+def test_revert_pr_fork_rejected(reconcile: ModuleType, capsys: pytest.CaptureFixture[str]) -> None:
+    fork = _pull(57)
+    fork["head"]["repo"]["full_name"] = "evil/Sentinel-deployment"
+    reviews = _fixture("github/deployment_reviews_57.json")
+    assert reconcile.revert_pr_events(fork, reviews) == []
+    assert reconcile.revert_pr_accepted(fork, reconcile.DEFAULT_AUTHORS) == (
+        "head is not Keshav0375/Sentinel-deployment"
+    )
+    deleted = _pull(57)
+    deleted["head"]["repo"] = None
+    assert reconcile.revert_pr_events(deleted, reviews) == []
+
+    pulls = _fixture("github/deployment_pulls.json")
+    pulls[0] = fork
+    pulls_route = _route(f"{D}/pulls", state="all", sort="updated", direction="desc", **PAGE1)
+    fetch = FakeFetch(bodies={pulls_route: pulls})
+
+    outcome = _collect_with(reconcile, fetch)
+
+    assert not [u for _, u, _ in fetch.calls if "/pulls/57/reviews" in u]
+    assert "Keshav0375/Sentinel-deployment#57" not in _source_ids(outcome)
+    assert "Keshav0375/Sentinel-deployment#55" in _source_ids(outcome)
+    assert "PR #57 skipped: head is not" in capsys.readouterr().err
+
+
+def test_revert_pr_wrong_author_rejected(
+    reconcile: ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pull = _pull(57)
+    pull["user"]["login"] = "mallory"
+    reviews = _fixture("github/deployment_reviews_57.json")
+
+    assert reconcile.revert_pr_events(pull, reviews) == []
+    allowed = reconcile.parse_authors("mallory, Keshav0375")
+    assert allowed == frozenset({"mallory", "keshav0375"})
+    assert [s.kind for s in reconcile.revert_pr_events(pull, reviews, allowed)][0] == (
+        "revert_pr.opened"
+    )
+    defaults = frozenset({"keshav0375", "github-actions[bot]"})
+    assert reconcile.parse_authors("") == defaults
+    assert reconcile.parse_authors(None) == defaults
+    capsys.readouterr()
+    assert reconcile.parse_authors("bad login!") == defaults
+    assert "OPS_REVERT_PR_AUTHORS" in capsys.readouterr().err
+    pull["user"]["login"] = "KESHAV0375"  # case-insensitive
+    assert reconcile.revert_pr_events(pull, reviews) != []
+
+
+def test_revert_pr_requires_marker(reconcile: ModuleType) -> None:
+    pull = _pull(57)
+    pull["body"] = "Reverts the deploy of 4f1d2a9.\n"
+    reviews = _fixture("github/deployment_reviews_57.json")
+
+    assert reconcile.revert_pr_events(pull, reviews) == []
+    assert reconcile.revert_pr_accepted(pull, reconcile.DEFAULT_AUTHORS) == "no Sentinel marker"
+    assert reconcile.revert_pr_accepted(_pull(61), reconcile.DEFAULT_AUTHORS) == (
+        "not a revert branch"
+    )

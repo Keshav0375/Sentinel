@@ -813,12 +813,14 @@ jobs:
   # Append-only facts for the ops dashboard on the ops-ledger branch. contents: write only here; no login,
   # no secrets, no environment. Every step is continue-on-error and the ops-event action never fails, so a
   # ledger fault never blocks the response. The outcome events are written after the facts they report.
+  # Job-level continue-on-error: a timeout or runner fault never reds the run.
   ops-start:
     name: Record the alert
     needs: [preflight]
     if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
+    continue-on-error: true
     permissions:
       contents: write
     steps:
@@ -863,7 +865,8 @@ jobs:
     needs: [preflight, ensure-backend-up, fetch-pr-details, run-agent-pipeline]
     if: always() && needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
+    continue-on-error: true
     permissions:
       contents: write
     steps:

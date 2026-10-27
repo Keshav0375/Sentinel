@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createHttpClient, snapshotBaseUrl, SnapshotError } from '../data/client';
 import { createFixtureClient, readFixtureOptions } from '../data/fixtures-loader';
@@ -28,8 +30,39 @@ describe('http client', () => {
   it('test_http_client_fetches_meta_under_base', async () => {
     const f = vi.fn(async () => response(meta));
     const result = await createHttpClient('/Sentinel/snapshot/', f).meta();
-    expect(f).toHaveBeenCalledWith('/Sentinel/snapshot/meta.json', expect.objectContaining({ cache: 'no-cache' }));
+    expect(f).toHaveBeenCalledWith('/Sentinel/snapshot/meta.json', expect.objectContaining({ cache: 'default' }));
     expect(result).toEqual(meta);
+  });
+
+  it('test_entity_fetch_is_no_cache', async () => {
+    const f = vi.fn<typeof fetch>(async () => response({ schema: 'ops.snapshot.v1', file: 'entity' }));
+    const client = createHttpClient('/Sentinel/snapshot/', f);
+    await client.entity('c_2c8f0e7a5b1d3f94');
+    expect(f).toHaveBeenCalledWith(
+      '/Sentinel/snapshot/entities/c_2c8f0e7a5b1d3f94.json',
+      expect.objectContaining({ cache: 'no-cache' }),
+    );
+    // The body is an entity file, so these reject; only the request mode matters here.
+    await client.chains().catch(() => null);
+    await client.metrics().catch(() => null);
+    const modes = f.mock.calls.map(([url, init]) => [String(url), init?.cache]);
+    expect(modes).toEqual([
+      ['/Sentinel/snapshot/entities/c_2c8f0e7a5b1d3f94.json', 'no-cache'],
+      ['/Sentinel/snapshot/chains.json', 'default'],
+      ['/Sentinel/snapshot/metrics.json', 'default'],
+    ]);
+  });
+
+  it('test_index_preloads', () => {
+    // The three first-load files are preloaded (and consumed: the client fetches them in default mode).
+    const index = fs.readFileSync(path.resolve(import.meta.dirname, '../../index.html'), 'utf8');
+    const links = [...index.matchAll(/<link rel="preload" as="fetch" crossorigin href="([^"]+)">/g)].map((m) => m[1]);
+    expect(links).toEqual([
+      '%BASE_URL%snapshot/meta.json',
+      '%BASE_URL%snapshot/chains.json',
+      '%BASE_URL%snapshot/metrics.json',
+    ]);
+    expect(index.match(/rel="preload"/g)).toHaveLength(3);
   });
 
   it('test_snapshot_base_url', () => {

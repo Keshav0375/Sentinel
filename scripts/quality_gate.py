@@ -43,7 +43,7 @@ MATRIX: dict[str, list[Check]] = {
     "backend": [
         ("ruff-lint", ["ruff", "check", "src/", "tests/", "scripts/ops/"], True),
         ("ruff-format", ["ruff", "format", "--check", "src/", "tests/", "scripts/ops/"], True),
-        ("pyright", ["pyright", "src/"], True),
+        ("pyright", ["pyright", "src/", "scripts/ops/"], True),
         ("gitleaks", ["gitleaks", "detect", "--no-banner", "--redact"], True),
         # filelock CVE-2026-112940/-112913/-112907: fixed only in filelock 4.2.1, but litellm
         # (<=1.106.2) caps filelock <4.0. Accepted until litellm lifts the cap; re-check by

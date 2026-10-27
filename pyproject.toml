@@ -60,7 +60,7 @@ known-third-party = ["alembic"]
 
 [tool.pyright]
 pythonVersion = "3.12"
-include = ["src"]
+include = ["src", "scripts/ops"]
 strict = ["src"]
 
 [tool.pytest.ini_options]

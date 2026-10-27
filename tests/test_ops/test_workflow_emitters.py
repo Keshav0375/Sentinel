@@ -139,7 +139,8 @@ def test_ops_jobs_gated_and_non_blocking(workflow: str, job_id: str, job: dict[s
         assert condition.startswith("always() && ")
     else:
         assert "always()" not in condition
-    assert job["timeout-minutes"] == 5
+    assert job["timeout-minutes"] == 8
+    assert job["continue-on-error"] is True  # a timeout or runner fault never reds the run
     steps = job["steps"]
     assert steps[0]["uses"].startswith(CHECKOUT)
     assert steps[0]["with"]["persist-credentials"] is False

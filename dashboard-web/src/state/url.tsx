@@ -1,6 +1,6 @@
 // View state lives in the query string only (no path routes), so every view is a shareable
 // link and GitHub Pages needs no 404 fallback.
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { KPI_FOCI, SCENARIOS, type KpiFocus } from '../data/derive';
 import {
   CHAIN_ID_RE,
@@ -102,9 +102,20 @@ function urlFor(v: ViewState): string {
 
 export function ViewStateProvider({ children }: { children: ReactNode }) {
   const [view, setView] = useState<ViewState>(() => parseView(window.location.search));
+  // The view to restore after closeChain's history.back() (see closeChain).
+  const pending = useRef<ViewState | null>(null);
 
   useEffect(() => {
-    const onPop = () => setView(parseView(window.location.search));
+    const onPop = () => {
+      const p = pending.current;
+      if (p === null) {
+        setView(parseView(window.location.search));
+        return;
+      }
+      pending.current = null;
+      window.history.replaceState(window.history.state, '', urlFor(p));
+      setView(p);
+    };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
@@ -117,14 +128,16 @@ export function ViewStateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const closeChain = useCallback(() => {
+    const next = { ...parseView(window.location.search), chain: null };
     const state: unknown = window.history.state;
     if (typeof state === 'object' && state !== null && (state as { drawer?: unknown }).drawer === true) {
-      // Opened by a click: Back returns to the page the viewer came from.
+      // Opened by a click: Back pops the drawer entry; the view at close time (filters, toggles)
+      // is then written over the previous entry.
+      pending.current = next;
       window.history.back();
       return;
     }
     // Opened from a shared link: drop the param in place.
-    const next = { ...parseView(window.location.search), chain: null };
     window.history.replaceState(window.history.state, '', urlFor(next));
     setView(next);
   }, []);

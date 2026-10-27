@@ -15,6 +15,7 @@ with a warning), deduplicated by event_id and sorted by (ts, recorded_at, event_
 connected components over the chain keys correlation_id, incident_id, sha (first 7), pr and run_id;
 chain_id = "c_" + sha256("<key>:<value>")[:16] of the first present of correlation_id, sha, pr,
 run_id (value from the earliest event that has it), else of "event:<first event_id>".
+incidents and MTTR are per correlation_id (an incident), not per chain.
 
 CLI:
   snapshot.py --ledger DIR --out DIR [--status PATH] [--run-url URL] [--now RFC3339]
@@ -239,11 +240,18 @@ def chain_id(events: list[Event]) -> str:
 
 def _open_stage(events: list[Event]) -> bool:
     for family in ("build", "deploy"):
-        closed = {
-            _chain(e).get("run_id") for e in _of(events, f"{family}.succeeded", f"{family}.failed")
-        }
-        for started in _of(events, f"{family}.started"):
-            if _chain(started).get("run_id") not in closed:
+        # Paired per run_id on time: a re-run (same run_id, new attempt) is open until its own
+        # terminal, so the latest start must not be after the latest terminal.
+        started: dict[Any, tuple[str, str]] = {}
+        closed: dict[Any, tuple[str, str]] = {}
+        for event in _of(events, f"{family}.started"):
+            run, at = _chain(event).get("run_id"), (event["ts"], event["recorded_at"])
+            started[run] = max(started.get(run, at), at)
+        for event in _of(events, f"{family}.succeeded", f"{family}.failed"):
+            run, at = _chain(event).get("run_id"), (event["ts"], event["recorded_at"])
+            closed[run] = max(closed.get(run, at), at)
+        for run, at in started.items():
+            if run not in closed or at > closed[run]:
                 return True
     ended = bool(_of(events, "agent.decided", "agent.failed"))
     if _of(events, "alert.received") and not ended:
@@ -690,14 +698,25 @@ def entity(
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
 
-def _mttr_values(decided: list[Event], first_alert: Mapping[str, str]) -> list[float]:
+def _incident_key(event: Mapping[str, Any], chain_id_of: Mapping[str, str]) -> str:
+    """The incident an event belongs to: its correlation_id, else its chain (one deploy chain
+    can hold several incidents, so incidents are not counted per chain)."""
+    correlation = _chain(event).get("correlation_id")
+    if correlation is not None:
+        return f"correlation_id:{correlation}"
+    return f"chain:{chain_id_of[event['event_id']]}"
+
+
+def _mttr_values(
+    decided: list[Event], first_alert: Mapping[str, str], incident_of: Mapping[str, str]
+) -> list[float]:
     values: list[float] = []
     for event in decided:
         mttr = _data(event).get("mttr_s")
         if isinstance(mttr, int | float):
             values.append(float(mttr))
             continue
-        alert_ts = first_alert.get(event["event_id"])
+        alert_ts = first_alert.get(incident_of[event["event_id"]])
         if alert_ts is not None and alert_ts <= event["ts"]:
             values.append(_secs(alert_ts, event["ts"]))
     return values
@@ -708,18 +727,18 @@ def _scores(events: Iterable[Event]) -> list[float]:
 
 
 def _kpis(
-    events: list[Event], chain_of: Mapping[str, str], first_alert: Mapping[str, str]
+    events: list[Event], incident_of: Mapping[str, str], first_alert: Mapping[str, str]
 ) -> dict[str, Any]:
     deploys = len(_of(events, "deploy.succeeded", "deploy.failed"))
     deploy_failures = len(_of(events, "deploy.failed"))
-    mttr = _mttr_values(_of(events, "agent.decided"), first_alert)
+    mttr = _mttr_values(_of(events, "agent.decided"), first_alert, incident_of)
     return {
         "deploys": deploys,
         "deploy_failures": deploy_failures,
         "failure_rate": deploy_failures / deploys if deploys else None,
         "builds": len(_of(events, "build.succeeded", "build.failed")),
         "build_failures": len(_of(events, "build.failed")),
-        "incidents": len({chain_of[e["event_id"]] for e in _of(events, "alert.received")}),
+        "incidents": len({incident_of[e["event_id"]] for e in _of(events, "alert.received")}),
         "mttr_p50_s": nearest_rank(mttr, 0.5),
         "mttr_p90_s": nearest_rank(mttr, 0.9),
         "revert_prs_opened": len(_of(events, "revert_pr.opened")),
@@ -731,7 +750,7 @@ def _kpis(
 
 
 def _daily(
-    events: list[Event], chain_of: Mapping[str, str], first_alert: Mapping[str, str]
+    events: list[Event], incident_of: Mapping[str, str], first_alert: Mapping[str, str]
 ) -> list[dict[str, Any]]:
     by_date: dict[str, list[Event]] = {}
     for event in events:
@@ -744,11 +763,11 @@ def _daily(
                 "date": date,
                 "deploys": len(_of(day, "deploy.succeeded", "deploy.failed")),
                 "deploy_failures": len(_of(day, "deploy.failed")),
-                "incidents": len({chain_of[e["event_id"]] for e in _of(day, "alert.received")}),
+                "incidents": len({incident_of[e["event_id"]] for e in _of(day, "alert.received")}),
                 "escalations": len(_of(day, "escalation.raised")),
                 "revert_prs_merged": len(_of(day, "revert_pr.merged")),
                 "mttr_p50_s": nearest_rank(
-                    _mttr_values(_of(day, "agent.decided"), first_alert), 0.5
+                    _mttr_values(_of(day, "agent.decided"), first_alert, incident_of), 0.5
                 ),
                 "eval_score_mean": _mean(_scores(day)),
             }
@@ -791,21 +810,26 @@ def _eval_scenarios(events: list[Event], scenario_of: Mapping[str, Any]) -> list
 def metrics(
     chains: list[tuple[dict[str, Any], list[Event]]], events: list[Event], now: datetime
 ) -> dict[str, Any]:
-    chain_of: dict[str, str] = {}
+    chain_id_of: dict[str, str] = {}
     scenario_of: dict[str, Any] = {}
-    first_alert: dict[str, str] = {}
     for summary, members in chains:
-        alert = _first(members, "alert.received")
         for event in members:
-            chain_of[event["event_id"]] = summary["chain_id"]
+            chain_id_of[event["event_id"]] = summary["chain_id"]
             scenario_of[event["event_id"]] = summary["scenario"]
-            if alert is not None and event["kind"] == "agent.decided":
-                first_alert[event["event_id"]] = alert["ts"]
+    incident_of: dict[str, str] = {}
+    first_alert: dict[str, str] = {}  # incident key → earliest alert.received ts
+    for _, members in chains:
+        for event in members:
+            key = incident_of[event["event_id"]] = _incident_key(event, chain_id_of)
+            if event["kind"] == "alert.received" and (
+                key not in first_alert or event["ts"] < first_alert[key]
+            ):
+                first_alert[key] = event["ts"]
     ranges = {}
     for name, span in WINDOWS.items():
         start = _fmt(now - span) if span is not None else None
         window = [e for e in events if start is None or e["ts"] >= start]
-        ranges[name] = _kpis(window, chain_of, first_alert)
+        ranges[name] = _kpis(window, incident_of, first_alert)
     lanes = [s["needs_action"] for s, _ in chains if s["needs_action"] is not None]
     awaiting = [a["since"] for a in lanes if a["reason"] == "pr_awaiting_review"]
     return {
@@ -819,7 +843,7 @@ def metrics(
             "escalations_open": sum(1 for a in lanes if a["reason"] == "escalation"),
             "failed_no_incident": sum(1 for a in lanes if a["reason"] == "failed_no_incident"),
         },
-        "daily": _daily(events, chain_of, first_alert),
+        "daily": _daily(events, incident_of, first_alert),
         "eval": {"scenarios": _eval_scenarios(events, scenario_of)},
     }
 

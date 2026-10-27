@@ -1,7 +1,8 @@
 # Ops ledger reconciler and snapshot builder (backend task 10.3).
-# Source: architecture ops-dashboard.md sections 4.2, 5 and 8. Every 30 minutes, after each Sentinel workflow
-# run and weekly as a full sweep, scripts/ops/reconcile.py backfills the ops-ledger branch from the read-only
-# GitHub and LangFuse APIs (the same event_ids the workflows write at event time), then scripts/ops/snapshot.py
+# Source: architecture ops-dashboard.md sections 4.2, 5 and 8. Every 30 minutes and after each Sentinel workflow
+# run (weekly full sweep when the cursor's last full sweep is over 7 days old), scripts/ops/reconcile.py
+# backfills the ops-ledger branch from the read-only GitHub and LangFuse APIs (the same event_ids the
+# workflows write at event time), then scripts/ops/snapshot.py
 # derives the dashboard snapshot, uploaded as the `ops-snapshot` artifact (Pages publish: task 10.5).
 # Never checks out workflow_run code (the default branch only; trigger fields reach scripts via env), reads
 # the APIs with GET only, and writes nothing but the ops-ledger branch. gitleaks scans the ledger and the
@@ -11,7 +12,6 @@ name: "[ops] reconcile — ledger and snapshot"
 on:
   schedule:
     - cron: '*/30 * * * *'
-    - cron: '17 3 * * 0'
   workflow_run:
     workflows:
       - "[sentinel] backend — deployment"
@@ -46,6 +46,17 @@ env:
 jobs:
   reconcile:
     name: Reconcile the ops ledger
+    # A fork's run, a same-named workflow from another file, or a dispatch off main never reconciles.
+    if: >-
+      github.event_name == 'schedule'
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      || (github.event_name == 'workflow_run'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+      && contains(fromJSON('[".github/workflows/ci_backend_deployment.yml",
+      ".github/workflows/ci_incident_response.yml", ".github/workflows/ci_backend_scale.yml",
+      ".github/workflows/ci_validation.yml", ".github/workflows/ci.yml",
+      ".github/workflows/infra_runners.yml", ".github/workflows/infra_deploy.yml"]'),
+      github.event.workflow_run.path))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # The only OIDC subject the Key Vault login accepts.
@@ -118,8 +129,19 @@ jobs:
         id: clone
         run: |
           set -euo pipefail
-          git clone --quiet --single-branch --branch ops-ledger https://github.com/Keshav0375/Sentinel.git \
-            "$RUNNER_TEMP/ledger" || mkdir -p "$RUNNER_TEMP/ledger"
+          rc=0
+          timeout 60 git ls-remote --exit-code --heads https://github.com/Keshav0375/Sentinel.git ops-ledger \
+            > /dev/null || rc=$?
+          case "$rc" in
+            0) timeout 120 git clone \
+                 --quiet --single-branch --branch ops-ledger https://github.com/Keshav0375/Sentinel.git \
+                 "$RUNNER_TEMP/ledger" ;;
+            2)
+              echo "::notice::ops-ledger does not exist yet; starting from an empty ledger"
+              mkdir -p "$RUNNER_TEMP/ledger"
+              ;;
+            *) echo "::error::git ls-remote failed (exit $rc)"; exit 1 ;;
+          esac
 
       - name: Backfill the ledger from GitHub and LangFuse
         id: reconcile
@@ -130,7 +152,7 @@ jobs:
           LANGFUSE_PUBLIC_KEY: ${{ steps.kv.outputs.langfuse-public-key }}
           LANGFUSE_SECRET_KEY: ${{ steps.kv.outputs.langfuse-secret-key }}
           OPS_FULL_SWEEP: ${{ inputs.full }}
-          OPS_SCHEDULE: ${{ github.event.schedule }}
+          OPS_REVERT_PR_AUTHORS: ${{ vars.OPS_REVERT_PR_AUTHORS }}
         run: |
           set -euo pipefail
           python3 scripts/ops/reconcile.py run --ledger "$RUNNER_TEMP/ledger" --cursor meta/cursor.json \
@@ -141,10 +163,18 @@ jobs:
         run: |
           set -euo pipefail
           if [ -d "$RUNNER_TEMP/ledger/.git" ]; then
-            git -C "$RUNNER_TEMP/ledger" pull --quiet --ff-only
+            timeout 120 git -C "$RUNNER_TEMP/ledger" pull --quiet --ff-only
           else
-            git clone --quiet --single-branch --branch ops-ledger https://github.com/Keshav0375/Sentinel.git \
-              "$RUNNER_TEMP/ledger" || true
+            rc=0
+            timeout 60 git ls-remote --exit-code --heads https://github.com/Keshav0375/Sentinel.git ops-ledger \
+              > /dev/null || rc=$?
+            case "$rc" in
+              0) timeout 120 git clone \
+                   --quiet --single-branch --branch ops-ledger https://github.com/Keshav0375/Sentinel.git \
+                   "$RUNNER_TEMP/ledger" ;;
+              2) echo "ops-ledger still does not exist; the snapshot is built from an empty ledger" ;;
+              *) echo "::error::git ls-remote failed (exit $rc)"; exit 1 ;;
+            esac
           fi
 
       - name: Install gitleaks (pinned, checksum verified)

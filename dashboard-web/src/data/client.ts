@@ -66,11 +66,16 @@ function isAbort(err: unknown): boolean {
 }
 
 export function createHttpClient(base: string, fetchImpl: typeof fetch = (...a) => fetch(...a)): SnapshotClient {
-  async function load<T extends SnapshotFile>(path: string, file: T['file'], signal?: AbortSignal): Promise<T> {
+  async function load<T extends SnapshotFile>(
+    path: string,
+    file: T['file'],
+    signal: AbortSignal | undefined,
+    cache: RequestCache,
+  ): Promise<T> {
     const url = `${base}${path}`;
     let res: Response;
     try {
-      res = await fetchImpl(url, { cache: 'no-cache', signal });
+      res = await fetchImpl(url, { cache, signal });
     } catch (err) {
       if (isAbort(err)) throw err;
       throw new SnapshotError('network', url);
@@ -87,14 +92,16 @@ export function createHttpClient(base: string, fetchImpl: typeof fetch = (...a) 
     return checkFile<T>(json, file, url);
   }
 
+  // The first-load files use the default mode so the index.html preload is consumed (a no-cache
+  // request may not reuse it); Pages' max-age=600 is under the 30-min reconcile cadence.
   return {
-    meta: (s) => load<MetaFile>('meta.json', 'meta', s),
-    chains: (s) => load<ChainsFile>('chains.json', 'chains', s),
-    metrics: (s) => load<MetricsFile>('metrics.json', 'metrics', s),
+    meta: (s) => load<MetaFile>('meta.json', 'meta', s, 'default'),
+    chains: (s) => load<ChainsFile>('chains.json', 'chains', s, 'default'),
+    metrics: (s) => load<MetricsFile>('metrics.json', 'metrics', s, 'default'),
     entity: (chainId, s) => {
       const path = `entities/${chainId}.json`;
       if (!CHAIN_ID_RE.test(chainId)) return Promise.reject(new SnapshotError('not_found', `${base}${path}`));
-      return load<EntityFile>(path, 'entity', s);
+      return load<EntityFile>(path, 'entity', s, 'no-cache');
     },
   };
 }
