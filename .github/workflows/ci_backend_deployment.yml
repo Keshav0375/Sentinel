@@ -7,6 +7,7 @@
 # manifests carry ${IMAGE_TAG}; backend-up renders, applies and waits. deploy-to-aks then re-checks the live image.
 # Judge score: the live pipeline never runs the judge. incidents.eval_score is written only by the eval runner
 # (eval/judge.py, eval/runner.py), so the smoke asserts the key is present and notes whether it is null.
+# Ops events (task 10.2): ops-start / ops-events append to the ops-ledger branch; never block the deploy.
 name: "[sentinel] backend — deployment"
 
 on:
@@ -688,3 +689,95 @@ jobs:
           resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
           cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
           keep-warm: ${{ vars.SENTINEL_KEEP_WARM }}
+
+  # ── Ops events (ops-dashboard §4.1, backend task 10.2) ──────────────────────
+  # Append-only facts for the ops dashboard on the ops-ledger branch. contents: write only here; no login,
+  # no secret. Every step is continue-on-error and the ops-event action never fails, so a ledger fault
+  # never blocks or reds the deploy. The terminal events are written after the facts they report.
+  # Job-level continue-on-error: a timeout or runner fault never reds the run.
+  ops-start:
+    name: Record the build start
+    needs: [preflight]
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 8
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+
+      - id: shape
+        name: Shape the build start event
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/emit.py backend-start >> "$GITHUB_OUTPUT"
+
+      - id: build
+        name: Record build.started
+        if: steps.shape.outputs.build-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.build-kind }}
+          source-id: ${{ steps.shape.outputs.build-source-id }}
+          state: ${{ steps.shape.outputs.build-state }}
+          chain: ${{ steps.shape.outputs.build-chain }}
+          data: ${{ steps.shape.outputs.build-data }}
+
+  ops-events:
+    name: Record the build and deploy outcome
+    needs: [preflight, run-quality, build-and-push, deploy-to-aks, run-tests, promote-or-rollback]
+    if: always() && needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 8
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+
+      - id: shape
+        name: Shape the build and deploy outcome events
+        continue-on-error: true
+        env:
+          QUALITY_RESULT: ${{ needs.run-quality.result }}
+          BUILD_RESULT: ${{ needs.build-and-push.result }}
+          DEPLOY_RESULT: ${{ needs.deploy-to-aks.result }}
+          TESTS_RESULT: ${{ needs.run-tests.result }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/emit.py backend-deploy >> "$GITHUB_OUTPUT"
+
+      - id: build
+        name: Record the build outcome
+        if: steps.shape.outputs.build-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.build-kind }}
+          source-id: ${{ steps.shape.outputs.build-source-id }}
+          state: ${{ steps.shape.outputs.build-state }}
+          chain: ${{ steps.shape.outputs.build-chain }}
+          data: ${{ steps.shape.outputs.build-data }}
+
+      - id: deploy
+        name: Record the deploy outcome
+        if: steps.shape.outputs.deploy-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deploy-kind }}
+          source-id: ${{ steps.shape.outputs.deploy-source-id }}
+          state: ${{ steps.shape.outputs.deploy-state }}
+          chain: ${{ steps.shape.outputs.deploy-chain }}
+          data: ${{ steps.shape.outputs.deploy-data }}

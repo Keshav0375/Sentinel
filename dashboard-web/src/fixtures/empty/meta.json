@@ -1,0 +1,15 @@
+{
+  "schema": "ops.snapshot.v1",
+  "file": "meta",
+  "generated_at": "2026-10-25T12:00:00Z",
+  "ledger_head": null,
+  "event_count": 0,
+  "chain_count": 0,
+  "first_event_at": null,
+  "last_event_at": null,
+  "reconciler_run_url": null,
+  "sources": {
+    "github": "ok",
+    "langfuse": "skipped"
+  }
+}

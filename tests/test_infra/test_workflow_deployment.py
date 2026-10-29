@@ -31,6 +31,8 @@ JOBS = (
     "deploy-to-aks",
     "run-tests",
     "promote-or-rollback",
+    "ops-start",
+    "ops-events",
 )
 
 PATHS = [
@@ -219,7 +221,11 @@ def test_jobs_and_needs_chain() -> None:
     assert jobs["run-tests"]["needs"] == ["preflight", "deploy-to-aks"]
     for name in ("run-quality", "build-and-push", "deploy-to-aks", "run-tests"):
         assert jobs[name]["if"] == PREFLIGHT_GATE, name
-    assert set(jobs["promote-or-rollback"]["needs"]) == set(JOBS) - {"promote-or-rollback"}
+    assert set(jobs["promote-or-rollback"]["needs"]) == set(JOBS) - {
+        "promote-or-rollback",
+        "ops-start",
+        "ops-events",
+    }
 
 
 def test_all_jobs_on_arm_runner() -> None:
@@ -242,6 +248,10 @@ def test_login_jobs_use_environment_and_oidc() -> None:
             no_login.append(name)
             assert job["environment"] == "sentinel-dev", name
             assert job["permissions"] == {}, name
+        elif name in ("ops-start", "ops-events"):
+            # Ledger writers (task 10.2): contents: write only, no environment.
+            assert job["permissions"] == {"contents": "write"}, name
+            assert "environment" not in job, name
         else:
             no_login.append(name)
             assert "environment" not in job, name

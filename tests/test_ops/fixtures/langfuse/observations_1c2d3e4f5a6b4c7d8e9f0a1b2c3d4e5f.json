@@ -1,0 +1,70 @@
+{
+  "data": [
+    {
+      "id": "obs2-root",
+      "traceId": "1c2d3e4f5a6b4c7d8e9f0a1b2c3d4e5f",
+      "type": "SPAN",
+      "name": "incident-pipeline",
+      "startTime": "2026-10-25T11:58:00.000Z",
+      "endTime": null,
+      "completionStartTime": null,
+      "model": null,
+      "modelParameters": {},
+      "input": {
+        "messages": "RAW-INPUT-MUST-NOT-LEAK"
+      },
+      "output": {
+        "content": "RAW-OUTPUT-MUST-NOT-LEAK"
+      },
+      "metadata": {
+        "note": "RAW-METADATA-MUST-NOT-LEAK"
+      },
+      "level": "DEFAULT",
+      "statusMessage": null,
+      "parentObservationId": null,
+      "version": null,
+      "promptId": null,
+      "environment": "default",
+      "calculatedTotalCost": null,
+      "latency": 1.0
+    },
+    {
+      "id": "obs2-triage",
+      "traceId": "1c2d3e4f5a6b4c7d8e9f0a1b2c3d4e5f",
+      "type": "GENERATION",
+      "name": "triage",
+      "startTime": "2026-10-25T11:58:01.000Z",
+      "endTime": "2026-10-25T11:58:09.000Z",
+      "completionStartTime": null,
+      "model": "claude-sonnet-4-5",
+      "modelParameters": {},
+      "input": {
+        "messages": "RAW-INPUT-MUST-NOT-LEAK"
+      },
+      "output": {
+        "content": "RAW-OUTPUT-MUST-NOT-LEAK"
+      },
+      "metadata": {
+        "note": "RAW-METADATA-MUST-NOT-LEAK"
+      },
+      "level": "DEFAULT",
+      "statusMessage": null,
+      "parentObservationId": "obs2-root",
+      "version": null,
+      "promptId": null,
+      "environment": "default",
+      "calculatedTotalCost": 0.001,
+      "latency": 1.0,
+      "usage": {
+        "input": 900,
+        "output": 100
+      }
+    }
+  ],
+  "meta": {
+    "page": 1,
+    "limit": 100,
+    "totalItems": 2,
+    "totalPages": 1
+  }
+}

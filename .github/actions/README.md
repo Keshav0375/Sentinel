@@ -1,6 +1,6 @@
 # Sentinel composite actions
 
-Eight composite actions that GitHub Actions workflows use to run the backend on the shared AKS cluster
+Nine composite actions that GitHub Actions workflows use to run the backend on the shared AKS cluster
 (backend task 7.3; decisions 2026-10-24). Every step is a plain `run` step, so there is nothing inside an
 action to pin.
 
@@ -37,6 +37,15 @@ action to pin.
 - `psql-exec` - run one row-returning statement; `result` is a one-line JSON array.
   - Inputs: `sql`, `pg-token`, `pg-host`, `pg-database`, `pg-user`, `vars` (optional).
   - Outputs: `result`.
+- `ops-event` - append one `ops.v1` event to the orphan `ops-ledger` branch (backend task 10.1). Validates the envelope,
+  drops fields outside the per-kind allow-list, fails closed on secret-like values, caps summaries at 500 characters,
+  and creates the branch on first use. Non-blocking: a ledger failure is a `::warning::` and `result=failed`, never a
+  failed step. Skipped on `pull_request` and `pull_request_target`. The caller job needs `permissions: contents: write`.
+  `source` is derived from `GITHUB_REPOSITORY` and `GITHUB_WORKFLOW_REF`. Runs `scripts/ops/ledger.py` from the action
+  ref (`$GITHUB_ACTION_PATH/../../..`), never the workspace.
+  - Inputs: `kind`, `source-id`, `state` (default empty), `ts` (RFC 3339, default now), `chain` and `data` (JSON
+    objects, default `{}`), `token` (default `github.token`).
+  - Outputs: `event-id`, `result` (`written`, `exists`, `failed`, `skipped`).
 
 `get-kv-secrets` never exposes `github-pat` (bridge Function only) or `anthropic-api-key` / `openai-api-key`
 (pod only, via workload identity). A requested name outside its list fails before any `az` call.
@@ -105,4 +114,4 @@ tear down and the action exits cleanly.
 ## Runner prerequisites
 
 `az`, `kubectl`, `curl`, `jq`, `envsubst` and `psql`. The `ubuntu-latest` image has them; `kubelogin` is
-installed on demand by `backend-up` and `backend-down`.
+installed on demand by `backend-up` and `backend-down`. `ops-event` needs `git` and `python3` (3.11 or later).

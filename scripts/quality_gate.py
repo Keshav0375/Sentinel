@@ -41,9 +41,9 @@ Check = tuple[str, list[str], bool]
 
 MATRIX: dict[str, list[Check]] = {
     "backend": [
-        ("ruff-lint", ["ruff", "check", "src/", "tests/"], True),
-        ("ruff-format", ["ruff", "format", "--check", "src/", "tests/"], True),
-        ("pyright", ["pyright", "src/"], True),
+        ("ruff-lint", ["ruff", "check", "src/", "tests/", "scripts/ops/"], True),
+        ("ruff-format", ["ruff", "format", "--check", "src/", "tests/", "scripts/ops/"], True),
+        ("pyright", ["pyright", "src/", "scripts/ops/"], True),
         ("gitleaks", ["gitleaks", "detect", "--no-banner", "--redact"], True),
         # filelock CVE-2026-112940/-112913/-112907: fixed only in filelock 4.2.1, but litellm
         # (<=1.106.2) caps filelock <4.0. Accepted until litellm lifts the cap; re-check by
@@ -71,6 +71,7 @@ MATRIX: dict[str, list[Check]] = {
                 "tests/test_tools/",
                 "tests/test_providers/",
                 "tests/test_scripts/",
+                "tests/test_ops/",
                 "tests/test_config.py",
                 "-x",
                 "-q",
@@ -91,6 +92,30 @@ MATRIX: dict[str, list[Check]] = {
                 "-x",
                 "-q",
             ],
+            True,
+        ),
+        # ── web lane: dashboard-web/ (ops dashboard SPA, backend task 10.4) ──────────
+        # `pnpm --dir` keeps cwd at the repo root; the trailing "/" lets path pruning skip
+        # the lane where dashboard-web/ does not exist. Playwright e2e is not gated here
+        # (it needs browsers): `pnpm --dir dashboard-web e2e`, run by .github/workflows/ci_web.yml.
+        # pnpm comes from Corepack (ships with Node). The version is named here because
+        # Corepack resolves `packageManager` from cwd (the repo root has no package.json);
+        # pnpm itself fails loudly if it drifts from dashboard-web/package.json.
+        (
+            "web-install",
+            ["corepack", "pnpm@10.34.9", "--dir", "dashboard-web/", "install", "--frozen-lockfile"],
+            True,
+        ),
+        (
+            "web-typecheck",
+            ["corepack", "pnpm@10.34.9", "--dir", "dashboard-web/", "run", "typecheck"],
+            True,
+        ),
+        ("web-lint", ["corepack", "pnpm@10.34.9", "--dir", "dashboard-web/", "run", "lint"], True),
+        ("web-test", ["corepack", "pnpm@10.34.9", "--dir", "dashboard-web/", "run", "test"], True),
+        (
+            "web-build",
+            ["corepack", "pnpm@10.34.9", "--dir", "dashboard-web/", "run", "build"],
             True,
         ),
     ],

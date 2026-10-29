@@ -1,0 +1,95 @@
+# Append one event to the ops-ledger branch (backend task 10.1; ops-dashboard §4).
+# Callers need permissions: contents: write. Never fails the caller.
+name: Sentinel ops-event
+description: "Append one ops.v1 event to the ops-ledger branch (needs contents: write; never fails the caller)."
+
+inputs:
+  kind:
+    description: Event kind, one of the 19 ops.v1 kinds (scripts/ops/schema/event.v1.json).
+    required: true
+  source-id:
+    description: The kind's source_id recipe (x-source-id in the schema), e.g. '<run_id>.<run_attempt>'.
+    required: true
+  state:
+    description: The kind's state recipe (x-source-id in the schema); empty for most kinds.
+    required: false
+    default: ''
+  ts:
+    description: When the fact happened (RFC 3339); empty means now.
+    required: false
+    default: ''
+  chain:
+    description: JSON object of chain keys (correlation_id, sha, pr, run_id, incident_id, scenario).
+    required: false
+    default: '{}'
+  data:
+    description: JSON object of the kind's data fields; fields outside the allow-list are dropped.
+    required: false
+    default: '{}'
+  token:
+    description: Token with contents write on Keshav0375/Sentinel (masked by the action).
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  event-id:
+    description: The event's sha256 id (empty when nothing was recorded).
+    value: ${{ steps.append.outputs.event-id }}
+  result:
+    description: written, exists, failed or skipped
+    value: ${{ steps.append.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - id: append
+      name: Append the event to the ops ledger
+      shell: bash
+      env:
+        OPS_EVENT_KIND: ${{ inputs.kind }}
+        OPS_EVENT_SOURCE_ID: ${{ inputs.source-id }}
+        OPS_EVENT_STATE: ${{ inputs.state }}
+        OPS_EVENT_TS: ${{ inputs.ts }}
+        OPS_EVENT_CHAIN: ${{ inputs.chain }}
+        OPS_EVENT_DATA: ${{ inputs.data }}
+        OPS_LEDGER_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        # Non-blocking by design (ops-dashboard §4.1): every path exits 0; a ledger failure is a warning.
+        out_file="${GITHUB_OUTPUT:-/dev/null}"
+        warn() { echo "::warning::ops-event: $1"; }
+        case "${GITHUB_EVENT_NAME:-}" in
+          pull_request|pull_request_target)
+            warn "skipped: ${GITHUB_EVENT_NAME} jobs never write the ledger (fork safety)"
+            echo "result=skipped" >> "$out_file"
+            exit 0
+            ;;
+        esac
+        if [ -n "${OPS_LEDGER_TOKEN:-}" ]; then
+          echo "::add-mask::$OPS_LEDGER_TOKEN"
+          b64="$(printf 'x-access-token:%s' "$OPS_LEDGER_TOKEN" | base64 | tr -d '\n')" || b64=""
+          [ -z "$b64" ] || echo "::add-mask::$b64"
+        fi
+        # The ledger library comes from the pinned action ref, never the caller's workspace.
+        ledger="$GITHUB_ACTION_PATH/../../../scripts/ops/ledger.py"
+        if [ ! -f "$ledger" ]; then
+          warn "not recorded: scripts/ops/ledger.py is missing at the action ref"
+          echo "result=failed" >> "$out_file"
+          exit 0
+        fi
+        wf_path="${GITHUB_WORKFLOW_REF:-}"
+        wf_path="${wf_path%%@*}"
+        OPS_EVENT_SOURCE="gha:${GITHUB_REPOSITORY:-}/${wf_path##*/}"
+        export OPS_EVENT_SOURCE
+        rc=0
+        out="$(python3 "$ledger" append)" || rc=$?
+        if [ "$rc" -eq 0 ] \
+          && printf '%s\n' "$out" | grep -Eqx 'event-id=[0-9a-f]{64}' \
+          && printf '%s\n' "$out" | grep -Eqx 'result=(written|exists)'; then
+          printf '%s\n' "$out" | grep -Ex 'event-id=[0-9a-f]{64}|result=(written|exists)' >> "$out_file"
+          echo "ops-event: recorded"
+        else
+          warn "not recorded (ledger exit $rc); see the log above"
+          echo "result=failed" >> "$out_file"
+        fi
+        exit 0

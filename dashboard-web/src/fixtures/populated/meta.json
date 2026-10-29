@@ -1,0 +1,15 @@
+{
+  "schema": "ops.snapshot.v1",
+  "file": "meta",
+  "generated_at": "2026-10-25T12:00:00Z",
+  "ledger_head": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4",
+  "event_count": 29,
+  "chain_count": 6,
+  "first_event_at": "2026-10-22T14:02:00Z",
+  "last_event_at": "2026-10-25T11:56:00Z",
+  "reconciler_run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/18800000999",
+  "sources": {
+    "github": "ok",
+    "langfuse": "ok"
+  }
+}

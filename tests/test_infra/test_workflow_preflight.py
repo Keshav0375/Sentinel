@@ -33,9 +33,9 @@ OPTIONAL_VARS = {"SENTINEL_KEEP_WARM"}
 
 # Workflow file -> the jobs that run under always() (teardown and reporting).
 WORKFLOWS: dict[str, set[str]] = {
-    "ci_backend_deployment.yml": {"promote-or-rollback"},
-    "ci_incident_response.yml": {"teardown-backend", "summary"},
-    "ci_backend_scale.yml": set(),
+    "ci_backend_deployment.yml": {"promote-or-rollback", "ops-events"},
+    "ci_incident_response.yml": {"teardown-backend", "summary", "ops-events"},
+    "ci_backend_scale.yml": {"ops-events"},
 }
 WORKFLOW_IDS = list(WORKFLOWS)
 

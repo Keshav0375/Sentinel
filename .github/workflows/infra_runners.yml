@@ -31,6 +31,7 @@
 # Lives in the Sentinel monorepo: jobs run in infra/ (defaults.working-directory);
 # the OIDC subjects are repo:Keshav0375/Sentinel:environment:<env>; `oidc-ready`
 # keeps every Azure job skipped until INFRA_OIDC_READY is true.
+# Ops events (task 10.2): ops-start / ops-events append to the ops-ledger branch; never block the build.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: "Runner Image — Build & Deploy to ACR"
@@ -228,3 +229,91 @@ jobs:
               --repository "${IMAGE_REPO}" --orderby time_desc -o tsv
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Ops events (ops-dashboard §4.1, backend task 10.2) ───────────────────
+  # Append-only facts for the ops dashboard on the ops-ledger branch. contents: write only here; no login,
+  # no secrets, no environment. Every step is continue-on-error and the ops-event action never fails, so a
+  # ledger fault never blocks the build. The outcome event is written after the facts it reports.
+  # A cancelled run (cancel-in-progress) still reaches ops-events and records build.failed.
+  # Job-level continue-on-error: a timeout or runner fault never reds the run.
+  ops-start:
+    name: Record the runner build start
+    runs-on: ubuntu-latest
+    needs: [oidc-ready]
+    if: needs.oidc-ready.outputs.ready == 'true'
+    timeout-minutes: 8
+    continue-on-error: true
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+
+      # emit.py lives at the repo root, not in infra/.
+      - name: Shape the build start event
+        id: shape
+        working-directory: .
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/emit.py infra-runners-start >> "$GITHUB_OUTPUT"
+
+      - name: Record build.started
+        id: build
+        if: steps.shape.outputs.build-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.build-kind }}
+          source-id: ${{ steps.shape.outputs.build-source-id }}
+          state: ${{ steps.shape.outputs.build-state }}
+          chain: ${{ steps.shape.outputs.build-chain }}
+          data: ${{ steps.shape.outputs.build-data }}
+
+  ops-events:
+    name: Record the runner build outcome
+    runs-on: ubuntu-latest
+    needs: [oidc-ready, build-and-push]
+    if: always() && needs.oidc-ready.outputs.ready == 'true'
+    timeout-minutes: 8
+    continue-on-error: true
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+
+      # emit.py lives at the repo root, not in infra/.
+      - name: Shape the build outcome event
+        id: shape
+        working-directory: .
+        continue-on-error: true
+        env:
+          BUILD_RESULT: ${{ needs.build-and-push.result }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/emit.py infra-runners >> "$GITHUB_OUTPUT"
+
+      - name: Record the build outcome
+        id: build
+        if: steps.shape.outputs.build-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.build-kind }}
+          source-id: ${{ steps.shape.outputs.build-source-id }}
+          state: ${{ steps.shape.outputs.build-state }}
+          chain: ${{ steps.shape.outputs.build-chain }}
+          data: ${{ steps.shape.outputs.build-data }}

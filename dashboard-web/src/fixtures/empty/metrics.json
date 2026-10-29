@@ -1,0 +1,77 @@
+{
+  "schema": "ops.snapshot.v1",
+  "file": "metrics",
+  "generated_at": "2026-10-25T12:00:00Z",
+  "ranges": {
+    "24h": {
+      "deploys": 0,
+      "deploy_failures": 0,
+      "failure_rate": null,
+      "builds": 0,
+      "build_failures": 0,
+      "incidents": 0,
+      "mttr_p50_s": null,
+      "mttr_p90_s": null,
+      "revert_prs_opened": 0,
+      "revert_prs_merged": 0,
+      "escalations": 0,
+      "eval_runs": 0,
+      "eval_score_mean": null
+    },
+    "7d": {
+      "deploys": 0,
+      "deploy_failures": 0,
+      "failure_rate": null,
+      "builds": 0,
+      "build_failures": 0,
+      "incidents": 0,
+      "mttr_p50_s": null,
+      "mttr_p90_s": null,
+      "revert_prs_opened": 0,
+      "revert_prs_merged": 0,
+      "escalations": 0,
+      "eval_runs": 0,
+      "eval_score_mean": null
+    },
+    "30d": {
+      "deploys": 0,
+      "deploy_failures": 0,
+      "failure_rate": null,
+      "builds": 0,
+      "build_failures": 0,
+      "incidents": 0,
+      "mttr_p50_s": null,
+      "mttr_p90_s": null,
+      "revert_prs_opened": 0,
+      "revert_prs_merged": 0,
+      "escalations": 0,
+      "eval_runs": 0,
+      "eval_score_mean": null
+    },
+    "all": {
+      "deploys": 0,
+      "deploy_failures": 0,
+      "failure_rate": null,
+      "builds": 0,
+      "build_failures": 0,
+      "incidents": 0,
+      "mttr_p50_s": null,
+      "mttr_p90_s": null,
+      "revert_prs_opened": 0,
+      "revert_prs_merged": 0,
+      "escalations": 0,
+      "eval_runs": 0,
+      "eval_score_mean": null
+    }
+  },
+  "current": {
+    "revert_prs_awaiting_review": 0,
+    "oldest_awaiting_since": null,
+    "escalations_open": 0,
+    "failed_no_incident": 0
+  },
+  "daily": [],
+  "eval": {
+    "scenarios": []
+  }
+}

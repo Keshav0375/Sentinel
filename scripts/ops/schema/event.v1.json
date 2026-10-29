@@ -1,0 +1,1015 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keshav0375.github.io/Sentinel/schema/event.v1.json",
+  "title": "Sentinel ops ledger event (ops.v1)",
+  "$comment": "Frozen contract (architecture/ops-dashboard.md section 3, backend task 10.1). event_id = sha256 of kind, source, source_id, state joined by LF (scripts/ops/ledger.py compute_event_id); each data def's x-source-id is the source_id/state recipe every writer (ops-event and the reconciler) must use. source names where the fact happened, never the writer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "kind",
+    "ts",
+    "recorded_at",
+    "source",
+    "chain",
+    "data"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ops.v1"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "kind": {
+      "enum": [
+        "build.started",
+        "build.succeeded",
+        "build.failed",
+        "deploy.started",
+        "deploy.succeeded",
+        "deploy.failed",
+        "ci.pr_gate.completed",
+        "scale.changed",
+        "alert.received",
+        "agent.started",
+        "agent.decided",
+        "agent.failed",
+        "revert_pr.opened",
+        "revert_pr.review_submitted",
+        "revert_pr.merged",
+        "revert_pr.closed",
+        "escalation.raised",
+        "eval.scored",
+        "trace.summarized"
+      ]
+    },
+    "ts": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "recorded_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "source": {
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^(gha:Keshav0375/(Sentinel|Sentinel-deployment)/[A-Za-z0-9_.-]{1,100}\\.ya?ml|reconciler|langfuse)$"
+    },
+    "chain": {
+      "$ref": "#/$defs/chain"
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "build.started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_run"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "build.succeeded"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_run"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "build.failed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_run_failed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "deploy.started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_run"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "deploy.succeeded"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_run"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "deploy.failed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_run_failed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "ci.pr_gate.completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_pr_gate"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "scale.changed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_scale"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "alert.received"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_alert"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "agent.started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_agent_started"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "agent.decided"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_agent_decided"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "agent.failed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_agent_failed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "revert_pr.opened"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_pr_opened"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "revert_pr.review_submitted"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_pr_review"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "revert_pr.merged"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_pr_merged"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "revert_pr.closed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_pr_closed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "escalation.raised"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_escalation"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "eval.scored"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_eval"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "trace.summarized"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/data_trace"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "seconds": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 31536000
+    },
+    "unit": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "run_url": {
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^https://github\\.com/Keshav0375/(Sentinel|Sentinel-deployment)/actions/runs/[0-9]{1,20}(/attempts/[0-9]{1,4})?(/job/[0-9]{1,20})?$"
+    },
+    "pr_url": {
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^https://github\\.com/Keshav0375/(Sentinel|Sentinel-deployment)/pull/[0-9]{1,10}$"
+    },
+    "langfuse_trace_url": {
+      "type": "string",
+      "maxLength": 300,
+      "pattern": "^https://[A-Za-z0-9.-]{1,100}/project/[A-Za-z0-9_-]{1,64}/traces/[A-Za-z0-9_-]{1,64}$"
+    },
+    "monitor_url": {
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^https://([a-z0-9-]{1,30}\\.)?datadoghq\\.(com|eu)/monitors/[0-9]{1,20}$"
+    },
+    "github_login": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}(\\[bot\\])?$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "stage_name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "chain": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "correlation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,40}$"
+        },
+        "pr": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999999999
+        },
+        "run_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "incident_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "scenario": {
+          "type": "string",
+          "pattern": "^(pass|deployfail|runtime)/(0[1-9]|10)$"
+        }
+      }
+    },
+    "data_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_url"
+      ],
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/version"
+        },
+        "duration_s": {
+          "$ref": "#/$defs/seconds"
+        },
+        "run_url": {
+          "$ref": "#/$defs/run_url"
+        }
+      },
+      "x-source-id": "source_id = '<run_id>.<run_attempt>'; state = ''"
+    },
+    "data_run_failed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_url"
+      ],
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/version"
+        },
+        "duration_s": {
+          "$ref": "#/$defs/seconds"
+        },
+        "run_url": {
+          "$ref": "#/$defs/run_url"
+        },
+        "failed_stage": {
+          "$ref": "#/$defs/stage_name"
+        }
+      },
+      "x-source-id": "source_id = '<run_id>.<run_attempt>'; state = ''"
+    },
+    "data_pr_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conclusion",
+        "run_url"
+      ],
+      "properties": {
+        "conclusion": {
+          "enum": [
+            "success",
+            "failure",
+            "cancelled",
+            "skipped",
+            "timed_out",
+            "action_required",
+            "neutral",
+            "stale"
+          ]
+        },
+        "duration_s": {
+          "$ref": "#/$defs/seconds"
+        },
+        "run_url": {
+          "$ref": "#/$defs/run_url"
+        }
+      },
+      "x-source-id": "source_id = '<run_id>.<run_attempt>'; state = ''"
+    },
+    "data_scale": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "replicas",
+        "run_url"
+      ],
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "keep_warm": {
+          "type": "boolean"
+        },
+        "duration_s": {
+          "$ref": "#/$defs/seconds"
+        },
+        "run_url": {
+          "$ref": "#/$defs/run_url"
+        }
+      },
+      "x-source-id": "source_id = '<run_id>.<run_attempt>'; state = '<replicas>'"
+    },
+    "data_alert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signal_type",
+        "service"
+      ],
+      "properties": {
+        "signal_type": {
+          "enum": [
+            "deploy_failure",
+            "runtime_error"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9 _-]{1,32}$"
+        },
+        "service": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+        },
+        "monitor_url": {
+          "$ref": "#/$defs/monitor_url"
+        }
+      },
+      "x-source-id": "source_id = chain.correlation_id; state = signal_type"
+    },
+    "data_agent_started": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "run_url": {
+          "$ref": "#/$defs/run_url"
+        }
+      },
+      "x-source-id": "source_id = chain.correlation_id; state = ''"
+    },
+    "data_agent_decided": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resolution_type",
+        "confidence"
+      ],
+      "properties": {
+        "resolution_type": {
+          "enum": [
+            "rollback",
+            "escalated"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "root_cause_summary": {
+          "$ref": "#/$defs/summary"
+        },
+        "tool_calls": {
+          "$ref": "#/$defs/count"
+        },
+        "reflexion_loops": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "mttr_s": {
+          "$ref": "#/$defs/seconds"
+        },
+        "models_used": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,99}$"
+          }
+        },
+        "langfuse_trace_url": {
+          "$ref": "#/$defs/langfuse_trace_url"
+        },
+        "run_url": {
+          "$ref": "#/$defs/run_url"
+        }
+      },
+      "x-source-id": "source_id = chain.correlation_id; state = resolution_type"
+    },
+    "data_agent_failed": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error_class": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.]{0,99}$"
+        },
+        "langfuse_trace_url": {
+          "$ref": "#/$defs/langfuse_trace_url"
+        },
+        "run_url": {
+          "$ref": "#/$defs/run_url"
+        }
+      },
+      "x-source-id": "source_id = chain.correlation_id; state = ''"
+    },
+    "data_pr_opened": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "url": {
+          "$ref": "#/$defs/pr_url"
+        },
+        "state": {
+          "enum": [
+            "open",
+            "closed",
+            "merged"
+          ]
+        }
+      },
+      "x-source-id": "source_id = 'Keshav0375/Sentinel-deployment#<pr>'; state = ''"
+    },
+    "data_pr_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "reviewer",
+        "review_state"
+      ],
+      "properties": {
+        "url": {
+          "$ref": "#/$defs/pr_url"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/github_login"
+        },
+        "review_state": {
+          "enum": [
+            "APPROVED",
+            "CHANGES_REQUESTED",
+            "COMMENTED",
+            "DISMISSED"
+          ]
+        },
+        "waited_s": {
+          "$ref": "#/$defs/seconds"
+        }
+      },
+      "x-source-id": "source_id = 'Keshav0375/Sentinel-deployment#<pr>'; state = '<review_id>'"
+    },
+    "data_pr_merged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "url": {
+          "$ref": "#/$defs/pr_url"
+        },
+        "state": {
+          "const": "merged"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/github_login"
+        },
+        "waited_s": {
+          "$ref": "#/$defs/seconds"
+        }
+      },
+      "x-source-id": "source_id = 'Keshav0375/Sentinel-deployment#<pr>'; state = ''"
+    },
+    "data_pr_closed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "url": {
+          "$ref": "#/$defs/pr_url"
+        },
+        "state": {
+          "const": "closed"
+        },
+        "waited_s": {
+          "$ref": "#/$defs/seconds"
+        }
+      },
+      "x-source-id": "source_id = 'Keshav0375/Sentinel-deployment#<pr>'; state = ''"
+    },
+    "data_escalation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/summary"
+        },
+        "langfuse_trace_url": {
+          "$ref": "#/$defs/langfuse_trace_url"
+        },
+        "run_url": {
+          "$ref": "#/$defs/run_url"
+        }
+      },
+      "x-source-id": "source_id = chain.correlation_id; state = ''"
+    },
+    "data_eval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "judge_conflict",
+        "judge_failed"
+      ],
+      "properties": {
+        "case": {
+          "enum": [
+            "i",
+            "ii",
+            "iii"
+          ]
+        },
+        "checks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "fired": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "classified": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "correlated": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "revert_target": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "judge": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "triage_accuracy": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "root_cause_correctness": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "tool_efficiency": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "mttr": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "remediation_safety": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "total_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "judge_model": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,99}$"
+        },
+        "judge_conflict": {
+          "type": "boolean"
+        },
+        "judge_failed": {
+          "type": "boolean"
+        },
+        "langfuse_trace_url": {
+          "$ref": "#/$defs/langfuse_trace_url"
+        },
+        "run_url": {
+          "$ref": "#/$defs/run_url"
+        }
+      },
+      "x-source-id": "source_id = '<run_id>.<run_attempt>'; state = chain.scenario"
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "span_id",
+        "parent_id",
+        "name",
+        "kind",
+        "start_ms",
+        "duration_ms",
+        "status"
+      ],
+      "properties": {
+        "span_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "parent_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "kind": {
+          "type": "string",
+          "pattern": "^[A-Z_]{1,32}$"
+        },
+        "start_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "warning",
+            "error"
+          ]
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000000
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000000
+        }
+      }
+    },
+    "data_trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trace_id",
+        "spans"
+      ],
+      "properties": {
+        "trace_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "langfuse_trace_url": {
+          "$ref": "#/$defs/langfuse_trace_url"
+        },
+        "total_duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "spans": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/span"
+          }
+        }
+      },
+      "x-source-id": "source_id = trace_id; state = ''"
+    }
+  }
+}

@@ -43,6 +43,7 @@
 # Lives in the Sentinel monorepo: jobs run in infra/ (defaults.working-directory);
 # the OIDC subjects are repo:Keshav0375/Sentinel:environment:<env>; `oidc-ready`
 # keeps every Azure job skipped until INFRA_OIDC_READY is true.
+# Ops events (task 10.2): ops-start / ops-events append to the ops-ledger branch; never block the apply.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: "Sentinel Infra — Deploy"
@@ -574,3 +575,94 @@ jobs:
             echo ""
             echo "See the job log for the per-check breakdown."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Ops events (ops-dashboard §4.1, backend task 10.2) ───────────────────
+  # Append-only facts for the ops dashboard on the ops-ledger branch. contents: write only here; no login,
+  # no secrets, no environment. Every step is continue-on-error and the ops-event action never fails, so a
+  # ledger fault never blocks the apply. The outcome event is written after the facts it reports.
+  # Apply only: plan and destroy emit nothing (no ops.v1 kind describes a teardown). The scope is not
+  # recorded (no v1 field for it); the run_url leads to it.
+  # Job-level continue-on-error: a timeout or runner fault never reds the run.
+  ops-start:
+    name: Record the infra apply start
+    runs-on: ubuntu-latest
+    needs: [oidc-ready]
+    if: needs.oidc-ready.outputs.ready == 'true' && inputs.action == 'apply'
+    timeout-minutes: 8
+    continue-on-error: true
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+
+      # emit.py lives at the repo root, not in infra/.
+      - name: Shape the apply start event
+        id: shape
+        working-directory: .
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/emit.py infra-deploy-start >> "$GITHUB_OUTPUT"
+
+      - name: Record deploy.started
+        id: deploy
+        if: steps.shape.outputs.deploy-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deploy-kind }}
+          source-id: ${{ steps.shape.outputs.deploy-source-id }}
+          state: ${{ steps.shape.outputs.deploy-state }}
+          chain: ${{ steps.shape.outputs.deploy-chain }}
+          data: ${{ steps.shape.outputs.deploy-data }}
+
+  ops-events:
+    name: Record the infra apply outcome
+    runs-on: ubuntu-latest
+    needs: [oidc-ready, run, verify]
+    if: always() && needs.oidc-ready.outputs.ready == 'true' && inputs.action == 'apply'
+    timeout-minutes: 8
+    continue-on-error: true
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+
+      # emit.py lives at the repo root, not in infra/.
+      - name: Shape the apply outcome event
+        id: shape
+        working-directory: .
+        continue-on-error: true
+        env:
+          RUN_RESULT: ${{ needs.run.result }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          GUARDS_PASSED: ${{ needs.run.outputs.guards_passed }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/emit.py infra-deploy >> "$GITHUB_OUTPUT"
+
+      - name: Record the apply outcome
+        id: deploy
+        if: steps.shape.outputs.deploy-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deploy-kind }}
+          source-id: ${{ steps.shape.outputs.deploy-source-id }}
+          state: ${{ steps.shape.outputs.deploy-state }}
+          chain: ${{ steps.shape.outputs.deploy-chain }}
+          data: ${{ steps.shape.outputs.deploy-data }}

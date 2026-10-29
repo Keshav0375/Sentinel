@@ -194,6 +194,8 @@ def test_dag_needs_graph() -> None:
             "record-rollback-pr",
             "teardown-backend",
         },
+        "ops-start": set(),
+        "ops-events": {"ensure-backend-up", "fetch-pr-details", "run-agent-pipeline"},
     }
     # Every job also needs the preflight, which needs nothing.
     expected = {"preflight": set()}

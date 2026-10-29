@@ -1,0 +1,1401 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keshav0375.github.io/Sentinel/schema/snapshot.v1.json",
+  "title": "Sentinel ops dashboard snapshot (ops.snapshot.v1)",
+  "$comment": "Frozen contract (architecture/ops-dashboard.md sections 2 and 6, backend task 10.1). Written by scripts/ops/snapshot.py (10.3), read by dashboard-web (10.4). One schema for four files, dispatched on 'file'.",
+  "type": "object",
+  "required": [
+    "schema",
+    "file"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ops.snapshot.v1"
+    },
+    "file": {
+      "enum": [
+        "meta",
+        "chains",
+        "metrics",
+        "entity"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "const": "meta"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/file_meta"
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "const": "chains"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/file_chains"
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "const": "metrics"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/file_metrics"
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "const": "entity"
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/file_entity"
+      }
+    }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sha40": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "chain_id": {
+      "type": "string",
+      "pattern": "^c_[0-9a-f]{16}$"
+    },
+    "scenario": {
+      "type": "string",
+      "pattern": "^(pass|deployfail|runtime)/(0[1-9]|10)$"
+    },
+    "repo": {
+      "enum": [
+        "Keshav0375/Sentinel",
+        "Keshav0375/Sentinel-deployment"
+      ]
+    },
+    "kind": {
+      "enum": [
+        "build.started",
+        "build.succeeded",
+        "build.failed",
+        "deploy.started",
+        "deploy.succeeded",
+        "deploy.failed",
+        "ci.pr_gate.completed",
+        "scale.changed",
+        "alert.received",
+        "agent.started",
+        "agent.decided",
+        "agent.failed",
+        "revert_pr.opened",
+        "revert_pr.review_submitted",
+        "revert_pr.merged",
+        "revert_pr.closed",
+        "escalation.raised",
+        "eval.scored",
+        "trace.summarized"
+      ]
+    },
+    "unit": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "seconds": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 31536000
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000000
+    },
+    "url": {
+      "type": "string",
+      "maxLength": 300,
+      "pattern": "^https://[^\\s\"<>]{1,292}$"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "source_status": {
+      "enum": [
+        "ok",
+        "error",
+        "skipped"
+      ]
+    },
+    "chain_status": {
+      "enum": [
+        "running",
+        "succeeded",
+        "failed",
+        "awaiting_review",
+        "escalated",
+        "reverted",
+        "closed"
+      ],
+      "description": "running: a stage is in progress. succeeded: deploy ok, no incident. failed: build/deploy failed with no incident, or agent.failed. awaiting_review: revert PR open. escalated: escalation.raised. reverted: revert PR merged. closed: revert PR closed unmerged."
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One pill. Order: deploy, alert, agent, then escalation (escalated chains) or pr, review, merge. 'none' = not reached; the SPA shows icon + label, never color alone.",
+      "required": [
+        "name",
+        "status",
+        "at",
+        "duration_s",
+        "label",
+        "url"
+      ],
+      "properties": {
+        "name": {
+          "enum": [
+            "deploy",
+            "alert",
+            "agent",
+            "pr",
+            "review",
+            "merge",
+            "escalation"
+          ]
+        },
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "running",
+            "waiting",
+            "skipped",
+            "none"
+          ]
+        },
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duration_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/seconds"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label": {
+          "$ref": "#/$defs/label"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/url"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "needs_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Needs-action lane entry. The SPA computes the waited-for timer as now - since and sorts oldest first.",
+      "required": [
+        "reason",
+        "since",
+        "url"
+      ],
+      "properties": {
+        "reason": {
+          "enum": [
+            "pr_awaiting_review",
+            "escalation",
+            "failed_no_incident"
+          ]
+        },
+        "since": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/url"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "chain_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One timeline row. pr is the revert PR on Sentinel-deployment. Correlated by correlation_id, then sha, then pr (section 3).",
+      "required": [
+        "chain_id",
+        "title",
+        "repo",
+        "status",
+        "scenario",
+        "sha",
+        "correlation_id",
+        "incident_id",
+        "pr",
+        "run_id",
+        "started_at",
+        "updated_at",
+        "ended_at",
+        "duration_s",
+        "stages",
+        "needs_action",
+        "summary",
+        "resolution_type",
+        "confidence",
+        "eval_total",
+        "kinds",
+        "event_count",
+        "has_trace",
+        "has_eval"
+      ],
+      "properties": {
+        "chain_id": {
+          "$ref": "#/$defs/chain_id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "repo": {
+          "$ref": "#/$defs/repo"
+        },
+        "status": {
+          "$ref": "#/$defs/chain_status"
+        },
+        "scenario": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/scenario"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "incident_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pr": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9999999999
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duration_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/seconds"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stages": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 6,
+          "items": {
+            "$ref": "#/$defs/stage"
+          }
+        },
+        "needs_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/needs_action"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/summary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolution_type": {
+          "enum": [
+            "rollback",
+            "escalated",
+            null
+          ]
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/unit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eval_total": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/unit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kinds": {
+          "type": "array",
+          "maxItems": 19,
+          "items": {
+            "$ref": "#/$defs/kind"
+          }
+        },
+        "event_count": {
+          "$ref": "#/$defs/count"
+        },
+        "has_trace": {
+          "type": "boolean"
+        },
+        "has_eval": {
+          "type": "boolean"
+        }
+      }
+    },
+    "agent_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decided_at",
+        "resolution_type",
+        "confidence",
+        "root_cause_summary",
+        "tool_calls",
+        "reflexion_loops",
+        "mttr_s",
+        "models_used",
+        "langfuse_trace_url"
+      ],
+      "properties": {
+        "decided_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "resolution_type": {
+          "enum": [
+            "rollback",
+            "escalated"
+          ]
+        },
+        "confidence": {
+          "$ref": "#/$defs/unit"
+        },
+        "root_cause_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/summary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_calls": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/count"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reflexion_loops": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/count"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mttr_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/seconds"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "models_used": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,99}$"
+          }
+        },
+        "langfuse_trace_url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/url"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "start_ms is the offset from the trace start; parents precede children.",
+      "required": [
+        "span_id",
+        "parent_id",
+        "name",
+        "kind",
+        "start_ms",
+        "duration_ms",
+        "status",
+        "input_tokens",
+        "output_tokens"
+      ],
+      "properties": {
+        "span_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "parent_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "kind": {
+          "type": "string",
+          "pattern": "^[A-Z_]{1,32}$"
+        },
+        "start_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "warning",
+            "error"
+          ]
+        },
+        "input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trace_id",
+        "langfuse_trace_url",
+        "total_duration_ms",
+        "spans"
+      ],
+      "properties": {
+        "trace_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "langfuse_trace_url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/url"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total_duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "spans": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/span"
+          }
+        }
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fired",
+        "classified",
+        "correlated",
+        "revert_target"
+      ],
+      "properties": {
+        "fired": {
+          "$ref": "#/$defs/unit"
+        },
+        "classified": {
+          "$ref": "#/$defs/unit"
+        },
+        "correlated": {
+          "$ref": "#/$defs/unit"
+        },
+        "revert_target": {
+          "$ref": "#/$defs/unit"
+        }
+      }
+    },
+    "judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "triage_accuracy",
+        "root_cause_correctness",
+        "tool_efficiency",
+        "mttr",
+        "remediation_safety"
+      ],
+      "properties": {
+        "triage_accuracy": {
+          "$ref": "#/$defs/unit"
+        },
+        "root_cause_correctness": {
+          "$ref": "#/$defs/unit"
+        },
+        "tool_efficiency": {
+          "$ref": "#/$defs/unit"
+        },
+        "mttr": {
+          "$ref": "#/$defs/unit"
+        },
+        "remediation_safety": {
+          "$ref": "#/$defs/unit"
+        }
+      }
+    },
+    "eval_score": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "judge_failed or judge_conflict: judge and total_score are null and the score is excluded from means.",
+      "required": [
+        "scored_at",
+        "scenario",
+        "case",
+        "checks",
+        "judge",
+        "total_score",
+        "judge_model",
+        "judge_conflict",
+        "judge_failed",
+        "langfuse_trace_url"
+      ],
+      "properties": {
+        "scored_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "scenario": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/scenario"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "case": {
+          "enum": [
+            "i",
+            "ii",
+            "iii",
+            null
+          ]
+        },
+        "checks": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/checks"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/judge"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total_score": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/unit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "judge_model": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,99}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "judge_conflict": {
+          "type": "boolean"
+        },
+        "judge_failed": {
+          "type": "boolean"
+        },
+        "langfuse_trace_url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/url"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "restricted: viewers may lack access (LangFuse, Datadog); the UI says so.",
+      "required": [
+        "kind",
+        "label",
+        "url",
+        "restricted"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "github_run",
+            "github_pr",
+            "langfuse",
+            "datadog"
+          ]
+        },
+        "label": {
+          "$ref": "#/$defs/label"
+        },
+        "url": {
+          "$ref": "#/$defs/url"
+        },
+        "restricted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "kpis": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Counts of events whose ts falls in the window ending at generated_at. failure_rate = deploy_failures / deploys (null when deploys = 0). incidents = alert.received chains. mttr from agent.decided mttr_s. eval_score_mean excludes judge_failed/judge_conflict.",
+      "required": [
+        "deploys",
+        "deploy_failures",
+        "failure_rate",
+        "builds",
+        "build_failures",
+        "incidents",
+        "mttr_p50_s",
+        "mttr_p90_s",
+        "revert_prs_opened",
+        "revert_prs_merged",
+        "escalations",
+        "eval_runs",
+        "eval_score_mean"
+      ],
+      "properties": {
+        "deploys": {
+          "$ref": "#/$defs/count"
+        },
+        "deploy_failures": {
+          "$ref": "#/$defs/count"
+        },
+        "failure_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/unit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "builds": {
+          "$ref": "#/$defs/count"
+        },
+        "build_failures": {
+          "$ref": "#/$defs/count"
+        },
+        "incidents": {
+          "$ref": "#/$defs/count"
+        },
+        "mttr_p50_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/seconds"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mttr_p90_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/seconds"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revert_prs_opened": {
+          "$ref": "#/$defs/count"
+        },
+        "revert_prs_merged": {
+          "$ref": "#/$defs/count"
+        },
+        "escalations": {
+          "$ref": "#/$defs/count"
+        },
+        "eval_runs": {
+          "$ref": "#/$defs/count"
+        },
+        "eval_score_mean": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/unit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "daily_point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "date",
+        "deploys",
+        "deploy_failures",
+        "incidents",
+        "escalations",
+        "revert_prs_merged",
+        "mttr_p50_s",
+        "eval_score_mean"
+      ],
+      "properties": {
+        "date": {
+          "$ref": "#/$defs/date"
+        },
+        "deploys": {
+          "$ref": "#/$defs/count"
+        },
+        "deploy_failures": {
+          "$ref": "#/$defs/count"
+        },
+        "incidents": {
+          "$ref": "#/$defs/count"
+        },
+        "escalations": {
+          "$ref": "#/$defs/count"
+        },
+        "revert_prs_merged": {
+          "$ref": "#/$defs/count"
+        },
+        "mttr_p50_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/seconds"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eval_score_mean": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/unit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "eval_scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario",
+        "case",
+        "runs",
+        "last_scored_at",
+        "last_total_score",
+        "mean_total_score",
+        "checks_pass_rate",
+        "judge_failures",
+        "judge_conflicts"
+      ],
+      "properties": {
+        "scenario": {
+          "$ref": "#/$defs/scenario"
+        },
+        "case": {
+          "enum": [
+            "i",
+            "ii",
+            "iii",
+            null
+          ]
+        },
+        "runs": {
+          "$ref": "#/$defs/count"
+        },
+        "last_scored_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "last_total_score": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/unit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mean_total_score": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/unit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checks_pass_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/checks"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "judge_failures": {
+          "$ref": "#/$defs/count"
+        },
+        "judge_conflicts": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    "file_meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "snapshot/meta.json. The SPA shows a staleness banner when now - generated_at > 1 h.",
+      "required": [
+        "schema",
+        "file",
+        "generated_at",
+        "ledger_head",
+        "event_count",
+        "chain_count",
+        "first_event_at",
+        "last_event_at",
+        "reconciler_run_url",
+        "sources"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ops.snapshot.v1"
+        },
+        "file": {
+          "const": "meta"
+        },
+        "generated_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "ledger_head": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha40"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_count": {
+          "$ref": "#/$defs/count"
+        },
+        "chain_count": {
+          "$ref": "#/$defs/count"
+        },
+        "first_event_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_event_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reconciler_run_url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/url"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "github",
+            "langfuse"
+          ],
+          "properties": {
+            "github": {
+              "$ref": "#/$defs/source_status"
+            },
+            "langfuse": {
+              "$ref": "#/$defs/source_status"
+            }
+          }
+        }
+      }
+    },
+    "file_chains": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "snapshot/chains.json, newest started_at first.",
+      "required": [
+        "schema",
+        "file",
+        "generated_at",
+        "chains"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ops.snapshot.v1"
+        },
+        "file": {
+          "const": "chains"
+        },
+        "generated_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "chains": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/chain_summary"
+          }
+        }
+      }
+    },
+    "file_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "snapshot/metrics.json. daily: up to the last 90 UTC days with events, ascending.",
+      "required": [
+        "schema",
+        "file",
+        "generated_at",
+        "ranges",
+        "current",
+        "daily",
+        "eval"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ops.snapshot.v1"
+        },
+        "file": {
+          "const": "metrics"
+        },
+        "generated_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "ranges": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "24h",
+            "7d",
+            "30d",
+            "all"
+          ],
+          "properties": {
+            "24h": {
+              "$ref": "#/$defs/kpis"
+            },
+            "7d": {
+              "$ref": "#/$defs/kpis"
+            },
+            "30d": {
+              "$ref": "#/$defs/kpis"
+            },
+            "all": {
+              "$ref": "#/$defs/kpis"
+            }
+          }
+        },
+        "current": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "revert_prs_awaiting_review",
+            "oldest_awaiting_since",
+            "escalations_open",
+            "failed_no_incident"
+          ],
+          "properties": {
+            "revert_prs_awaiting_review": {
+              "$ref": "#/$defs/count"
+            },
+            "oldest_awaiting_since": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "escalations_open": {
+              "$ref": "#/$defs/count"
+            },
+            "failed_no_incident": {
+              "$ref": "#/$defs/count"
+            }
+          }
+        },
+        "daily": {
+          "type": "array",
+          "maxItems": 90,
+          "items": {
+            "$ref": "#/$defs/daily_point"
+          }
+        },
+        "eval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scenarios"
+          ],
+          "properties": {
+            "scenarios": {
+              "type": "array",
+              "maxItems": 30,
+              "items": {
+                "$ref": "#/$defs/eval_scenario"
+              }
+            }
+          }
+        }
+      }
+    },
+    "file_entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "snapshot/entities/<chain_id>.json, the chain drawer. events are full ops.v1 events (validated against event.v1.json), oldest first.",
+      "required": [
+        "schema",
+        "file",
+        "generated_at",
+        "chain_id",
+        "chain",
+        "events",
+        "agent",
+        "trace",
+        "evals",
+        "links"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ops.snapshot.v1"
+        },
+        "file": {
+          "const": "entity"
+        },
+        "generated_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "chain_id": {
+          "$ref": "#/$defs/chain_id"
+        },
+        "chain": {
+          "$ref": "#/$defs/chain_summary"
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "required": [
+              "schema",
+              "event_id",
+              "kind",
+              "ts"
+            ]
+          }
+        },
+        "agent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent_decision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/trace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evals": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/eval_score"
+          }
+        },
+        "links": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/link"
+          }
+        }
+      }
+    }
+  }
+}

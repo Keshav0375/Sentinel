@@ -4,6 +4,7 @@
 # scales the Deployment to 0. The shared cluster is never stopped here (a separate manual op).
 # The nightly run always scales down and ignores SENTINEL_KEEP_WARM, so a forgotten demo session
 # costs at most one night. The stable-to-sha-tag lookup is the shared resolve-stable-tag action.
+# Ops events (task 10.2): ops-events appends scale.changed to the ops-ledger branch; never blocks the scale.
 name: "[sentinel] backend — scale"
 
 on:
@@ -161,3 +162,49 @@ jobs:
           resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
           cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
           keep-warm: 'false'
+
+  # Ops events (ops-dashboard §4.1, backend task 10.2): scale.changed on the ops-ledger branch after the scale
+  # job. contents: write only here; no login and no secret. The environment makes SENTINEL_KEEP_WARM visible.
+  # Every step is continue-on-error and the ops-event action never fails, so a ledger fault never reds the run.
+  # Job-level continue-on-error: a timeout or runner fault never reds the run.
+  ops-events:
+    name: Record the scale change
+    needs: [preflight, scale]
+    if: always() && needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-24.04
+    environment: sentinel-dev
+    timeout-minutes: 8
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - id: checkout
+        name: Check out the ops scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+
+      - id: shape
+        name: Shape the scale change event
+        continue-on-error: true
+        shell: bash
+        env:
+          SCALE_RESULT: ${{ needs.scale.result }}
+          DIRECTION: ${{ inputs.direction }}
+          KEEP_WARM: ${{ vars.SENTINEL_KEEP_WARM }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/emit.py scale >> "$GITHUB_OUTPUT"
+
+      - id: scale
+        name: Record scale.changed
+        if: steps.shape.outputs.scale-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.scale-kind }}
+          source-id: ${{ steps.shape.outputs.scale-source-id }}
+          state: ${{ steps.shape.outputs.scale-state }}
+          chain: ${{ steps.shape.outputs.scale-chain }}
+          data: ${{ steps.shape.outputs.scale-data }}
