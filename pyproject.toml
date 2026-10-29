@@ -28,6 +28,7 @@ dependencies = [
     "azure-identity>=1.26.0",
     "azure-keyvault-secrets>=4.11.3",
     "pyyaml>=6.0.0",
+    "redis>=5.2.0,<8.0.0",
 ]
 
 [project.scripts]

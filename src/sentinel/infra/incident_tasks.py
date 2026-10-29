@@ -52,6 +52,10 @@ class IncidentTasks:
     def __iter__(self) -> Iterator[asyncio.Task[None]]:
         return iter(list(self._tasks))
 
+    def has(self, incident_id: str) -> bool:
+        """True while a task of *incident_id* is in flight."""
+        return incident_id in self._tasks.values()
+
     def start(self, incident_id: str, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Run *coro* as the task of *incident_id*; kept until it ends.
 

@@ -1,5 +1,5 @@
-"""Tests for the alembic migrations — ``001_initial_schema`` and ``002_seed_services``
-(backend.md §5.3).
+"""Tests for the alembic migrations — ``001_initial_schema``, ``002_seed_services`` (backend.md
+§5.3) and ``003_memory_hardening`` (decision 2026-10-25 B/C).
 
 Tests taking ``fresh_db`` create a throwaway database on the pgvector container named by
 TEST_DATABASE_URL (see tests/conftest.py), so ``upgrade head`` is proven from empty, and
@@ -86,6 +86,22 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str, bool, str | None]]] = {
         ("deployed_at", "timestamp with time zone", False, "now()"),
         ("metadata", "jsonb", False, None),
     ],
+    # 003_memory_hardening
+    "incident_checkpoints": [
+        ("incident_id", "uuid", True, None),
+        ("step", "integer", True, None),
+        ("stage", "text", True, None),
+        ("state", "jsonb", True, None),
+        ("created_at", "timestamp with time zone", True, "now()"),
+    ],
+    "cache_entries": [
+        ("key", "text", True, None),
+        ("kind", "text", True, None),
+        ("value", "jsonb", True, None),
+        ("expires_at", "timestamp with time zone", True, None),
+        ("hit_count", "integer", True, "0"),
+        ("created_at", "timestamp with time zone", True, "now()"),
+    ],
 }
 
 # information_schema.columns.data_type for each format_type above.
@@ -100,7 +116,7 @@ _INFO_SCHEMA_TYPE = {
     "vector(384)": "USER-DEFINED",
 }
 
-# The 8 §5.3 indexes, as pg_indexes.indexdef renders them.
+# The 8 §5.3 indexes plus 003's cache-expiry index, as pg_indexes.indexdef renders them.
 _EXPECTED_INDEXES = {
     "idx_incidents_status": "CREATE INDEX idx_incidents_status ON public.incidents "
     "USING btree (status)",
@@ -118,12 +134,34 @@ _EXPECTED_INDEXES = {
     "USING btree (incident_id)",
     "idx_deployments_commit": "CREATE INDEX idx_deployments_commit ON public.deployments "
     "USING btree (commit_sha)",
+    "idx_cache_entries_expires": "CREATE INDEX idx_cache_entries_expires ON public.cache_entries "
+    "USING btree (expires_at)",
 }
 
-# Constraint-backed indexes: the three primary keys and services.name UNIQUE.
-_CONSTRAINT_INDEXES = {"incidents_pkey", "services_pkey", "deployments_pkey", "services_name_key"}
+# Constraint-backed indexes: the five primary keys and services.name UNIQUE.
+_CONSTRAINT_INDEXES = {
+    "incidents_pkey",
+    "services_pkey",
+    "deployments_pkey",
+    "services_name_key",
+    "incident_checkpoints_pkey",
+    "cache_entries_pkey",
+}
 
-_TABLES = {"incidents", "services", "deployments"}
+# What 003 adds on top of the §5.3 schema of 001/002.
+_MEMORY_TABLES = {"incident_checkpoints", "cache_entries"}
+_MEMORY_INDEXES = {"idx_cache_entries_expires", "incident_checkpoints_pkey", "cache_entries_pkey"}
+_MEMORY_CONSTRAINTS = {
+    ("incident_checkpoints", "p", "PRIMARY KEY (incident_id, step)"),
+    (
+        "incident_checkpoints",
+        "f",
+        "FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE CASCADE",
+    ),
+    ("cache_entries", "p", "PRIMARY KEY (key)"),
+}
+
+_TABLES = {"incidents", "services", "deployments"} | _MEMORY_TABLES
 
 # The record stage's INSERT, verbatim from Sentinel-deployment ci_app_deployment.yml.
 # psql substitutes each :'var' as a quoted literal; _psql_render does the same.
@@ -137,7 +175,7 @@ VALUES
 
 _GHA_ROLE = "gha-app"
 
-_HEAD = "002"
+_HEAD = "003"
 
 
 # ── Helpers / fixtures ────────────────────────────────────────────────────────
@@ -286,13 +324,20 @@ def _snapshot(dsn: str) -> dict[str, Any]:
     return _run(_schema_snapshot, dsn)
 
 
-def _assert_full_schema(dsn: str) -> None:
+def _assert_full_schema(dsn: str, *, memory: bool = True) -> None:
+    """The whole schema at head; with *memory* False, the §5.3 schema of 001/002 alone."""
     snap = _snapshot(dsn)
+    tables = _TABLES if memory else _TABLES - _MEMORY_TABLES
+    indexes = set(_EXPECTED_INDEXES) | _CONSTRAINT_INDEXES
+    if not memory:
+        indexes -= _MEMORY_INDEXES
 
     assert snap["extension"] is not None, "vector extension missing"
-    assert snap["tables"] == {("public", t) for t in _TABLES} | {("public", "alembic_version")}
+    assert snap["tables"] == {("public", t) for t in tables} | {("public", "alembic_version")}
 
     for table, expected in _EXPECTED_COLUMNS.items():
+        if table not in tables:
+            continue
         actual = [c for c in snap["columns"] if c["table_name"] == table]
         assert [c["column_name"] for c in actual] == [e[0] for e in expected], table
         for col, (name, full_type, not_null, default) in zip(actual, expected, strict=True):
@@ -304,21 +349,20 @@ def _assert_full_schema(dsn: str) -> None:
         vector_cols = [c for c in actual if c["full_type"] == "vector(384)"]
         assert all(c["udt_name"] == "vector" for c in vector_cols), table
 
-    # Exactly the 8 §5.3 indexes plus the constraint-backed ones — nothing extra.
-    assert set(snap["indexes"]) == set(_EXPECTED_INDEXES) | _CONSTRAINT_INDEXES | {
-        "alembic_version_pkc"
-    }
+    # Exactly the 8 §5.3 indexes (+ 003's) plus the constraint-backed ones — nothing extra.
+    assert set(snap["indexes"]) == indexes | {"alembic_version_pkc"}
     for name, indexdef in _EXPECTED_INDEXES.items():
-        assert snap["indexes"][name] == indexdef
+        if name in indexes:
+            assert snap["indexes"][name] == indexdef
 
-    # No CHECKs, enums or other constraints beyond §5.3 (alembic_version's pkey aside).
+    # No CHECKs, enums or other constraints beyond §5.3 + 003 (alembic_version's pkey aside).
     assert {c for c in snap["constraints"] if c[0] != "alembic_version"} == {
         ("incidents", "p", "PRIMARY KEY (id)"),
         ("services", "p", "PRIMARY KEY (id)"),
         ("services", "u", "UNIQUE (name)"),
         ("deployments", "p", "PRIMARY KEY (id)"),
         ("deployments", "f", "FOREIGN KEY (incident_id) REFERENCES incidents(id)"),
-    }
+    } | (_MEMORY_CONSTRAINTS if memory else set())
 
 
 def _assert_empty_schema(dsn: str) -> None:
@@ -793,9 +837,11 @@ def test_seed_rerun_is_idempotent(fresh_db: str, cfg: Config) -> None:
     command.upgrade(cfg, "head")
     before = _services(fresh_db)
 
-    # Run 002 again over its own row (stamp back, then upgrade).
+    # Run 002 again over its own row (stamp back, upgrade through 002, stamp head: 003's
+    # tables are already there).
     command.stamp(cfg, "001")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "002")
+    command.stamp(cfg, "head")
 
     assert _current_revision(fresh_db) == _HEAD
     after = _services(fresh_db)
@@ -830,7 +876,7 @@ def test_downgrade_to_001_removes_only_the_seed(fresh_db: str, cfg: Config) -> N
         )
 
     assert _run(_counts, fresh_db) == (1, 1)
-    _assert_full_schema(fresh_db)
+    _assert_full_schema(fresh_db, memory=False)
 
 
 def test_seed_round_trip(fresh_db: str, cfg: Config) -> None:
@@ -929,3 +975,64 @@ def test_offline_sql_contains_schema_and_guarded_grant(
     assert "ON CONFLICT (name) DO UPDATE SET" in out
     assert out.index("ON CONFLICT (name)") < out.index("REINDEX INDEX idx_services_embedding;")
     assert "UPDATE alembic_version SET version_num='002'" in out
+    # 003: the two memory tables, then the head revision.
+    assert "CREATE TABLE incident_checkpoints (" in out
+    assert "REFERENCES incidents(id) ON DELETE CASCADE" in out
+    assert "UPDATE alembic_version SET version_num='003'" in out
+
+
+# ── 003_memory_hardening ──────────────────────────────────────────────────────
+
+
+def test_003_downgrade_to_002_drops_only_new_tables(fresh_db: str, cfg: Config) -> None:
+    command.upgrade(cfg, "head")
+    _execute(
+        fresh_db,
+        "INSERT INTO incidents (alert_id, severity, service) "
+        "VALUES ('a-1', 'P1', 'sentinel-watchtower')",
+    )
+
+    command.downgrade(cfg, "002")
+
+    assert _current_revision(fresh_db) == "002"
+    _assert_full_schema(fresh_db, memory=False)
+    assert [r["name"] for r in _services(fresh_db)] == [_SEED_NAME]
+
+    async def _count(conn: asyncpg.Connection) -> int:
+        return await conn.fetchval("SELECT count(*) FROM incidents")
+
+    assert _run(_count, fresh_db) == 1
+
+    command.upgrade(cfg, "head")
+    _assert_full_schema(fresh_db)
+
+
+def test_checkpoint_cascade_on_incident_delete(fresh_db: str, cfg: Config) -> None:
+    command.upgrade(cfg, "head")
+
+    async def _do(conn: asyncpg.Connection) -> tuple[int, int]:
+        incident_id = await conn.fetchval(
+            "INSERT INTO incidents (alert_id, severity, service) "
+            "VALUES ('a-1', 'P1', 'sentinel-watchtower') RETURNING id"
+        )
+        await conn.execute(
+            "INSERT INTO incident_checkpoints (incident_id, step, stage, state) "
+            "VALUES ($1, 0, 'accepted', '{}'::jsonb)",
+            incident_id,
+        )
+        before = await conn.fetchval("SELECT count(*) FROM incident_checkpoints")
+        await conn.execute("DELETE FROM incidents WHERE id = $1", incident_id)
+        after = await conn.fetchval("SELECT count(*) FROM incident_checkpoints")
+        return before, after
+
+    assert _run(_do, fresh_db) == (1, 0)
+
+
+def test_checkpoint_needs_its_incident(fresh_db: str, cfg: Config) -> None:
+    command.upgrade(cfg, "head")
+    with pytest.raises(asyncpg.ForeignKeyViolationError):
+        _execute(
+            fresh_db,
+            "INSERT INTO incident_checkpoints (incident_id, step, stage, state) "
+            f"VALUES ('{uuid.uuid4()}', 0, 'accepted', '{{}}'::jsonb)",
+        )

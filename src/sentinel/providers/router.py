@@ -53,6 +53,8 @@ from agents.items import TResponseStreamEvent
 from sentinel.config import AGENT_RUN_TIMEOUT_MIN_S, Settings
 from sentinel.exceptions import ProviderUnavailableError
 from sentinel.infra.logging import get_logger
+from sentinel.memory.cache import Cache
+from sentinel.providers.cached_model import CachingModel
 from sentinel.providers.capabilities import ProviderCapabilities, common_capabilities
 from sentinel.providers.fake import FakeModel
 
@@ -414,6 +416,7 @@ async def call_with_fallback(
     role: Role,
     settings: Settings,
     run_kwargs: Mapping[str, Any] | None = None,
+    cache: Cache | None = None,
 ) -> RoutedRun:
     """Run *agent* on its role's primary model; on a provider error, once on the fallback.
 
@@ -424,6 +427,9 @@ async def call_with_fallback(
     each run is bounded by ``settings.sentinel_agent_run_timeout_s`` — a timed-out primary
     run falls back.
     Tool calls a cancelled primary run made stay made: the caller's budget counts them.
+    With *cache* (never on the fake LLM) each model is also wrapped in a
+    :class:`~sentinel.providers.cached_model.CachingModel`: an eligible call that hits skips
+    the model and its retries.
 
     Args:
         agent: The agent to run; its own ``model`` is replaced by the routed one.
@@ -433,6 +439,7 @@ async def call_with_fallback(
         run_kwargs: Extra ``Runner.run`` keyword arguments (``max_turns``, ``context``…),
             passed to both attempts. Their ``run_config`` (or a default one) always gets
             ``trace_include_sensitive_data=False``.
+        cache: The exact-match LLM cache; None (the default) caches nothing.
 
     Returns:
         The run result and the ``provider/model`` string that actually produced it.
@@ -452,7 +459,12 @@ async def call_with_fallback(
     bound = _run_timeout(settings)
 
     async def run(model: Model) -> RunResult:
-        routed = agent.clone(model=RetryingModel(model, role), model_settings=model_settings)
+        wrapped: Model = RetryingModel(model, role)
+        if cache is not None and not settings.sentinel_fake_llm:
+            wrapped = CachingModel(
+                wrapped, cache, deterministic=settings.sentinel_cache_llm_deterministic
+            )
+        routed = agent.clone(model=wrapped, model_settings=model_settings)
         return await asyncio.wait_for(Runner.run(routed, input, **kwargs), bound)
 
     try:

@@ -36,6 +36,25 @@ Every cap is enforced here, in code (decision 2026-10-15):
   its next model call, and the incident escalates with the context gathered so far.
 - **Wall-clock bound.** The run is bounded by ``settings.sentinel_pipeline_timeout_s``
   (900 s); past it the incident escalates with :data:`PIPELINE_TIMEOUT` and is still stored.
+- **Checkpoints and resume (decision 2026-10-25 B).** With ``deps.checkpoints`` (and
+  ``persist``) the run inserts an ``in_progress`` placeholder row when it starts and writes a
+  full :class:`~sentinel.models.checkpoint.RunSnapshot` after each stage — ``accepted``,
+  ``triage`` (with the plan note), every ``analysis``, every ``reflexion`` decision, every
+  ``resolution`` draft, and ``verify`` after a reverification FAIL — in the background, never
+  on the critical path; they are deleted once the terminal incident is stored. A restarted
+  pod resumes a stuck incident ONCE (``run_pipeline(..., resume=ResumePoint(...))``): the
+  snapshot is restored and the run jumps past the last checkpointed LLM stage; the
+  deterministic steps (the gate, the target checks and their ``deployments`` read) run
+  again. Every cap counter (tool budget used/refused, reflexion loops, unparsed critiques,
+  parse failures), ``models_used``, the timeline and ``started_at`` continue from the
+  snapshot — never reset; calls made inside the interrupted, un-checkpointed stage are not
+  recounted. The wall-clock bound restarts on resume (downtime is not pipeline work). A
+  second restart escalates with :data:`~sentinel.memory.checkpoints.RESUME_FAILED`
+  (:func:`escalate_resumed`).
+- **Cache (decision 2026-10-25 C).** ``deps.cache`` goes to ``fetch_logs`` (5-minute,
+  minute-keyed results) and to ``call_with_fallback`` (exact-match LLM calls, only when
+  deterministic or ``SENTINEL_CACHE_LLM_DETERMINISTIC``; never the judge). The incident's
+  hit/miss counts — names only — go to its trace metadata and ``pipeline_complete``.
 
 A ``rollback_proposed`` incident also backfills the ``deployments`` row the target was
 verified against: after the incident row is stored, its ``incident_id`` is set to this
@@ -104,15 +123,19 @@ from sentinel.eval.dataset_writer import (
 from sentinel.exceptions import ToolBudgetExhausted
 from sentinel.infra.logging import get_logger
 from sentinel.infra.tracing import (
+    annotate_trace,
     incident_trace_id,
     load_prompt,
     trace_incident,
     track_incident_tokens,
     use_agent_prompts,
 )
+from sentinel.memory.cache import Cache, track_cache_stats
+from sentinel.memory.checkpoints import RESUME_FAILED, CheckpointWriter
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
 from sentinel.models.analysis import AnalysisResult
+from sentinel.models.checkpoint import CheckpointStage, RunSnapshot
 from sentinel.models.incident import Incident, IncidentStatus, TimelineEntry, TriageResult
 from sentinel.models.memory import IncidentOutcome
 from sentinel.models.pipeline import PipelineInput, PipelineResult
@@ -149,8 +172,10 @@ __all__ = [
     "REFLEXION_UNPARSEABLE",
     "REVERIFICATION_MAX_RETRIES",
     "PipelineDeps",
+    "ResumePoint",
     "ToolBudget",
     "budgeted",
+    "escalate_resumed",
     "run_pipeline",
 ]
 
@@ -215,6 +240,9 @@ class PipelineDeps:
             ``default_writer(settings)`` (no-op on the fake LLM or without LangFuse).
         dataset_writes: Where the background write is tracked; None → the process-wide
             ``DATASET_WRITES`` the lifespan drains.
+        checkpoints: The background checkpoint writer (placeholder row, one snapshot per
+            stage, deleted once stored); None (or ``persist`` False) writes none.
+        cache: The tool / LLM result cache; None caches nothing.
     """
 
     settings: Settings
@@ -224,6 +252,16 @@ class PipelineDeps:
     persist: bool = True
     dataset_writer: ScenarioRunWriter | None = None
     dataset_writes: DatasetWrites | None = None
+    checkpoints: CheckpointWriter | None = None
+    cache: Cache | None = None
+
+
+@dataclass(frozen=True)
+class ResumePoint:
+    """Where a resumed run starts: the latest checkpoint's snapshot, and the next step."""
+
+    snapshot: RunSnapshot
+    next_step: int
 
 
 # ── The tool-call budget (§4.6) ───────────────────────────────────────────────
@@ -352,6 +390,94 @@ class _IncidentRun:
         # (tool, output) of the current Runner.run only — reset when a run starts.
         self._run_outputs: list[tuple[str, str]] = []
         self._instructions: dict[str, str] = {}
+        # The reflexion critique the next analysis runs with (a loop-back's guidance).
+        self.guidance: ReflexionResult | None = None
+        # Resolution progress: loop finished, attempt, its correction, the raw draft.
+        self.loop_done = False
+        self.attempt = 0
+        self.correction: str | None = None
+        self.draft: RollbackSpec | EscalationContext | None = None
+        # The next checkpoint step, and the stage a resumed run restarts after.
+        self._step = 0
+        self._resume_stage: CheckpointStage | None = None
+        self._checkpointing = deps.persist and deps.checkpoints is not None
+
+    # ── Checkpoints ───────────────────────────────────────────────────────────
+
+    def snapshot(self, stage: CheckpointStage) -> RunSnapshot:
+        """The run's state after *stage*: what a resume restores."""
+        return RunSnapshot(
+            request=self.request,
+            started_at=self.started_at,
+            stage=stage,
+            timeline=list(self.timeline),
+            models_used=list(self.models_used),
+            reflexion_loops=self.reflexion_loops,
+            parse_failures=self.parse_failures,
+            unparsed_critiques=self.unparsed_critiques,
+            tool_calls_used=self.budget.used,
+            tool_calls_refused=self.budget.refused,
+            escalation_drafted=self.escalation_drafted,
+            unparsed_hypothesis=self.unparsed_hypothesis,
+            fallback_evidence=self.fallback_evidence,
+            triage=self.triage,
+            analysis=self.analysis,
+            critique=self.critique,
+            guidance=self.guidance,
+            evidence=list(self.evidence),
+            gathered=list(self.gathered),
+            loop_done=self.loop_done,
+            attempt=self.attempt,
+            correction=self.correction,
+            draft=self.draft,
+        )
+
+    def restore(self, point: ResumePoint) -> None:
+        """Continue from *point*: every field and counter of its snapshot, never reset.
+
+        Tool calls made inside the stage that was interrupted (after the snapshot) are not
+        counted again: they are lost with the crash.
+        """
+        snap = point.snapshot
+        self.started_at = snap.started_at
+        self.timeline = list(snap.timeline)
+        self.models_used = list(snap.models_used)
+        self.reflexion_loops = snap.reflexion_loops
+        self.parse_failures = snap.parse_failures
+        self.unparsed_critiques = snap.unparsed_critiques
+        self.budget.used = snap.tool_calls_used
+        self.budget.refused = snap.tool_calls_refused
+        self.escalation_drafted = snap.escalation_drafted
+        self.unparsed_hypothesis = snap.unparsed_hypothesis
+        self.fallback_evidence = snap.fallback_evidence
+        self.triage = snap.triage
+        self.analysis = snap.analysis
+        self.critique = snap.critique
+        self.guidance = snap.guidance
+        self.evidence = list(snap.evidence)
+        self.gathered = list(snap.gathered)
+        self.loop_done = snap.loop_done
+        self.attempt = snap.attempt
+        self.correction = snap.correction
+        self.draft = snap.draft
+        self._step = point.next_step
+        self._resume_stage = snap.stage
+        self._note("resume", f"resumed after a restart from the {snap.stage} checkpoint")
+
+    def _checkpoint(self, stage: CheckpointStage) -> None:
+        """Queue checkpoint *stage* in the background (when checkpointing); never raises."""
+        if not self._checkpointing or self.deps.checkpoints is None:
+            return
+        try:
+            self.deps.checkpoints.save(self.request.incident_id, self._step, self.snapshot(stage))
+        except Exception as exc:
+            logger.warning(
+                "checkpoint_write_failed",
+                incident_id=self.request.incident_id,
+                op="snapshot",
+                error_type=type(exc).__name__,
+            )
+        self._step += 1
 
     # ── Driver ────────────────────────────────────────────────────────────────
 
@@ -391,7 +517,10 @@ class _IncidentRun:
             return self._escalate(f"{PIPELINE_ERROR} during {self.stage}: {type(exc).__name__}")
 
     async def _plan_and_execute(self) -> RollbackSpec | EscalationContext:
-        self.triage = await self._triage()
+        # A resumed run skips every LLM stage its snapshot already holds (see restore).
+        resumed = self._resume_stage
+        if resumed in (None, "accepted"):
+            self.triage = await self._triage()
 
         fast = self.request.signal_type == "deploy_failure"
         max_loops = 0 if fast else REFLEXION_MAX_LOOPS
@@ -403,33 +532,55 @@ class _IncidentRun:
         )
         if pin is not None:
             plan += f", pinned to {pin}"
-        self._note("plan", f"{self.request.signal_type}: {plan}")
+        if resumed in (None, "accepted"):
+            self._note("plan", f"{self.request.signal_type}: {plan}")
+            self._checkpoint("triage")
 
-        guidance: ReflexionResult | None = None
-        while True:
-            self.analysis = await self._analyse(guidance)
-            critique = await self._reflect(self.analysis)
-            if critique is None:
-                # An unparsed critique uses up a loop; it never silently burns them all.
-                self.unparsed_critiques += 1
-                if self.unparsed_critiques > 1 or self.reflexion_loops >= max_loops:
-                    return self._escalate(REFLEXION_UNPARSEABLE)
-                critique = _unparsed_critique(self.service)
-            self.critique = critique
-            if not critique.needs_more_evidence or self.reflexion_loops >= max_loops:
-                break
-            self.reflexion_loops += 1
-            guidance = self.critique
-            self._note("reflexion_loop", f"loop {self.reflexion_loops}: back to analysis")
+        if not self.loop_done:
+            skip_analysis = resumed == "analysis"
+            while True:
+                if skip_analysis:
+                    skip_analysis = False  # the restored analysis is the one to critique
+                else:
+                    self.analysis = await self._analyse(self.guidance)
+                    self._checkpoint("analysis")
+                assert self.analysis is not None
+                critique = await self._reflect(self.analysis)
+                if critique is None:
+                    # An unparsed critique uses up a loop; it never silently burns them all.
+                    self.unparsed_critiques += 1
+                    if self.unparsed_critiques > 1 or self.reflexion_loops >= max_loops:
+                        return self._escalate(REFLEXION_UNPARSEABLE)
+                    critique = _unparsed_critique(self.service)
+                self.critique = critique
+                if not critique.needs_more_evidence or self.reflexion_loops >= max_loops:
+                    self.loop_done = True
+                    self._checkpoint("reflexion")
+                    break
+                self.reflexion_loops += 1
+                self.guidance = self.critique
+                self._note("reflexion_loop", f"loop {self.reflexion_loops}: back to analysis")
+                self._checkpoint("reflexion")
+        critique = self.critique
+        assert critique is not None  # the loop ended with a critique
 
         problem = _gate_problem(critique)
         if problem is not None:
             return self._escalate(problem)
-        self._note("decision_gate", f"pass: confidence {critique.confidence:.2f}")
+        if resumed not in ("resolution", "verify"):
+            self._note("decision_gate", f"pass: confidence {critique.confidence:.2f}")
 
-        correction: str | None = None
-        for _ in range(REVERIFICATION_MAX_RETRIES + 1):
-            draft = await self._resolve(correction)
+        use_restored = resumed == "resolution"
+        attempt = self.attempt
+        correction = self.correction
+        while attempt <= REVERIFICATION_MAX_RETRIES:
+            if use_restored:
+                draft = self.draft  # the restored resolution draft: checked again below
+                use_restored = False
+            else:
+                draft = await self._resolve(correction)
+                self.draft, self.attempt = draft, attempt
+                self._checkpoint("resolution")
             if isinstance(draft, EscalationContext):
                 self.escalation_drafted = True
                 self._note("escalate", "the resolution agent drafted an escalation")
@@ -469,6 +620,9 @@ class _IncidentRun:
             if verdict.outcome is ReverificationOutcome.ESCALATE:
                 return self._escalate(f"reverification escalated: {verdict.reason}")
             correction = verdict.reason
+            attempt += 1
+            self.attempt, self.correction, self.draft = attempt, correction, None
+            self._checkpoint("verify")
         return self._escalate(f"reverification failed after a retry: {correction}")
 
     # ── Agent steps ───────────────────────────────────────────────────────────
@@ -494,6 +648,7 @@ class _IncidentRun:
             self.deps.pool,
             settings=self.settings,
             instructions=self._instructions[ANALYSIS_AGENT_NAME],
+            cache=self.deps.cache,
         )
         sections: list[tuple[str, object]] = [
             ("Alert", self.request.alert.agent_view()),
@@ -622,6 +777,7 @@ class _IncidentRun:
                 "max_turns": self.budget.limit + _EXTRA_TURNS,
                 "hooks": self._guard,
             },
+            cache=self.deps.cache,
         )
         if self.budget.exhausted:
             raise ToolBudgetExhausted(f"tool-call budget of {self.budget.limit} exhausted")
@@ -807,8 +963,9 @@ class _IncidentRun:
         return incident, outcome
 
 
-async def _store(run: _IncidentRun, result: PipelineResult) -> None:
-    """Store the incident and its outcome; a failure (no memory) is logged, never raised."""
+async def _store(run: _IncidentRun, result: PipelineResult) -> bool:
+    """Store the incident and its outcome; True when stored. A failure (no memory) is
+    logged, never raised."""
     try:
         incident, outcome = run.stored(result)
         await run.deps.episodic_memory.store_incident(incident, outcome=outcome)
@@ -819,9 +976,20 @@ async def _store(run: _IncidentRun, result: PipelineResult) -> None:
             error_type=type(exc).__name__,
             error=str(exc),
         )
-        return
+        return False
     if result.status == "rollback_proposed" and run.verified_deploy_id is not None:
         await _link_deployment(run, run.verified_deploy_id)
+    return True
+
+
+async def _finish(run: _IncidentRun, result: PipelineResult) -> None:
+    """Store a terminal run, drop its checkpoints once stored, start its dataset item."""
+    if not run.deps.persist:
+        return
+    stored = await _store(run, result)
+    if stored and run._checkpointing and run.deps.checkpoints is not None:  # pyright: ignore[reportPrivateUsage]
+        run.deps.checkpoints.discard(result.incident_id)
+    _start_dataset_item(run, result)
 
 
 def _start_dataset_item(run: _IncidentRun, result: PipelineResult) -> None:
@@ -866,21 +1034,31 @@ async def _link_deployment(run: _IncidentRun, deploy_id: str) -> None:
         )
 
 
-async def run_pipeline(request: PipelineInput, deps: PipelineDeps) -> PipelineResult:
+async def run_pipeline(
+    request: PipelineInput, deps: PipelineDeps, *, resume: ResumePoint | None = None
+) -> PipelineResult:
     """Run one incident through the §4.2 pipeline; returns its outcome, never raises.
 
     Opens the incident's root LangFuse trace (id = the incident UUID as hex, §4.5) and the
     openai-agents trace every run nests in, and sums every LLM call's tokens. With
     ``deps.persist`` the incident is then stored in episodic memory (see :func:`_store`).
+    With ``deps.checkpoints`` the placeholder row and the stage checkpoints are written as
+    it runs; *resume* continues a run from its latest checkpoint instead (no placeholder,
+    no ``accepted`` checkpoint — both exist).
     """
     run = _IncidentRun(request, deps)
+    if resume is not None:
+        run.restore(resume)
+    elif run._checkpointing and deps.checkpoints is not None:  # pyright: ignore[reportPrivateUsage]
+        deps.checkpoints.open(request, run.started_at)
+        run._checkpoint("accepted")  # pyright: ignore[reportPrivateUsage]
     logger.info(
         "pipeline_start",
         incident_id=request.incident_id,
         service=request.alert.service,
         signal_type=request.signal_type,
     )
-    with track_incident_tokens(request.incident_id) as tokens:
+    with track_cache_stats() as stats, track_incident_tokens(request.incident_id) as tokens:
         with (
             trace_incident(request.incident_id, request.correlation_id, request.alert.service),
             agent_trace(
@@ -892,10 +1070,9 @@ async def run_pipeline(request: PipelineInput, deps: PipelineDeps) -> PipelineRe
             ),
         ):
             outcome = await run.outcome()
+            annotate_trace(stats.as_metadata())
         result = run.result(outcome, tokens.total_tokens)
-    if deps.persist:
-        await _store(run, result)
-        _start_dataset_item(run, result)
+    await _finish(run, result)
     logger.info(
         "pipeline_complete",
         incident_id=request.incident_id,
@@ -905,6 +1082,36 @@ async def run_pipeline(request: PipelineInput, deps: PipelineDeps) -> PipelineRe
         tool_calls_used=result.tool_calls_used,
         tokens_used=result.tokens_used,
         models_used=result.models_used,
+        cache=stats.as_metadata(),
+        resumed=resume is not None,
+    )
+    return result
+
+
+async def escalate_resumed(point: ResumePoint, deps: PipelineDeps) -> PipelineResult:
+    """End an incident whose one resume did not finish: escalate it with
+    :data:`~sentinel.memory.checkpoints.RESUME_FAILED` and what *point* holds; never raises.
+
+    Stored, its checkpoints dropped and its dataset item written as any terminal run.
+    """
+    request = point.snapshot.request
+    run = _IncidentRun(request, deps)
+    try:
+        run.restore(point)
+    except Exception as exc:  # a snapshot that cannot be restored still ends the incident
+        logger.warning(
+            "incident_resume_restore_failed",
+            incident_id=request.incident_id,
+            error_type=type(exc).__name__,
+        )
+        run = _IncidentRun(request, deps)
+    outcome = run._escalate(RESUME_FAILED)  # pyright: ignore[reportPrivateUsage]
+    result = run.result(outcome, 0)
+    await _finish(run, result)
+    logger.warning(
+        "incident_resume_failed",
+        incident_id=request.incident_id,
+        from_stage=point.snapshot.stage,
     )
     return result
 

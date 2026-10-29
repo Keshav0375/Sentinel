@@ -14,7 +14,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -289,11 +289,17 @@ async def test_list_rejects_a_limit_above_200() -> None:
 
 
 async def test_list_accepts_limit_200() -> None:
-    # A placeholder pool: with no in-flight incident the in-progress listing never queries it.
-    app = _app(ShortTermMemory(), EpisodicMemory(MagicMock(), EmbeddingClient(MagicMock())))
+    # The in-progress listing also reads the in_progress placeholder rows: none here.
+    episodic = MagicMock()
+    episodic.stored_incident_ids = AsyncMock(return_value=set())
+    episodic.list_incident_rows = AsyncMock(return_value=[])
+    app = _app(ShortTermMemory(), episodic)
     response = await _get(app, "/incidents", status="in_progress", limit=200)
     assert response.status_code == 200
     assert response.json() == {"incidents": []}
+    episodic.list_incident_rows.assert_awaited_once_with(
+        status="in_progress", service=None, limit=200
+    )
 
 
 # ── GET /incidents ────────────────────────────────────────────────────────────

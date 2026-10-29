@@ -10,7 +10,9 @@ behind ``require_incident_write`` (backend 5.5).
 - **Dedupe (§3.1).** On ``correlation_id``: a 24 h in-memory cache first, then the stored
   incidents (``EpisodicMemory.find_incident_by_correlation_id``; an unavailable database is
   logged and treated as a miss). A duplicate answers 202 with the original ``incident_id``
-  and ``status: "duplicate"`` and starts nothing.
+  and ``status: "duplicate"`` and starts nothing — except that a stored hit on an
+  ``in_progress`` placeholder no task here is running (a restart interrupted it) also asks the
+  resumer to resume it, in the background (``IncidentResumer.resume_one``; at most once).
 - **Body cap.** Over ``SENTINEL_WEBHOOK_MAX_BODY_BYTES`` (256 KB) → 413 before parsing or auth.
 - **One task per incident.** Created in the handler, outside any span (§4.5), with its own
   entry in the shared short-term memory. The shared :class:`IncidentTasks` keeps each task
@@ -23,6 +25,7 @@ behind ``require_incident_write`` (backend 5.5).
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
@@ -36,6 +39,7 @@ from starlette.types import Message, Receive
 
 from sentinel.config import WEBHOOK_MAX_BODY_BYTES
 from sentinel.exceptions import SentinelMemoryError
+from sentinel.infra.incident_resume import IncidentResumer
 from sentinel.infra.incident_tasks import IncidentTasks
 from sentinel.infra.logging import get_logger
 from sentinel.memory.episodic import EpisodicMemory
@@ -54,6 +58,9 @@ ACCEPTED_MESSAGE: Final = "Agent pipeline triggered"
 DUPLICATE_MESSAGE: Final = "Duplicate correlation_id: pipeline already triggered"
 RETRY_AFTER_S: Final = 30
 SHUTTING_DOWN_DETAIL: Final = "shutting down; retry later"
+
+# Strong references to the background resume_one calls a webhook retry starts.
+_RESUMES: set[asyncio.Task[object]] = set()
 
 
 class IncidentAck(BaseModel):
@@ -206,6 +213,7 @@ def make_incident_router(
     deduplicator: CorrelationDeduplicator | None = None,
     tasks: IncidentTasks | None = None,
     max_body_bytes: int = WEBHOOK_MAX_BODY_BYTES,
+    resumer: IncidentResumer | None = None,
 ) -> APIRouter:
     """Create the incident webhook router.
 
@@ -218,6 +226,8 @@ def make_incident_router(
         tasks: The shared in-flight registry (main passes the lifespan's; it caps
             concurrency and is drained at shutdown). Default: a fresh one.
         max_body_bytes: Body cap; a larger request is 413 before parsing or auth.
+        resumer: Asked to resume the stored original of a duplicate in the background (it
+            only acts on an ``in_progress`` placeholder no task is running). None: never.
 
     Returns:
         ``APIRouter`` with ``POST /webhooks/incident`` registered.
@@ -278,6 +288,12 @@ def make_incident_router(
         stored = await _stored_original(correlation_id)
         if stored is not None:
             dedup.record(correlation_id, stored)
+            if resumer is not None:
+                task: asyncio.Task[object] = asyncio.create_task(
+                    resumer.resume_one(stored), name=f"incident-resume-{stored}"
+                )
+                _RESUMES.add(task)
+                task.add_done_callback(_RESUMES.discard)
             return _duplicate(correlation_id, stored, "db")
         # The lookup awaited: a concurrent request may have recorded the id meanwhile.
         existing = dedup.check(correlation_id)

@@ -17,6 +17,13 @@ or misses the deadline is reported in ``sources`` and the others are still retur
 only when every requested source fails does the call return a ToolFailure. The keys
 are read only when the request headers are built and never logged. Nothing is
 captured to Langfuse.
+
+With a cache (decision 2026-10-25 C) a result is reused for :data:`TOOL_CACHE_TTL_S` (5 min).
+Its key is the tool, site, service, window length, sources and window END — which, with a
+cache, is ceiled to the next whole minute, so every call within one minute shares a key and
+no evidence that arrived before the call is cut off (staleness ≤ 60 s). Only a result whose
+every source is ``"ok"`` is stored; a partial result or a ToolFailure never is. Without a
+cache the window ends at the call time, as before.
 """
 
 from __future__ import annotations
@@ -30,9 +37,11 @@ from urllib.parse import quote
 
 import httpx
 from agents import FunctionTool, function_tool
+from pydantic import ValidationError
 
 from sentinel.config import Settings, secret_value
 from sentinel.infra.logging import get_logger
+from sentinel.memory.cache import TOOL_CACHE_TTL_S, Cache, cache_key
 from sentinel.models.tools import (
     DeployLogEntry,
     LogFetchInput,
@@ -98,6 +107,7 @@ class _DatadogFailure(Exception):
 def make_log_fetcher_tool(
     settings: Settings,
     *,
+    cache: Cache | None = None,
     http_client: httpx.AsyncClient | None = None,
     sleep: SleepFn = asyncio.sleep,
     clock: ClockFn = _utcnow,
@@ -108,6 +118,8 @@ def make_log_fetcher_tool(
     Args:
         settings: Supplies ``dd_api_key``, ``dd_app_key`` and ``dd_site``; the keys are
             read at call time, so a missing key fails the call, never the build.
+        cache: Where a complete result is reused for 5 minutes (window end ceiled to the
+            minute); None reads Datadog on every call.
         http_client: Client to send requests with (tests pass one over a mock
             transport). None → a short-lived client per call.
         sleep: Awaited between retry attempts (tests pass a recorder).
@@ -141,6 +153,7 @@ def make_log_fetcher_tool(
             await _fetch_logs(
                 settings,
                 request,
+                cache=cache,
                 http_client=http_client,
                 sleep=sleep,
                 clock=clock,
@@ -155,6 +168,7 @@ async def _fetch_logs(
     settings: Settings,
     request: LogFetchInput,
     *,
+    cache: Cache | None = None,
     http_client: httpx.AsyncClient | None = None,
     sleep: SleepFn = asyncio.sleep,
     clock: ClockFn = _utcnow,
@@ -184,7 +198,26 @@ async def _fetch_logs(
     if not _SITE_RE.fullmatch(site):
         return _failure("unavailable", f"dd_site {site!r} is not a Datadog site hostname")
 
-    end = clock().astimezone(UTC)
+    now = clock().astimezone(UTC)
+    # With a cache the window ends at the next whole minute: one key per minute.
+    end = now if cache is None else now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    key: str | None = None
+    if cache is not None:
+        key = cache_key(
+            "tool",
+            {
+                "tool": _TOOL_NAME,
+                "site": site,
+                "service": service,
+                "window_minutes": minutes,
+                "include": sorted(sources),
+                "end": end.isoformat(),
+            },
+        )
+        cached = _cached_result(await cache.get(key, "tool"))
+        if cached is not None:
+            logger.info("fetch_logs_cached", service=service, window_minutes=minutes)
+            return cached
     window = LogWindow(start=end - timedelta(minutes=minutes), end=end)
     reader = _DatadogReader(
         base_url=f"https://api.{site}",
@@ -209,7 +242,19 @@ async def _fetch_logs(
         deploy_logs=len(result.deploy_logs),
         truncated=result.truncated,
     )
+    if cache is not None and key is not None and all(v == "ok" for v in result.sources.values()):
+        await cache.set(key, "tool", result.model_dump(mode="json"), TOOL_CACHE_TTL_S)
     return result
+
+
+def _cached_result(value: object) -> LogFetchResult | None:
+    """A cached fetch_logs result; None (a miss) when there is none or it does not validate."""
+    if value is None:
+        return None
+    try:
+        return LogFetchResult.model_validate(value)
+    except ValidationError:
+        return None
 
 
 def _failure(kind: ToolFailureKind, message: str) -> ToolFailure:
