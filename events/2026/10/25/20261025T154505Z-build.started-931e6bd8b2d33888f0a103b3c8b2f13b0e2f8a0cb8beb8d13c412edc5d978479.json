@@ -1,0 +1,16 @@
+{
+  "schema": "ops.v1",
+  "event_id": "931e6bd8b2d33888f0a103b3c8b2f13b0e2f8a0cb8beb8d13c412edc5d978479",
+  "kind": "build.started",
+  "ts": "2026-10-25T15:45:05Z",
+  "recorded_at": "2026-10-29T02:08:27Z",
+  "source": "gha:Keshav0375/Sentinel/ci_backend_deployment.yml",
+  "chain": {
+    "sha": "969256be3217cdd675101e4b30b2d1e3b44c75a1",
+    "run_id": 40208408857
+  },
+  "data": {
+    "version": "sha-969256b",
+    "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/40208408857"
+  }
+}
