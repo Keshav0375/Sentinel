@@ -1,0 +1,16 @@
+{
+  "schema": "ops.v1",
+  "event_id": "ae69d829ed2f645e5d8e723f68830fc7bb6381edb5dab846f150dd5d534aa102",
+  "kind": "build.started",
+  "ts": "2026-10-07T01:57:32Z",
+  "recorded_at": "2026-10-29T02:09:46Z",
+  "source": "gha:Keshav0375/Sentinel-deployment/ci_app_deployment.yml",
+  "chain": {
+    "sha": "4d9bc882a02a9754ce4330607183c0ec210a99de",
+    "run_id": 37559626662
+  },
+  "data": {
+    "version": "pr-2-4d9bc88",
+    "run_url": "https://github.com/Keshav0375/Sentinel-deployment/actions/runs/37559626662"
+  }
+}
