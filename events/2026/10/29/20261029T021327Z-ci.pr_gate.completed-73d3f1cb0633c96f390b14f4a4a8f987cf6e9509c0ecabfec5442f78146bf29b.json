@@ -1,0 +1,17 @@
+{
+  "schema": "ops.v1",
+  "event_id": "73d3f1cb0633c96f390b14f4a4a8f987cf6e9509c0ecabfec5442f78146bf29b",
+  "kind": "ci.pr_gate.completed",
+  "ts": "2026-10-29T02:13:27Z",
+  "recorded_at": "2026-10-29T02:13:46Z",
+  "source": "gha:Keshav0375/Sentinel/ci.yml",
+  "chain": {
+    "sha": "cf01970f0040b4631bf389b200b7fe4e035a047a",
+    "run_id": 40804541933
+  },
+  "data": {
+    "conclusion": "success",
+    "duration_s": 324.0,
+    "run_url": "https://github.com/Keshav0375/Sentinel/actions/runs/40804541933"
+  }
+}
