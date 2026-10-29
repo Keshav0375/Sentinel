@@ -45,9 +45,9 @@ MATRIX: dict[str, list[Check]] = {
         ("ruff-format", ["ruff", "format", "--check", "src/", "tests/", "scripts/ops/"], True),
         ("pyright", ["pyright", "src/", "scripts/ops/"], True),
         ("gitleaks", ["gitleaks", "detect", "--no-banner", "--redact"], True),
-        # filelock CVE-2026-112940/-112913/-112907: fixed only in filelock 4.2.1, but litellm
-        # (<=1.106.2) caps filelock <4.0. Accepted until litellm lifts the cap; re-check by
-        # 2026-11-24 (sentinel-brain decisions 2026-10-24, STATE follow-up). Drop the ignores then.
+        # filelock CVEs (3 from 2026-10-24, 10 more published by 2026-10-28): fixed only in filelock
+        # 4.x, but litellm (<=1.106.6) caps filelock <4.0. Owner-approved until litellm lifts the cap;
+        # re-check by 2026-11-24 (sentinel-brain decisions 2026-10-24 + 2026-10-28). Drop them then.
         (
             "pip-audit",
             [
@@ -59,6 +59,26 @@ MATRIX: dict[str, list[Check]] = {
                 "CVE-2026-112913",
                 "--ignore-vuln",
                 "CVE-2026-112907",
+                "--ignore-vuln",
+                "CVE-2026-112938",
+                "--ignore-vuln",
+                "CVE-2026-112936",
+                "--ignore-vuln",
+                "CVE-2026-112910",
+                "--ignore-vuln",
+                "CVE-2026-112909",
+                "--ignore-vuln",
+                "CVE-2026-112911",
+                "--ignore-vuln",
+                "CVE-2026-112939",
+                "--ignore-vuln",
+                "CVE-2026-112915",
+                "--ignore-vuln",
+                "CVE-2026-112935",
+                "--ignore-vuln",
+                "CVE-2026-112912",
+                "--ignore-vuln",
+                "CVE-2026-112908",
             ],
             False,
         ),
