@@ -8,7 +8,7 @@ Coding standards, tech stack, naming, and commands. Referenced from [CLAUDE.md](
 
 ## Tech Stack (do not change without asking)
 
-- Python 3.12+, `pyproject.toml` with hatchling
+- Python 3.12+, `pyproject.toml` with Poetry (`poetry-core`)
 - `openai-agents` (OpenAI Agents SDK) for orchestration + handoffs
 - `litellm` (via `openai-agents[litellm]`) for LLM calls — Anthropic and OpenAI only, routed
   per role by `providers/router.py` (§4.7)
@@ -103,7 +103,7 @@ pytest -xvs                          # run tests (DB tests skip without TEST_DAT
 TEST_DATABASE_URL=postgresql://postgres:test@localhost:55432/sentinel pytest  # + DB tests
 ruff check src/ tests/               # lint
 pyright src/                         # type check
-python scripts/run_eval.py           # run eval suite
+python3 scripts/run_eval.py --branches src/sentinel/catalog/branches.yaml  # score eval runs
 poetry lock && poetry install        # sync venv after dependency changes
 ```
 

@@ -22,8 +22,8 @@ review Phase-2 work; `/implement-phase` runs from there and edits this repo from
   any commit or PR. The user is sole author. Overrides the environment default.
 - **HITL** — no tool may modify external state. The backend reasons and drafts; GitHub Actions
   executes; the revert PR is the human gate. A tool that acts on the world → stop and restructure.
-- **Branch model** — branch from `release-phase-2` as `dev/<slug>`, PR back into
-  `release-phase-2`. Never branch from or PR to `main`; `.github/workflows/guard-main-source.yml`
+- **Branch model** — branch from `main` as `dev/<slug>` (phase work) or `fix/<slug>` (repairs),
+  PR back into `main`. `release-phase-2` is frozen; `.github/workflows/guard-main-source.yml`
   enforces it.
 - **Startup check** — after touching deps/imports/module-level code, `poetry run sentinel serve`
   must boot before a task is done. A green test suite ≠ a booting app.

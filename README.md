@@ -1,382 +1,305 @@
 # Sentinel
 
-> [!IMPORTANT]
-> ### 🚧 Phase 2 is under active construction
-> Sentinel is being rebuilt as a **cloud-native, multi-repo system** on Azure — an AKS
-> scale-to-zero backend, Terraform IaC, real Datadog signal from 30 ground-truth scenario
-> branches, and **passwordless Entra security end-to-end** (OIDC, workload identity, bearer
-> tokens). The README below documents the **Phase 1 MVP**; Phase 2 spans three repos:
->
-> | Repo | Role | Link |
-> |------|------|------|
-> | **Sentinel** _(this repo · default branch)_ | Multi-agent backend + CI/CD — the brain | **https://github.com/Keshav0375/Sentinel** |
-> | **Sentinel-infra** | Terraform IaC + identity plane | **https://github.com/Keshav0375/Sentinel-infra** |
-> | **Sentinel-deployment** | Target app + 30 scenario branches (ground truth) | **https://github.com/Keshav0375/Sentinel-deployment** |
->
-> **The diagram below is the architectural view of Phase 2** — every repo, request, flow, auth
-> edge, and CI/CD pipeline in one picture.
+[![CI](https://github.com/Keshav0375/Sentinel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Keshav0375/Sentinel/actions/workflows/ci.yml)
+[![Dashboard web CI](https://github.com/Keshav0375/Sentinel/actions/workflows/ci_web.yml/badge.svg?branch=main)](https://github.com/Keshav0375/Sentinel/actions/workflows/ci_web.yml)
+[![Ops dashboard](https://img.shields.io/badge/ops%20dashboard-live%20once%20Pages%20is%20enabled-lightgrey)](https://keshav0375.github.io/Sentinel/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## 🏗️ Phase 2 — Full Architecture (every request · flow · pipeline)
+**Sentinel is an autonomous, multi-agent incident-response system.** When a Datadog alert fires on
+a watched service, Sentinel brings its backend up on AKS, triages the alert, finds the deploy that
+caused it, critiques its own diagnosis, and drafts a rollback. GitHub Actions turns that draft into
+a revert pull request on the target app, and a human merges or closes it. Every step is traced,
+every run is scored against a 30-scenario ground truth, and an observe-only ops dashboard shows the
+whole chain from build to merge.
+
+> **The backend drafts, GitHub Actions executes, a human approves.** No backend tool can change
+> anything outside Sentinel's own database and traces. The revert PR is the only path to a rollback.
+
+Ops dashboard: <https://keshav0375.github.io/Sentinel/> (live once Pages is enabled) · Target app:
+[Keshav0375/Sentinel-deployment](https://github.com/Keshav0375/Sentinel-deployment)
+
+---
+
+## How it works
 
 ```mermaid
-flowchart TB
-    %% ================= NODES (declared inside their repos) =================
-    subgraph INFRA["🏗️ sentinel-infra — Terraform IaC · provisions everything"]
-        direction TB
-        TF["terraform apply"]
-        IDP["Identity plane<br/>OIDC app · backend Entra app<br/>api://sentinel-backend · workload identity<br/>Key Vault rotation"]
-        CIINFRA["infra_validate_plan · infra_deploy"]
-        DESTROY["ci_destroy_infra<br/>full teardown → az group delete"]
-        RUNNERS["infra_runners → CI images"]
+flowchart TD
+    DD["Datadog: deploy-failure monitor or runtime-health synthetic"] -->|webhook| EG["Azure Event Grid topic"]
+    EG --> FN["Function bridge: classify signal_type"]
+    FN -->|"repository_dispatch: incident-alert"| GHA["GHA: ci_incident_response.yml"]
+    GHA -->|"scale up, enrich, POST /webhooks/incident with Entra bearer"| TRI
+
+    subgraph AKS["Backend on AKS, namespace sentinel-dev"]
+        TRI["Triage"] --> ANA["Analysis"]
+        ANA --> REF["Reflexion critique"]
+        REF -->|"below 0.7 confidence: loop back, at most 2 times"| ANA
+        REF --> GATE{"Decision gate"}
+        GATE -->|"0.7 or higher and one specific deploy"| RES["Resolution: RollbackSpec draft"]
+        RES --> VER["Reverification"]
+        VER -->|"FAIL: one more resolution"| RES
     end
 
-    subgraph AZURE["☁️ Azure · resource group sentinel-rg · all free tier"]
-        direction TB
-        AKS["AKS · scale-to-zero<br/>1× B2ats_v2 node 0↔1 per run"]
-        ACR["ACR<br/>backend + runner images"]
-        PG[("PostgreSQL B1MS + pgvector<br/>Entra-only auth · no password<br/>incidents · services · deployments")]
-        KV["Key Vault<br/>LLM keys ↻ rotated · rotator Fn"]
-        EG["Event Grid Topic"]
-        FUNC["Function bridge<br/>classifies + stamps signal_type"]
-        APP["App Service F1<br/>dummy-api"]
-    end
-
-    subgraph DEPLOY["🎯 sentinel-deployment — the target app"]
-        direction TB
-        BRANCHES["30 scenario branches<br/>pass · deployfail · runtime · 10 each"]
-        CIAPP["ci_app_deployment<br/>Build → Deploy → Verify → Record → Datadog"]
-    end
-
-    subgraph DD["📊 Datadog"]
-        direction TB
-        MDEP["monitor · deploy-failure"]
-        MRUN["monitor · runtime-health"]
-    end
-
-    subgraph BACKEND["🧠 sentinel — backend + CI/CD · the brain"]
-        direction TB
-        CIVAL["ci_validation<br/>PR fast gate"]
-        CIDEP["ci_backend_deployment<br/>build → push → deploy → test → promote"]
-        CISCALE["ci_backend_scale<br/>up/down + nightly auto-down"]
-        CIINC["ci_incident_response<br/>scale up → fetch ∥ → run → branch → scale down"]
-        subgraph PIPE["Agent pipeline · runs on AKS"]
-            direction TB
-            ORCH["Orchestrator<br/>plans · branches on signal_type"]
-            TRIAGE["Triage"]
-            ANAL["Analysis"]
-            REFLEX["Reflexion<br/>self-critique loop ≤2×"]
-            RESOLVE["Resolution<br/>rollback spec"]
-            REVER["Reverification"]
-            JUDGE["Judge<br/>scores trajectory"]
-        end
-    end
-
-    LF["📈 LangFuse<br/>traces · prompts · scores"]
-    TEAMS["💬 Microsoft Teams"]
-    REVERTPR{{"Revert PR on sentinel-deployment<br/>= HITL gate · human merges or closes"}}
-
-    %% ================= PROVISIONING =================
-    TF --> IDP
-    TF -->|provisions| AKS
-    TF --> ACR
-    TF --> PG
-    TF --> KV
-    TF --> EG
-    TF --> FUNC
-    TF --> APP
-    CIINFRA --> TF
-    IDP -.->|OIDC · no client secret| AKS
-
-    %% ================= DEPLOY FLOW =================
-    BRANCHES --> CIAPP
-    CIAPP -->|zip deploy| APP
-    CIAPP -->|Entra DB token · deploy row| PG
-    CIAPP -->|deploy events + logs| DD
-    APP -->|logs + metrics| DD
-
-    %% ================= ALERT ROUTING =================
-    MDEP -->|signal_type = deploy_failure| EG
-    MRUN -->|signal_type = runtime_error| EG
-    EG --> FUNC
-    FUNC -->|repository_dispatch + signal_type| CIINC
-
-    %% ================= INCIDENT PIPELINE =================
-    CIINC -->|1 · scale backend up| CISCALE
-    CISCALE --> AKS
-    CIINC -->|3 · POST /webhooks/incident · Authorization: Bearer| ORCH
-    ORCH -->|deploy_failure · rollback fast path| RESOLVE
-    ORCH -->|runtime_error| TRIAGE
-    TRIAGE --> ANAL --> REFLEX
-    REFLEX -->|conf ≥ 0.7 + specific deploy| RESOLVE
-    REFLEX -->|conf &lt; 0.7 · ambiguous| JUDGE
-    RESOLVE --> REVER --> JUDGE
-
-    %% ================= BACKEND DATA + RUNTIME AUTH =================
-    ORCH -.->|workload identity → LLM keys| KV
-    ORCH -.->|workload identity → Entra DB token| PG
-    JUDGE -->|store incident| PG
-    JUDGE -->|traces + scores| LF
-
-    %% ================= BACKEND CI/CD =================
-    CIVAL -. gates PRs .-> CIDEP
-    CIDEP -->|push image| ACR
-    CIDEP -->|kubectl deploy| AKS
-    ACR -->|kubelet pull · AcrPull| AKS
-
-    %% ================= HITL LOOP =================
-    RESOLVE -->|rollback spec| REVERTPR
-    REVERTPR -->|human merges → redeploy| BRANCHES
-    REVER -.->|escalate · low confidence| TEAMS
-    CIINC -->|notify outcome| TEAMS
-
-    %% ================= STYLING =================
-    style INFRA fill:#e8f0fe,stroke:#4285f4,color:#1a1a1a
-    style AZURE fill:#e6f4ea,stroke:#34a853,color:#1a1a1a
-    style DEPLOY fill:#fef7e0,stroke:#fbbc04,color:#1a1a1a
-    style DD fill:#f3e8fd,stroke:#a142f4,color:#1a1a1a
-    style BACKEND fill:#fce8e6,stroke:#ea4335,color:#1a1a1a
-    style PIPE fill:#ffffff,stroke:#ea4335,color:#1a1a1a
-    style REVERTPR fill:#fff3cd,stroke:#d39e00,color:#1a1a1a
+    GATE -->|anything else| ESC["GHA: escalate to Teams"]
+    VER -->|"PASS: rollback_proposed"| PRC["GHA: generate PR content, open revert PR"]
+    PRC --> PR{{"Revert PR on Sentinel-deployment"}}
+    PR -->|"a human merges or closes"| DEPLOY["Target app redeploys the last good commit"]
 ```
 
-_This is the architectural view of Phase 2._ Deep-dive docs live in the
-[**sentinel-brain**](https://github.com/Keshav0375/sentinel-brain) repo —
-`architecture/README.md` is the index, `architecture/backend.md` is authoritative for this repo.
+1. **Signal.** The target app's deploy pipeline and Datadog synthetics raise one of two signals. The
+   Function bridge only classifies and forwards: an event tagged `deploy_status:failed` becomes
+   `deploy_failure`, anything else `runtime_error`.
+2. **Executor.** [`ci_incident_response.yml`](.github/workflows/ci_incident_response.yml) scales the
+   backend up, fetches the service row, PR details and recent Datadog logs in parallel, and calls the
+   backend with an Entra access token.
+3. **Reasoning.** The [orchestrator](src/sentinel/agents/orchestrator.py) is plain Python, not an LLM.
+   `runtime_error` runs the full loop. `deploy_failure` takes the fast path: one critique, no loop
+   back, pinned to the failed deploy's commit.
+4. **Human gate.** On `rollback_proposed` the workflow asks the backend for PR text, opens the revert
+   PR, records it and notifies Teams. Nothing in the workflow merges, approves or enables auto-merge.
+   Then it scales the backend down again, unless keep-warm is set.
 
 ---
 
-**Autonomous DevOps incident response agent** — multi-agent pipeline that triages alerts, diagnoses root causes, drafts a rollback or an escalation, and writes the incident summary. The backend never acts on the world: it drafts a rollback spec, GitHub Actions opens the revert PR on Sentinel-deployment, and a human merges (or closes) it.
+## Agents and safety invariants
 
-Built as a portfolio project demonstrating production-grade agentic engineering: multi-agent orchestration, HITL safety, episodic memory, trajectory evaluation, and real-time observability.
+| Agent | Role | Tools |
+|---|---|---|
+| Triage | Identify the service and severity, recall similar incidents | `get_service_metadata`, `search_past_incidents` |
+| Analysis | Correlate the alert with a deploy, read the evidence | `fetch_logs`, `get_deploy_details` |
+| Reflexion | Critique the analysis, ask for the next tool call or approve | none |
+| Resolution | Draft the rollback or the escalation | `prepare_rollback_spec`, `format_escalation` |
+| Reverification | Check the draft against the evidence: PASS, FAIL or ESCALATE | none |
+| PR content | Write the revert PR's title and body (`POST /generate/pr-content`) | none |
 
----
+Each role runs on a fixed model pair, Anthropic first with OpenAI as fallback (or the reverse), via
+LiteLLM ([`providers/router.py`](src/sentinel/providers/router.py)). Every cap is enforced in code:
 
-## How It Works
+| Invariant | How it holds |
+|---|---|
+| **Tool-call cap** | At most 20 tool calls per incident (`MAX_TOOL_CALLS_CAP`), fallback re-runs included. Past it a call is refused and the incident escalates. |
+| **Reflexion cap** | At most 2 loops from reflexion back to analysis, and one resolution retry after a reverification FAIL. A 900 s wall-clock bound escalates anything slower. |
+| **Distinct judge** | The eval judge runs on the non-primary provider, on a model no agent role uses as primary or fallback, checked at import. A run that still used the judge's model is flagged `judge_conflict` and left out of every aggregate. |
+| **R14 trace privacy** | LangFuse gets the model, token usage and linked prompt, never inputs or outputs. Raw logs and tool output stay in Postgres. The SDK's default OpenAI span exporter is removed. |
+| **Entra bearer auth** | Every route except `/health` and `/ready` needs a v2 Entra token (RS256, `aud`, `iss`, `exp`) carrying the `Incident.Write` app role. Tokens are never logged. |
+| **No write tools** | The tools only read (Postgres, Datadog, GitHub PRs) or return a typed draft. The rollback target must match a real `deployments` row, or the incident escalates. |
+| **Untrusted data** | Every prompt ends with a preamble that treats logs, PR titles and past incident notes as data, never as instructions. |
 
-```
-Alert fires
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────┐
-│          Orchestrator (Python code, not an LLM agent)        │
-│  plans on signal_type · reflexion ≤ 2 loops · decision gate  │
-│  reverification (1 retry) · hard 20-tool-call budget         │
-└──┬──────────┬──────────┬──────────┬──────────┬─────────────┘
-   ▼          ▼          ▼          ▼          ▼
-Triage    Analysis   Reflexion  Resolution  Reverification
-   │          │      (critique,     │       (PASS / FAIL /
-get_      fetch_      no tools)  prepare_    ESCALATE,
-service_  logs                   rollback_   no tools)
-metadata  get_                   spec  or
-search_   deploy_                format_
-past_     details                escalation
-incidents                      │
-                               ▼
-              Rollback spec ──► GitHub Actions opens the revert PR
-                               │
-                               ▼
-                     A human merges (or closes) it on GitHub
-```
-
-Every tool call is captured as a trajectory. After resolution, an LLM judge scores the trajectory across 6 dimensions and writes a report viewable in the web dashboard.
+The pod has no Kubernetes Secret. It reads its keys from Key Vault, and Postgres and Redis take
+Entra tokens, all through workload identity.
 
 ---
 
-## Features
+## Memory
 
-- **Multi-agent pipeline** — 5 pipeline agents (Triage, Analysis, Reflexion, Resolution, Reverification) run by a Python orchestrator that enforces every cap in code; a sixth, the PR content generator, writes the revert PR for `/generate/pr-content`
-- **HITL safety gate** — the backend only drafts a rollback spec or an escalation; GitHub Actions opens the revert PR and a human merges or closes it on GitHub. No agent has a tool that acts on the world
-- **Episodic memory** — past incidents embedded and stored in Postgres + pgvector; similar incidents surface automatically during triage
-- **Semantic memory** — service map, dependency graph, and runbooks held in Postgres
-- **Scenario catalog dashboard** — the 30 Sentinel-deployment scenario branches, read-only, at `http://localhost:8000/`
-- **Trajectory eval** — LLM-as-judge scores every incident across 6 dimensions (0–5), with a Markdown and JSON report
-- **Eval results dashboard** — browse per-scenario scores at `http://localhost:8000/eval`
-- **30 scenario branches** — 10 each of case i (healthy or runtime fault), ii (pipeline failure) and iii (post-deploy fault), in Sentinel-deployment
+| Layer | Store | What it holds |
+|---|---|---|
+| Episodic | Postgres `incidents` + pgvector | Every terminal incident with a 384-dim embedding of the observed symptoms (local `all-MiniLM-L6-v2`), searched with `<=>` over an IVFFlat index. Root causes carry provenance (`model_generated: true`). |
+| Semantic | Postgres `services` + pgvector | The service registry, dependencies and a markdown runbook per service, found by exact name or by symptom similarity. |
+| Deploys | Postgres `deployments` | One row per deploy attempt, written by the target app's pipeline. These are the correlation targets. |
+| Checkpoints | Postgres `incident_checkpoints` | A snapshot after each stage, written off the critical path. A restarted pod resumes a stuck incident **once**, keeping every cap counter. A second restart escalates. |
+| Cache | Postgres `cache_entries`, Redis in front | Exact-match, SHA-256-keyed results: `fetch_logs` for 5 minutes, deterministic LLM calls for 24 hours. The judge is never cached. |
+| Working memory | Azure Managed Redis | Write-through mirror of per-incident short-term memory, plus status events on `sentinel:events`. Entra auth only, behind a private endpoint. |
+
+Redis is optional and holds nothing durable. Without `REDIS_HOST` every feature falls back to
+Postgres or to memory in the process.
+
+**Memory survives teardown.** Before any destroy, `infra_deploy.yml` runs
+[`infra/scripts/memory-backup.sh`](infra/scripts/memory-backup.sh). It writes a `pg_dump` to a blob
+container outside the destroyable estate and keeps the newest 10. A failed backup blocks the
+destroy. After apply, [`memory-restore.sh`](infra/scripts/memory-restore.sh) restores the data in
+one transaction. Cached rows are never exported.
 
 ---
 
-## Quick Start
+## Evaluation
 
-### Prerequisites
+The ground truth is [`src/sentinel/catalog/branches.yaml`](src/sentinel/catalog/branches.yaml), a
+vendored copy of the 30 scenario branches on Sentinel-deployment:
 
-- Python 3.12+
-- An Anthropic and/or OpenAI API key (not needed to boot; an incident without one escalates)
-- Docker (optional: a local Postgres + pgvector for memory and the DB tests)
+| Case | Branches | What happens | Expected |
+|---|---|---|---|
+| i: clean pass | `pass/01` to `pass/10` | Green pipeline, healthy app | no incident |
+| ii: deploy fails | `deployfail/01` to `deployfail/10` | Red pipeline, deploy-failure monitor | `deploy_failure` → rollback |
+| iii: runtime error | `runtime/01` to `runtime/10` | Green pipeline, a runtime-health synthetic fires | `runtime_error` → rollback or escalate |
 
-### 1. Clone and configure
+A human merges a scenario PR and the real path runs. Each terminal incident becomes one item in the
+LangFuse dataset `sentinel-scenario-runs`, with raw tool output stripped.
+[`scripts/run_eval.py`](scripts/run_eval.py) is a read-only scorer. Per item it runs four checks
+(`fired`, `classified`, `correlated`, `revert_target`). Then an LLM judge scores the primary
+incident on five 0–1 dimensions: `triage_accuracy`, `root_cause_correctness`, `tool_efficiency`,
+`mttr` and `remediation_safety`. The scores go to LangFuse, to `incidents.eval_score`, and to
+`reports/eval_report.{json,md}` (served at `GET /api/eval-report`).
 
-```bash
-git clone https://github.com/keshxv/sentinel.git
-cd sentinel
-cp .env.example .env
-# Edit .env — add ANTHROPIC_API_KEY and OPENAI_API_KEY
+The automated run is being wired as an in-cluster Kubernetes Job. It runs under the backend's
+workload identity, so the LLM keys never leave the pod. Until it lands, a human runs `run_eval.py`.
+
+LangFuse holds the traces (one root trace per incident), the agent prompts (with a file fallback in
+`src/sentinel/agents/prompts/`), the scores and the dataset. Without LangFuse keys every one of
+these is a no-op.
+
+---
+
+## Ops dashboard
+
+A static React SPA ([`dashboard-web/`](dashboard-web/README.md)) for builds, deploys, incidents,
+agent runs, revert PRs, reviews and merges, linked into chains. It shows:
+
+- KPIs over 24 h, 7 d, 30 d and all time, daily activity, and an eval scorecard
+- a **needs-action lane** for revert PRs awaiting review, escalations, and failed builds or deploys
+  that raised no incident
+- a filterable chain timeline with a drawer per chain (stages, agent decision and confidence, trace
+  waterfall, links)
+
+**Store.** The store is an append-only git ledger: one JSON file per event, with a deterministic
+`event_id`, on the orphan `ops-ledger` branch. Workflows append events as they happen.
+[`ops_reconcile.yml`](.github/workflows/ops_reconcile.yml) runs every 30 minutes and after each
+Sentinel workflow. It re-derives the same events from the read-only GitHub and LangFuse APIs, so a
+missed write heals and nothing is duplicated. Then it builds the snapshot the page reads. Ledger
+writes fail closed: a per-kind allow-list, no raw logs or tool output, free text capped at 500
+characters, and gitleaks before upload.
+
+**Observe-only.** No UI action merges or approves anything. The page has no backend, no secrets and
+no write path.
+
+**Design.** Light and dark themes, WCAG 2.1 AA (axe in Playwright on every theme and at 360 px).
+Lighthouse scores 0.97 performance and 1.00 accessibility (local median of 5 runs). CI fails below
+0.90.
+
+---
+
+## Repository layout
+
+Sentinel is a monorepo. The watched target app,
+[Sentinel-deployment](https://github.com/Keshav0375/Sentinel-deployment), is a separate repo: its
+scenario branches and revert PRs are the human gate.
+
+```text
+Sentinel/
+├── src/sentinel/
+│   ├── agents/        # Python orchestrator + 6 LLM agents, prompts in prompts/*.txt
+│   ├── tools/         # read-only and draft-only tools, injected dependencies
+│   ├── providers/     # per-role model map, fallback, LLM cache, fake LLM for tests
+│   ├── memory/        # episodic, semantic, short-term, checkpoints, cache
+│   ├── eval/          # rubric, LLM judge, runner, dataset writer, report
+│   ├── api/           # FastAPI routes: webhook, incidents, PR content, scenarios, health
+│   ├── infra/         # database, Entra auth for Postgres/Redis, tracing, resume, logging
+│   ├── models/        # Pydantic v2 models for every boundary
+│   ├── catalog/       # branches.yaml, the vendored 30-scenario ground truth
+│   └── dashboard/     # in-app scenario catalog and eval pages
+├── alembic/           # Postgres schema migrations (pgvector, seed services, memory tables)
+├── tests/             # pytest suite mirroring src/, plus ops, workflow and script tests
+├── scripts/           # run_eval.py, incident_dispatch.py, quality_gate.py, install_locked.py
+│   └── ops/           # ops ledger, reconciler, snapshot builder, site check, JSON schemas
+├── dashboard-web/     # ops dashboard SPA: React 18, Vite, Vitest, Playwright
+├── azure/k8s/         # backend Deployment, Service, NetworkPolicy, ConfigMap (envsubst)
+├── infra/             # Terraform: 8 modules, deployment config, ops scripts, runner image
+├── .github/
+│   ├── workflows/     # backend, incident, ops and infra pipelines
+│   └── actions/       # backend-up/down, tokens, Teams, ops-event composite actions
+└── Dockerfile         # linux/arm64 backend image, non-root
 ```
 
-### 2a. Local Postgres (optional)
+---
 
-```bash
-docker run -d --name sentinel-pg -e POSTGRES_PASSWORD=test -p 55432:5432 pgvector/pgvector:pg16
-```
+## Infrastructure and cost
 
-Set `DATABASE_URL=postgresql://postgres:test@localhost:55432/postgres` in `.env` and run `poetry run alembic upgrade head`. Without `DATABASE_URL` the app still boots; memory reports unavailable.
+All of it is Terraform in [`infra/`](infra/README.md). The subscription is a 6-vCPU student grant
+and must be able to reach zero cost on demand.
 
-### 2b. Run
+| Component | Size | Cost |
+|---|---|---|
+| AKS | Free control-plane tier, one `Standard_B2pls_v2` (ARM64) node shared by deployments | Pod-level scale-to-zero after every run plus a nightly scale-down. `infra_pause.yml` stops compute. |
+| App Service | F1, the target app | Free tier |
+| Functions | Y1 consumption: the Datadog bridge and the Key Vault key rotator | Free grant (1M executions/mo) |
+| Postgres Flexible Server | B1ms + 32 GB, Entra-only auth | about **$12/mo** on-demand in East US (up to about $26 elsewhere), while the estate is up |
+| Azure Managed Redis | Balanced B0, single node, HA off | **$13.14/mo** while the deployment exists |
+| Redis private endpoint | one per deployment | about **$7.30/mo** (Azure list price) |
+| `memory-backups` blobs | 10 dumps per deployment, Standard LRS | **cents/mo**, survives destroy |
+
+The figures are approximate Azure list prices from [`infra/docs/COSTS.md`](infra/docs/COSTS.md).
+Check your region before relying on them. `infra_deploy.yml` with `destroy` leaves only the
+bootstrap state group, which costs $0 apart from the backup blobs. The runbook is
+[`infra/docs/BOOTSTRAP.md`](infra/docs/BOOTSTRAP.md).
+
+---
+
+## Running it locally
+
+You need Python 3.12 or 3.13, [Poetry](https://python-poetry.org/), Docker, and Node 22 with
+Corepack for the dashboard. No key is needed to boot: the fake LLM runs the real agent loop with no
+provider.
 
 ```bash
 poetry install
-poetry run sentinel serve
+cp .env.example .env          # every variable is optional; see the comments
+
+# Postgres + pgvector
+docker run -d --name sentinel-pg-test -e POSTGRES_PASSWORD=test \
+  -e POSTGRES_DB=sentinel -p 55432:5432 pgvector/pgvector:pg16
+export DATABASE_URL=postgresql://postgres:test@localhost:55432/sentinel
+poetry run alembic upgrade head
+
+# The backend on http://localhost:8000 (deterministic fake LLM, no API keys)
+SENTINEL_FAKE_LLM=1 poetry run sentinel serve
+
+# Tests (the DB tests skip without TEST_DATABASE_URL)
+poetry run pytest
+TEST_DATABASE_URL=postgresql://postgres:test@localhost:55432/sentinel poetry run pytest
+
+# Ops dashboard on http://localhost:5173/Sentinel/ (serves the fixtures)
+corepack pnpm@10.34.9 --dir dashboard-web install --frozen-lockfile
+corepack pnpm@10.34.9 --dir dashboard-web dev
 ```
 
-Dashboard: [http://localhost:8000](http://localhost:8000)
-
-### 3. Switch the primary provider (optional)
-
-Each agent role runs a fixed Anthropic/OpenAI model pair (architecture §4.7, in
-`src/sentinel/providers/router.py`). Anthropic runs first by default; a rate limit, timeout
-or API error re-runs the agent once on OpenAI. To run OpenAI first:
-
-```env
-SENTINEL_PRIMARY_PROVIDER=openai
-```
-
-The eval judge always runs on the provider the agents do not use.
-
-### 4. Scenarios
-
-Scenarios are the 30 branches of Sentinel-deployment (`scenarios/branches.yaml`, vendored at `src/sentinel/catalog/branches.yaml`). A human merges a scenario branch's PR; Datadog → bridge → `repository_dispatch` → `ci_incident_response.yml` runs the pipeline. `GET /api/scenarios` (bearer) lists the catalog; the dashboard shows it read-only.
-
-### 5. Run the eval suite
-
-```bash
-python3 scripts/run_eval.py --branches ../Sentinel-deployment/scenarios/branches.yaml
-# dataset (default sentinel-scenario-runs) and dataset-run name:
-python3 scripts/run_eval.py --branches <path> --dataset sentinel-scenario-runs --run-name prompt-v2
-python3 scripts/run_eval.py --branches <path> --no-store   # do not write incidents.eval_score
-```
-
-Results → `reports/eval_report.json` + `reports/eval_report.md`  
-Dashboard → [http://localhost:8000/eval](http://localhost:8000/eval)  
-With `DATABASE_URL` set, each judged score is also stored on its incident (`incidents.eval_score`).
+Protected routes return 401 until `SENTINEL_API_TENANT_ID` and `SENTINEL_API_AUDIENCE` are set.
+`SENTINEL_DEV_OPEN_DASHBOARD=1` opens only the in-app catalog and eval pages and their read APIs.
 
 ---
 
-## Demo
+## Quality gates and CI
 
-> _Loom recording coming soon._
-![Dashboard Image](image.png)
-**What you'll see:**
+The suite has **2,693 pytest tests** (`pytest --collect-only`), **67 Vitest tests** and **18
+Playwright runs** (6 smoke tests × light, dark and 360 px). [`scripts/quality_gate.py`](scripts/quality_gate.py)
+is the one gate body that CI and local checks share. For the backend it runs ruff, pyright (strict
+on `src/`), gitleaks, pip-audit and pytest. For `infra/` it runs fmt, validate, tflint, tfsec,
+`terraform test`, shellcheck and actionlint.
 
-1. Select `bad_deploy_01` from the dropdown — a critical API gateway alert fires
-2. Watch the agent cards light up as triage, analysis and the reflexion critique run
-3. The Resolution Agent drafts a rollback spec, reverification checks it, and the incident ends `rollback_proposed` (or `escalated`)
-4. Switch to `/eval` to see the LLM judge's per-dimension scores
+| Workflow | Trigger | What it does |
+|---|---|---|
+| [`ci.yml`](.github/workflows/ci.yml) | PR | Branch-name convention, secret leak check, ruff, pyright, pytest against a pgvector service |
+| [`ci_validation.yml`](.github/workflows/ci_validation.yml) | PR touching the backend | Fast gate with no Azure and no secrets: quality checks, then builds the image and tests it |
+| [`ci_backend_deployment.yml`](.github/workflows/ci_backend_deployment.yml) | push to `main` | Quality → immutable `sha-<7>` image in ACR → deploy to AKS → tests and a live smoke incident → promote or roll back → scale down |
+| [`ci_incident_response.yml`](.github/workflows/ci_incident_response.yml) | `repository_dispatch` | The incident pipeline above: scale up, enrich, run, revert PR or escalation, scale down |
+| [`ci_backend_scale.yml`](.github/workflows/ci_backend_scale.yml) | manual, nightly | Scale the backend up or down. The 02:00 UTC run always scales to zero. |
+| [`guard-main-source.yml`](.github/workflows/guard-main-source.yml) | PR | Only `dev/*` and `fix/*` branches may merge into `main` |
+| [`ci_web.yml`](.github/workflows/ci_web.yml) | PR / push touching `dashboard-web/` | Typecheck, lint, Vitest, build, site check, Playwright + axe, Lighthouse CI |
+| [`ops_reconcile.yml`](.github/workflows/ops_reconcile.yml) | every 30 min, after Sentinel runs | Backfill the ops ledger, build and scan the snapshot |
+| [`ops_pages.yml`](.github/workflows/ops_pages.yml) | after reconcile or web CI | Check the site and publish the dashboard to GitHub Pages |
+| [`infra_validate_plan.yml`](.github/workflows/infra_validate_plan.yml) | push / PR touching `infra/` | Validate on every push, `terraform plan` where a credential exists |
+| [`infra_deploy.yml`](.github/workflows/infra_deploy.yml) | manual | Plan, apply or destroy behind GitHub environments, with memory backup and restore |
+| [`infra_pause.yml`](.github/workflows/infra_pause.yml) | manual | Pause or resume compute under a least-privilege identity |
+| [`infra_runners.yml`](.github/workflows/infra_runners.yml) | push touching `infra/ci-images/` | Build the CI runner image and push it to ACR |
 
----
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Agent framework | [openai-agents](https://github.com/openai/openai-agents-python) (Agents SDK) |
-| LLM | LiteLLM — Anthropic (default) and OpenAI, a fixed model pair per agent role with automatic fallback (§4.7). |
-| API layer | FastAPI + uvicorn |
-| Memory — episodic | PostgreSQL + pgvector (asyncpg) |
-| Memory — semantic | PostgreSQL (`services` table) |
-| Embeddings | sentence-transformers `all-MiniLM-L6-v2` (local, 384 dims, zero cost) |
-| Models / validation | Pydantic v2 |
-| Config | pydantic-settings |
-| Logging | structlog (JSON) |
-| HTTP client | httpx |
-| Containerisation | Docker |
-| Linting | ruff |
-| Type checking | pyright |
-| Tests | pytest + pytest-asyncio |
+Every cloud workflow signs in with GitHub OIDC (federated credentials, no client secrets).
 
 ---
 
-## Eval Results
+## Tech stack
 
-> _Run `python scripts/run_eval.py` to generate scores. Results will appear at `/eval`._
-
-**Eval dimensions (scored 0–5 by the judge):**
-
-| Dimension | What it measures |
-|-----------|-----------------|
-| `triage_accuracy` | Right service + correct severity? |
-| `root_cause_correctness` | Hypothesis matches known root cause? |
-| `tool_efficiency` | Right tools in logical order? No redundant calls? |
-| `mttr` | Time from alert to remediation proposal (lower is better) |
-| `remediation_safety` | HITL gate used? Proposed fix appropriate? |
-| `comms_quality` | Slack summary clear, complete, structured? |
-
-Pass threshold: **3.0 / 5.0** (60%)
-
----
-
-## Project Structure
-
-```
-sentinel/
-├── src/sentinel/
-│   ├── agents/          # 6 LLM agents + the Python orchestrator
-│   ├── tools/           # Tool implementations (fetch_logs, prepare_rollback_spec, …)
-│   ├── memory/          # Episodic (Postgres + pgvector), semantic, short-term
-│   ├── eval/            # Rubric, LLM-as-judge, batch runner, report generator
-│   ├── api/             # FastAPI routes (webhooks, incidents, generate, scenarios)
-│   ├── infra/           # DB, logging, tracing, event bus, dashboard emitter
-│   ├── models/          # Pydantic domain models
-│   ├── catalog/         # branches.yaml: the vendored scenario catalog
-│   └── dashboard/       # index.html (live dashboard) + eval.html
-├── scripts/
-│   ├── run_eval.py      # Score LangFuse scenario runs against branches.yaml
-├── tests/               # ~1 000 tests across all layers
-└── reports/             # Trajectory JSON, eval_report.json/md
-```
-
----
-
-## Architecture Decisions
-
-**Why multi-agent, not single agent?** Each specialist has a focused system prompt and constrained tool set. This makes each agent independently testable and improvable — changing the Analysis prompt doesn't risk breaking Triage.
-
-**Why HITL at the tool level, not the prompt level?** There is no "execute rollback" tool — only `prepare_rollback_spec` and `format_escalation`, which draft and return. An agent can't bypass the gate by ignoring a prompt instruction: it has no tool that acts, and the revert PR a human merges on GitHub is the only path to a rollback.
-
-**Why Postgres + pgvector for episodic memory?** One database holds services, deployments and incidents, and pgvector's `<=>` replaces in-process cosine similarity (backend.md §5, §13.2).
-
-**Why a separate judge model?** Using a different model family for evaluation avoids self-grading bias. The agents run on `llama-3.3-70b-versatile`; the judge runs on `llama-3.1-8b-instant`. In production, you'd use a different provider entirely.
-
----
-
-## Phase 2 Roadmap
-
-_Documented here for interview conversations about production readiness:_
-
-| Capability | Phase 2 approach |
-|-----------|-----------------|
-| Cloud deployment | Azure Container Apps + Bicep IaC |
-| Database | PostgreSQL + pgvector (asyncpg stores, Alembic migrations) |
-| Cache | Redis for short-term memory |
-| Model routing | LiteLLM done (Phase 9) — Kong AI Gateway for token budgets is Phase 2 |
-| Observability | Self-hosted LangFuse for trace dashboards |
-| PR creation | GitHub App for real PR creation |
-| Self-improvement | Nightly ACA Job — re-evals + auto-PR to improve failing prompts |
-| Alert source | Azure Service Bus + Datadog webhook for real alerts |
-| Adversarial evals | 40 scenarios, 8 failure classes, ambiguous multi-cause cases |
-| CI/CD | GHA with eval score gates (fail deploy if avg < 3.5) |
-
----
-
-## Running Tests
-
-```bash
-pytest                     # run all ~1 000 tests
-pytest tests/test_eval/    # eval layer only
-pytest tests/test_tools/   # tool layer only
-pytest -x -v               # stop on first failure, verbose
-```
+| Layer | Choice |
+|---|---|
+| Agents | [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) + LiteLLM (Anthropic Claude, OpenAI GPT) |
+| API | FastAPI, uvicorn, Pydantic v2, pydantic-settings, structlog, httpx |
+| Data | PostgreSQL 16 + pgvector, asyncpg, Alembic, sentence-transformers |
+| Cache and working memory | Azure Managed Redis (redis-py, Entra tokens) |
+| Observability | LangFuse v3 (traces, prompts, scores, datasets), Datadog |
+| Auth | Microsoft Entra ID: bearer tokens, workload identity, GitHub OIDC, Key Vault |
+| Platform | AKS, ACR, App Service, Azure Functions, Event Grid, Terraform |
+| Dashboard | React 18, TypeScript, Vite, Vitest, Testing Library, Playwright, axe, Lighthouse CI |
+| Tooling | Poetry, ruff, pyright, pytest, gitleaks, pip-audit, tflint, tfsec, actionlint |
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 Keshav
