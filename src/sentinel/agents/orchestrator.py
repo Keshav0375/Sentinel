@@ -36,6 +36,9 @@ Every cap is enforced here, in code (decision 2026-10-15):
   its next model call, and the incident escalates with the context gathered so far.
 - **Wall-clock bound.** The run is bounded by ``settings.sentinel_pipeline_timeout_s``
   (900 s); past it the incident escalates with :data:`PIPELINE_TIMEOUT` and is still stored.
+  The deadline is absolute: ``started_at`` + the bound, fixed when the incident first starts
+  and persisted in every checkpoint (``deadline_at``), so a resumed run gets only the time
+  that is left (none left → it escalates at once).
 - **Checkpoints and resume (decision 2026-10-25 B).** With ``deps.checkpoints`` (and
   ``persist``) the run inserts an ``in_progress`` placeholder row when it starts and writes a
   full :class:`~sentinel.models.checkpoint.RunSnapshot` after each stage — ``accepted``,
@@ -46,11 +49,12 @@ Every cap is enforced here, in code (decision 2026-10-15):
   snapshot is restored and the run jumps past the last checkpointed LLM stage; the
   deterministic steps (the gate, the target checks and their ``deployments`` read) run
   again. Every cap counter (tool budget used/refused, reflexion loops, unparsed critiques,
-  parse failures), ``models_used``, the timeline and ``started_at`` continue from the
-  snapshot — never reset; calls made inside the interrupted, un-checkpointed stage are not
-  recounted. The wall-clock bound restarts on resume (downtime is not pipeline work). A
-  second restart escalates with :data:`~sentinel.memory.checkpoints.RESUME_FAILED`
-  (:func:`escalate_resumed`).
+  parse failures), ``models_used``, the timeline, ``started_at`` and the deadline continue
+  from the snapshot — never reset. The tool budget is checkpointed on EVERY tool call
+  (``CheckpointWriter.save_budget`` raises the latest checkpoint's counts), so the calls
+  made inside the interrupted stage are counted too and a resume restores the exact count.
+  A second restart escalates with :data:`~sentinel.memory.checkpoints.RESUME_FAILED`
+  (:func:`escalate_resumed`, which publishes the terminal status like any run).
 - **Cache (decision 2026-10-25 C).** ``deps.cache`` goes to ``fetch_logs`` (5-minute,
   minute-keyed results) and to ``call_with_fallback`` (exact-match LLM calls, only when
   deterministic or ``SENTINEL_CACHE_LLM_DETERMINISTIC``; never the judge). The incident's
@@ -87,7 +91,7 @@ import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
@@ -122,6 +126,7 @@ from sentinel.eval.dataset_writer import (
 )
 from sentinel.exceptions import ToolBudgetExhausted
 from sentinel.infra.logging import get_logger
+from sentinel.infra.status_events import StatusPublisher
 from sentinel.infra.tracing import (
     annotate_trace,
     incident_trace_id,
@@ -268,14 +273,19 @@ class ResumePoint:
 
 
 class ToolBudget:
-    """One incident's tool-call counter, shared by every agent run of that incident."""
+    """One incident's tool-call counter, shared by every agent run of that incident.
 
-    def __init__(self, limit: int) -> None:
+    *on_take* (``(used, refused) → None``) is told the counts after every :meth:`take`, a
+    refused one included: the orchestrator checkpoints them, so a resume restores them.
+    """
+
+    def __init__(self, limit: int, *, on_take: Callable[[int, int], None] | None = None) -> None:
         if limit < 1:
             raise ValueError(f"the tool-call budget must be >= 1, got {limit}")
         self.limit = limit
         self.used = 0
         self.refused = 0
+        self._on_take = on_take
 
     @property
     def exhausted(self) -> bool:
@@ -284,11 +294,14 @@ class ToolBudget:
 
     def take(self) -> bool:
         """Count one call: True if it may run, False (counted as refused) past the limit."""
-        if self.used >= self.limit:
+        allowed = self.used < self.limit
+        if allowed:
+            self.used += 1
+        else:
             self.refused += 1
-            return False
-        self.used += 1
-        return True
+        if self._on_take is not None:
+            self._on_take(self.used, self.refused)
+        return allowed
 
 
 # (tool name, output text, refused) → None: what a budgeted tool reports after each call.
@@ -363,7 +376,7 @@ class _IncidentRun:
         self.deps = deps
         self.settings = deps.settings
         self.service = request.alert.service
-        self.budget = ToolBudget(deps.settings.sentinel_max_tool_calls)
+        self.budget = ToolBudget(deps.settings.sentinel_max_tool_calls, on_take=self._save_budget)
         self._guard = _BudgetGuard(self.budget, self._new_run)
         self.timeline: list[TimelineEntry] = []
         self.models_used: list[str] = []
@@ -373,6 +386,10 @@ class _IncidentRun:
         self.unparsed_critiques = 0
         self.stage = "plan"
         self.started_at = datetime.now(UTC)
+        # Absolute: fixed at the first start, carried across a resume (see restore).
+        self.deadline_at = self.started_at + timedelta(
+            seconds=self.settings.sentinel_pipeline_timeout_s
+        )
         # True when the resolution agent drafted the escalation (format_escalation).
         self.escalation_drafted = False
         # The escalation's hypothesis / evidence are raw clips (never exported to the dataset).
@@ -409,6 +426,7 @@ class _IncidentRun:
         return RunSnapshot(
             request=self.request,
             started_at=self.started_at,
+            deadline_at=self.deadline_at,
             stage=stage,
             timeline=list(self.timeline),
             models_used=list(self.models_used),
@@ -435,11 +453,18 @@ class _IncidentRun:
     def restore(self, point: ResumePoint) -> None:
         """Continue from *point*: every field and counter of its snapshot, never reset.
 
-        Tool calls made inside the stage that was interrupted (after the snapshot) are not
-        counted again: they are lost with the crash.
+        The tool counts include the calls made inside the stage that was interrupted (each
+        call raised the latest checkpoint's counts), and the deadline stays the first
+        start's: a snapshot written before ``deadline_at`` existed derives it from its
+        ``started_at``.
         """
         snap = point.snapshot
         self.started_at = snap.started_at
+        self.deadline_at = (
+            snap.deadline_at
+            if snap.deadline_at is not None
+            else snap.started_at + timedelta(seconds=self.settings.sentinel_pipeline_timeout_s)
+        )
         self.timeline = list(snap.timeline)
         self.models_used = list(snap.models_used)
         self.reflexion_loops = snap.reflexion_loops
@@ -479,12 +504,39 @@ class _IncidentRun:
             )
         self._step += 1
 
+    def _save_budget(self, used: int, refused: int) -> None:
+        """Checkpoint the tool counts after a call (the budget's ``on_take``); never raises."""
+        if not self._checkpointing or self.deps.checkpoints is None:
+            return
+        try:
+            self.deps.checkpoints.save_budget(self.request.incident_id, used, refused)
+        except Exception as exc:
+            logger.warning(
+                "checkpoint_write_failed",
+                incident_id=self.request.incident_id,
+                op="budget",
+                error_type=type(exc).__name__,
+            )
+
     # ── Driver ────────────────────────────────────────────────────────────────
+
+    def remaining_s(self) -> float:
+        """Seconds left before the absolute deadline (negative once it has passed)."""
+        return (self.deadline_at - datetime.now(UTC)).total_seconds()
 
     async def outcome(self) -> RollbackSpec | EscalationContext:
         """The rollback spec or the escalation; every failure, a timeout included, escalates."""
         timeout_s = self.settings.sentinel_pipeline_timeout_s
-        deadline = asyncio.timeout(timeout_s)
+        remaining = self.remaining_s()
+        if remaining <= 0:  # a resume after the deadline: no time is left
+            logger.error(
+                "pipeline_timeout",
+                incident_id=self.request.incident_id,
+                stage=self.stage,
+                timeout_s=timeout_s,
+            )
+            return self._escalate(f"{PIPELINE_TIMEOUT} ({timeout_s:g}s) during {self.stage}")
+        deadline = asyncio.timeout(remaining)
         try:
             async with deadline:
                 return await self._bounded_outcome()
@@ -1088,11 +1140,15 @@ async def run_pipeline(
     return result
 
 
-async def escalate_resumed(point: ResumePoint, deps: PipelineDeps) -> PipelineResult:
+async def escalate_resumed(
+    point: ResumePoint, deps: PipelineDeps, *, publisher: StatusPublisher | None = None
+) -> PipelineResult:
     """End an incident whose one resume did not finish: escalate it with
     :data:`~sentinel.memory.checkpoints.RESUME_FAILED` and what *point* holds; never raises.
 
-    Stored, its checkpoints dropped and its dataset item written as any terminal run.
+    Stored, its checkpoints dropped and its dataset item written as any terminal run, and
+    its terminal status published on ``sentinel:events`` through *publisher* (a no-op
+    without one, or without Redis), as the app does for every other terminal run.
     """
     request = point.snapshot.request
     run = _IncidentRun(request, deps)
@@ -1108,6 +1164,8 @@ async def escalate_resumed(point: ResumePoint, deps: PipelineDeps) -> PipelineRe
     outcome = run._escalate(RESUME_FAILED)  # pyright: ignore[reportPrivateUsage]
     result = run.result(outcome, 0)
     await _finish(run, result)
+    if publisher is not None:
+        publisher.publish(request.incident_id, result.status)
     logger.warning(
         "incident_resume_failed",
         incident_id=request.incident_id,

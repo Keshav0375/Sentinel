@@ -25,15 +25,23 @@
 # a recreate anyway.
 #
 # ── Who connects ─────────────────────────────────────────────────────────────
-# In CI, gha-deploy: a non-admin database principal holding pg_read_all_data,
-# granted by grant-db-access.sh (decision 2026-10-28, Q1 = a). Locally, the
-# signed-in az user (the human admin who owns the migrated tables). --pg-user
-# overrides either.
+# In CI, gha-deploy: a non-admin principal with CONNECT on this deployment's
+# database and SELECT on its tables only, granted by grant-db-access.sh
+# (decision 2026-10-25, amended 2026-10-28). Locally, the signed-in az user
+# (the human admin who owns the migrated tables). --pg-user overrides either.
 #
-# ── Skips, not failures ──────────────────────────────────────────────────────
-# A workspace that does not exist, or whose `database_name` output is empty,
-# has nothing to back up: it is skipped and the script still exits 0. Anything
-# that goes wrong while there IS a database exits 1 with ::error::.
+# ── Skips, not failures: only what is genuinely absent ───────────────────────
+# Fail closed (decision 2026-10-25, amended 2026-10-28). Exactly two things
+# count as "nothing to back up", and both skip with a notice and exit 0:
+#   - a workspace that a SUCCESSFUL `terraform workspace list` does not show;
+#   - a `database_host` / `database_name` output Terraform itself reports
+#     absent: `Output "<name>" not found` (exit 1), or an empty value / a
+#     state with no outputs at all (exit 0, nothing on stdout).
+# Every other error exits 1 with ::error:: and so blocks the destroy: a
+# failed `terraform workspace list` (with --scope all too), a failed
+# `workspace select` of a workspace the list shows, any other `terraform
+# output` failure (auth, state lock, network), a token, pg_dump or upload
+# failure. No Terraform error is discarded.
 #
 # The token is read into PGPASSWORD (the environment, not argv) and masked in
 # CI. Nothing here prints it, and there is no `set -x`.
@@ -106,28 +114,61 @@ if ! blob container show --name "${CONTAINER}" >/dev/null 2>&1; then
   die "container ${CONTAINER} not found in ${STATE_STORAGE_ACCOUNT}; run infra/scripts/bootstrap-state.sh"
 fi
 
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/memory-backup.XXXXXX")"
+trap 'rm -rf "${tmp}"' EXIT
+tf_err="${tmp}/terraform.err"
+
+# The first lines of the last Terraform error, on one line (box drawing dropped).
+tf_error() {
+  nocr < "${tf_err}" | sed -e 's/│//g' -e 's/╷//g' -e 's/╵//g' -e 's/^[[:space:]]*//' |
+    grep -v '^$' | head -n 3 | tr '\n' ' ' || true
+}
+
 # ── Which workspaces ──────────────────────────────────────────────────────────
-# `all` uses the same filter as lifecycle.sh list_deployment_workspaces.
+# One `terraform workspace list`, which must succeed: a failed list is never
+# read as "no workspaces". `all` then uses the same filter as lifecycle.sh
+# list_deployment_workspaces; `deployment` checks its one workspace against it.
+if ! listing="$(terraform workspace list 2>"${tf_err}")"; then
+  die "terraform workspace list failed (state, auth or network): $(tf_error)"
+fi
+known="$(printf '%s\n' "${listing}" | nocr | sed 's/^[* ]*//' | grep -v '^$' || true)"
 if [ "${SCOPE}" = "deployment" ]; then
   workspaces="${DEPLOYMENT}-${ENVIRONMENT}"
 else
-  workspaces="$(terraform workspace list | sed 's/^[* ]*//' | grep -v '^$' | grep -vx 'default' | grep -vx 'platform' || true)"
+  workspaces="$(printf '%s\n' "${known}" | grep -vx 'default' | grep -vx 'platform' || true)"
 fi
-
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/memory-backup.XXXXXX")"
-trap 'rm -rf "${tmp}"' EXIT
 
 export PGSSLMODE=require
 export PGCONNECT_TIMEOUT=30
 
+# tf_output <workspace> <name>: sets OUT to the output's value, "" when Terraform
+# reports it genuinely absent; any other failure exits 1 (never a skip).
+OUT=""
+tf_output() {
+  local ws="$1" name="$2" rc=0
+  OUT="$(TF_WORKSPACE="${ws}" terraform output -no-color -raw "${name}" 2>"${tf_err}")" || rc=$?
+  OUT="$(printf '%s' "${OUT}" | nocr)"
+  if [ "${rc}" -ne 0 ]; then
+    if grep -qF "Output \"${name}\" not found" "${tf_err}"; then
+      OUT=""
+      return 0
+    fi
+    die "${ws}: terraform output ${name} failed: $(tf_error)"
+  fi
+}
+
 backup_one() {
   local ws="$1" host db token dump ts name names count drop
-  if ! terraform workspace select "${ws}" >/dev/null 2>&1; then
+  if ! printf '%s\n' "${known}" | grep -qxF "${ws}"; then
     echo "::notice::memory-backup: ${ws}: no such workspace; skipped"
     return 0
   fi
-  host="$(TF_WORKSPACE="${ws}" terraform output -raw database_host 2>/dev/null | nocr || true)"
-  db="$(TF_WORKSPACE="${ws}" terraform output -raw database_name 2>/dev/null | nocr || true)"
+  terraform workspace select "${ws}" >/dev/null 2>"${tf_err}" ||
+    die "${ws}: terraform workspace select failed: $(tf_error)"
+  tf_output "${ws}" database_host
+  host="${OUT}"
+  tf_output "${ws}" database_name
+  db="${OUT}"
   if [ -z "${host}" ] || [ -z "${db}" ]; then
     echo "::notice::memory-backup: ${ws}: no database; skipped"
     return 0

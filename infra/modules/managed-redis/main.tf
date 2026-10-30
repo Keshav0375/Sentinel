@@ -1,9 +1,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Azure Managed Redis — the backend's short-term memory (decision 2026-10-25 D).
 #
-# Holds nothing durable: working state, checkpoints mirrored from Postgres,
-# status events. Losing it costs a cache warm-up, never a record, which is what
-# makes the choices below acceptable.
+# Holds nothing durable: the short-term working-memory store, the hot front of
+# the tool / LLM cache, and the status-event pub/sub. Checkpoints and the cache
+# of record live in Postgres. Losing it costs a cache warm-up, never a record,
+# which is what makes the choices below acceptable.
 #
 #   Balanced_B0, HA off   ~$13.14/month for a single node (docs/COSTS.md). A
 #                         replica would double that to protect data Postgres

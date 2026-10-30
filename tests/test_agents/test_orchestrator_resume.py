@@ -8,18 +8,21 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 import uuid
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import asyncpg
 import pytest
 from pydantic import JsonValue
+from redis_stub import StubRedis, stub_handle
 
 from sentinel.agents import orchestrator
 from sentinel.agents.orchestrator import (
+    PIPELINE_TIMEOUT,
     REFLEXION_MAX_LOOPS,
     PipelineDeps,
     ResumePoint,
@@ -27,6 +30,7 @@ from sentinel.agents.orchestrator import (
     run_pipeline,
 )
 from sentinel.config import Settings
+from sentinel.infra.status_events import STATUS_CHANNEL, StatusPublisher
 from sentinel.memory.checkpoints import RESUME_FAILED, CheckpointWriter
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.semantic import SemanticMemory
@@ -79,6 +83,22 @@ class _Store:
 
     async def delete(self, incident_id: str) -> None:
         self.ops.append(("delete", incident_id))
+
+    async def update_budget(self, incident_id: str, used: int, refused: int) -> None:
+        """As CheckpointStore: raise the latest snapshot row's counts (never a marker's)."""
+        self.ops.append(("budget", used, refused))
+        steps = [s for s, (stage, _) in self.rows.items() if stage != "resumed"]
+        if not steps:
+            return
+        stage, state = self.rows[max(steps)]
+        state["tool_calls_used"] = max(int(str(state["tool_calls_used"])), used)
+        state["tool_calls_refused"] = max(int(str(state["tool_calls_refused"])), refused)
+        self.written.set()
+
+    def latest(self) -> tuple[int, RunSnapshot]:
+        """The highest-step snapshot row, as CheckpointStore.latest reads it."""
+        step = max(s for s, (stage, _) in self.rows.items() if stage != "resumed")
+        return step, self.snapshot(step)
 
     def stages(self) -> list[str]:
         return [op[2] for op in self.ops if op[0] == "write"]
@@ -379,6 +399,167 @@ async def test_restored_tool_budget_still_caps() -> None:
     assert "tool-call budget (3 per incident) was exhausted" in result.escalation.missing[0]
 
 
+def _fetches(n: int) -> list[FakeToolCall]:
+    return [FakeToolCall("fetch_logs", {"request": {"service": SERVICE}}) for _ in range(n)]
+
+
+async def test_budget_checkpointed_on_every_tool_call() -> None:
+    store = _Store()
+    deps, writer = _deps(store)
+    request = _request()
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis())
+        script.on(REFLEXION_AGENT, _high())
+        script.on("resolution", *_rollback(request))
+        script.on(REVERIFICATION_AGENT, reverification_turn("PASS"))
+        result = await run_pipeline(request, deps)
+    await writer.flush(request.incident_id)
+
+    budget = [op for op in store.ops if op[0] == "budget"]
+    assert [op[1] for op in budget] == list(range(1, result.tool_calls_used + 1))
+    # Each call's update lands before the checkpoint of the stage it was made in.
+    analysis_write = next(i for i, op in enumerate(store.ops) if op[:3] == ("write", 2, "analysis"))
+    first_budget = next(i for i, op in enumerate(store.ops) if op[0] == "budget")
+    assert first_budget < analysis_write
+
+
+async def test_crash_mid_stage_then_resume_never_exceeds_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    granted: list[bool] = []
+    real_take = orchestrator.ToolBudget.take
+
+    def counting(self: orchestrator.ToolBudget) -> bool:
+        allowed = real_take(self)
+        granted.append(allowed)
+        return allowed
+
+    monkeypatch.setattr(orchestrator.ToolBudget, "take", counting)
+    store = _Store()
+    deps, writer = _deps(store)
+    limit = deps.settings.sentinel_max_tool_calls
+    assert limit == 20
+    request = _request()
+
+    # Run 1: analysis makes 6 calls, then its next model call hangs → the crash, mid-stage.
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", FakeTurn(tool_calls=_fetches(6)), FakeTurn(output="x", delay=60))
+        task = asyncio.create_task(run_pipeline(request, deps))
+        deadline = time.monotonic() + 10
+        while not store.rows or store.latest()[1].tool_calls_used < 6:
+            assert time.monotonic() < deadline, store.ops
+            store.written.clear()
+            await asyncio.wait_for(store.written.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    await writer.flush(request.incident_id)
+    assert store.stages() == ["accepted", "triage"]  # no analysis checkpoint: mid-stage
+    step, snap = store.latest()
+    assert snap.stage == "triage"
+    assert snap.tool_calls_used == 6  # the interrupted stage's calls are counted
+
+    # Run 2: the resume asks for far more than is left.
+    with fake_script() as script:
+        script.on("analysis", *(FakeTurn(tool_calls=_fetches(6)) for _ in range(5)))
+        result = await run_pipeline(request, deps, resume=ResumePoint(snap, step + 2))
+
+    assert result.status == "escalated"
+    assert result.tool_calls_used == limit
+    assert sum(granted) == limit  # across both runs: never more than 20 calls ran
+    assert result.escalation is not None
+    assert f"tool-call budget ({limit} per incident) was exhausted" in result.escalation.missing[0]
+
+
+async def test_resumed_deadline_is_the_first_start_plus_the_bound() -> None:
+    store = _Store()
+    deps, writer = _deps(store)
+    request = _request()
+    with fake_script() as script:
+        script.on("triage", _triage())
+        script.on("analysis", *_analysis())
+        script.on(REFLEXION_AGENT, _high())
+        script.on("resolution", *_rollback(request))
+        script.on(REVERIFICATION_AGENT, reverification_turn("PASS"))
+        await run_pipeline(request, deps)
+    await writer.flush(request.incident_id)
+    bound = timedelta(seconds=deps.settings.sentinel_pipeline_timeout_s)
+    for step in store.rows:
+        first = store.snapshot(step)
+        assert first.deadline_at == first.started_at + bound  # persisted in every checkpoint
+    _, triage_snap = store.last("triage")
+    original = triage_snap.started_at + bound
+    store.rows.clear()
+
+    # Resumed under a changed setting: the persisted deadline wins, unchanged.
+    resumed_deps = dataclasses.replace(
+        deps,
+        settings=Settings(_env_file=None, sentinel_fake_llm=True, sentinel_pipeline_timeout_s=600),  # type: ignore[call-arg]
+    )
+    with fake_script() as script:
+        script.on("analysis", *_analysis())
+        script.on(REFLEXION_AGENT, _high())
+        script.on("resolution", *_rollback(request))
+        script.on(REVERIFICATION_AGENT, reverification_turn("PASS"))
+        result = await run_pipeline(request, resumed_deps, resume=ResumePoint(triage_snap, 20))
+    await writer.flush(request.incident_id)
+
+    assert result.status == "rollback_proposed"
+    assert store.rows  # the resumed run checkpointed
+    for step in store.rows:
+        assert store.snapshot(step).deadline_at == original
+
+
+async def test_resume_gets_only_the_time_left() -> None:
+    store = _Store()
+    deps, _ = _deps(store)
+    request = _request()
+    with fake_script() as script:
+        script.on("triage", _triage())
+        await run_pipeline(request, deps)
+    _, snap = store.last("triage")
+    bound = deps.settings.sentinel_pipeline_timeout_s
+    started = datetime.now(UTC) - timedelta(seconds=bound - 0.3)  # 0.3 s of the bound left
+    late = snap.model_copy(
+        update={"started_at": started, "deadline_at": started + timedelta(seconds=bound)}
+    )
+
+    with fake_script() as script:
+        script.on("analysis", FakeTurn(output="x", delay=60))  # would outlast a fresh bound
+        began = time.monotonic()
+        result = await run_pipeline(request, deps, resume=ResumePoint(late, 10))
+
+    assert time.monotonic() - began < 5
+    assert result.status == "escalated"
+    assert result.escalation is not None
+    assert result.escalation.missing[0].startswith(PIPELINE_TIMEOUT)
+
+
+async def test_resume_after_the_deadline_escalates_at_once() -> None:
+    store = _Store()
+    deps, _ = _deps(store)
+    request = _request()
+    with fake_script() as script:
+        script.on("triage", _triage())
+        await run_pipeline(request, deps)
+    _, snap = store.last("triage")
+    # A snapshot from before deadline_at was persisted: derived from started_at + the bound.
+    expired = snap.model_copy(
+        update={"started_at": datetime.now(UTC) - timedelta(hours=1), "deadline_at": None}
+    )
+
+    with fake_script() as script:
+        script.on("analysis", *_analysis())
+        result = await run_pipeline(request, deps, resume=ResumePoint(expired, 10))
+
+    assert result.status == "escalated"
+    assert result.escalation is not None
+    assert result.escalation.missing[0].startswith(PIPELINE_TIMEOUT)
+    assert _runs(script, "analysis") == 0
+
+
 async def test_resume_from_resolution_skips_resolution_agent() -> None:
     store = _Store()
     deps, writer = _deps(store)
@@ -468,8 +649,11 @@ async def test_escalate_resumed_reason() -> None:
     deps.episodic_memory.store_incident.reset_mock()  # type: ignore[attr-defined]
     _, snap = store.last("analysis")
 
-    result = await escalate_resumed(ResumePoint(snap, 9), deps)
+    stub = StubRedis()
+    publisher = StatusPublisher(stub_handle(stub))
+    result = await escalate_resumed(ResumePoint(snap, 9), deps, publisher=publisher)
     await writer.flush(request.incident_id)
+    await publisher.drain(2.0)
 
     assert result.status == "escalated"
     assert result.escalation is not None
@@ -480,6 +664,11 @@ async def test_escalate_resumed_reason() -> None:
     assert kwargs["outcome"].resolution == "escalated: resumed after restart failed"
     assert incident.created_at == snap.started_at
     assert store.ops == [("delete", request.incident_id)]
+    # The terminal status goes out on sentinel:events, like every other terminal run.
+    ((channel, message),) = stub.published
+    assert channel == STATUS_CHANNEL == "sentinel:events"
+    assert '"status": "escalated"' in message
+    assert request.incident_id in message
 
 
 async def test_cache_stats_annotated(monkeypatch: pytest.MonkeyPatch) -> None:

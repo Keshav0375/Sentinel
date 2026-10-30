@@ -262,6 +262,36 @@ async def test_write_latest_skips_resumed_marker(pool: asyncpg.Pool) -> None:
     assert await store.last_step(request.incident_id) == 2
 
 
+async def test_update_budget_raises_latest_snapshot_only(pool: asyncpg.Pool) -> None:
+    store = CheckpointStore(pool)
+    request = _request()
+    await store.open_incident(request, T0)
+    await store.update_budget(request.incident_id, 5, 0)  # no checkpoint yet: a no-op
+    await store.write(
+        request.incident_id, 0, "accepted", _snapshot(request, "accepted").model_dump(mode="json")
+    )
+    await store.write(
+        request.incident_id, 1, "triage", _snapshot(request, "triage").model_dump(mode="json")
+    )
+    await store.write(request.incident_id, 2, "resumed", {"from_step": 1})
+
+    await store.update_budget(request.incident_id, 7, 1)
+    await store.update_budget(request.incident_id, 6, 0)  # out of order: never lowers
+
+    latest = await store.latest(request.incident_id)
+    assert latest is not None and latest.step == 1
+    snap = latest.snapshot()
+    assert (snap.tool_calls_used, snap.tool_calls_refused) == (7, 1)
+    assert snap.reflexion_loops == 1  # every other field is the stage's own
+    rows = await pool.fetch(
+        "SELECT step, state FROM incident_checkpoints WHERE incident_id = $1 ORDER BY step",
+        uuid.UUID(request.incident_id),
+    )
+    states = {row["step"]: json.loads(row["state"]) for row in rows}
+    assert states[0]["tool_calls_used"] == 3  # an older checkpoint is untouched
+    assert states[2] == {"from_step": 1}  # and so is the marker
+
+
 async def test_stuck_incidents_lists_only_in_progress(pool: asyncpg.Pool) -> None:
     store = CheckpointStore(pool)
     first, second, done = _request(), _request(), _request()
@@ -379,6 +409,9 @@ class _RecordingStore:
     async def delete(self, incident_id: str) -> None:
         await self._op("delete", incident_id)
 
+    async def update_budget(self, incident_id: str, used: int, refused: int) -> None:
+        await self._op("budget", (used, refused))
+
 
 def _writer(store: _RecordingStore, **kwargs: Any) -> CheckpointWriter:
     return CheckpointWriter(store, **kwargs)  # type: ignore[arg-type]
@@ -407,6 +440,42 @@ async def test_writer_orders_and_discards() -> None:
         ("delete", incident_id),
     ]
     assert len(writer) == 0
+
+
+async def test_writer_budget_updates_run_in_order() -> None:
+    store = _RecordingStore()
+    writer = _writer(store)
+    request = _request()
+    incident_id = request.incident_id
+    writer.open(request, T0)
+    writer.save(incident_id, 0, _snapshot(request, "accepted"))
+    writer.save_budget(incident_id, 1, 0)
+    writer.save_budget(incident_id, 2, 0)
+    writer.save(incident_id, 1, _snapshot(request, "triage"))
+    writer.save_budget(incident_id, 3, 1)
+
+    await writer.flush(incident_id)
+
+    assert store.ops == [
+        ("open", incident_id),
+        ("write", (0, "accepted", "accepted")),
+        ("budget", (1, 0)),
+        ("budget", (2, 0)),
+        ("write", (1, "triage", "triage")),
+        ("budget", (3, 1)),
+    ]
+
+
+async def test_writer_budget_skipped_when_disabled() -> None:
+    store = _RecordingStore()
+    store.fail.add("open")
+    writer = _writer(store)
+    request = _request()
+    writer.open(request, T0)
+    await writer.flush(request.incident_id)
+    writer.save_budget(request.incident_id, 1, 0)
+    await writer.flush(request.incident_id)
+    assert store.ops == []
 
 
 async def test_writer_snapshot_is_taken_at_save_time() -> None:

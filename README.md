@@ -132,8 +132,9 @@ incident on five 0–1 dimensions: `triage_accuracy`, `root_cause_correctness`, 
 
 The automated run is `ci_eval.yml` (manual dispatch). It pauses the backend, runs `run_eval.py` as
 an in-cluster Kubernetes Job under the backend's workload identity, so the LLM keys never leave the
-pod, then emits one `eval.scored` event per scenario to the ops dashboard. `run_eval.py` also runs
-by hand.
+pod, then emits one `eval.scored` per scenario per eval run (the newest item) to the ops dashboard;
+older items of a scenario are counted in the run's summary and report. `run_eval.py` also runs by
+hand.
 
 LangFuse holds the traces (one root trace per incident), the agent prompts (with a file fallback in
 `src/sentinel/agents/prompts/`), the scores and the dataset. Without LangFuse keys every one of

@@ -5,8 +5,10 @@ An incident is served from the ``incidents`` table when it has a stored row; whi
 here (short-term memory holds it — its row, if any, is only the ``in_progress`` placeholder,
 ``memory/checkpoints``) as an in-flight row with ``status: "in_progress"`` (its live timeline
 in ``trajectory``, shaped like a stored one); an ``in_progress`` placeholder no pod is running
-(awaiting its resume after a restart) as that row; otherwise 404. ``status=in_progress``
-lists both kinds of in-flight incident. No database (or
+(awaiting its resume after a restart) as that row; otherwise 404. A placeholder is never a
+*stored* incident: every listing shows it as in flight (``status: "in_progress"``, after the
+ones running here, before the stored ones), and ``status=in_progress`` lists exactly both
+kinds of in-flight incident. No database (or
 a failed query) is 503 on every route. An unknown incident is 404, and so is a known one
 with no linked ``deployments`` row on ``/deploy``. ``/rollback-spec`` is the RollbackSpec the
 pipeline drafted, read from ``trajectory.pipeline_result.rollback_spec`` of a stored
@@ -170,18 +172,23 @@ def make_incidents_router(
     ) -> IncidentListResponse:
         """List incidents: in-flight first, then stored newest first.
 
-        ``status=in_progress`` lists only the in-flight ones (running here, then the
-        ``in_progress`` placeholders no pod is running); any other status only the stored
-        ones; none lists both. ``service`` filters both. ``limit`` is 1-200 (default 50).
+        In flight is the incidents running here, then the ``in_progress`` placeholders no
+        pod is running (awaiting a resume) — never counted as stored. ``status=in_progress``
+        lists only the in-flight ones; any other status only the stored ones; none lists
+        both (the union of the two). ``service`` filters both. ``limit`` is 1-200
+        (default 50).
         """
         try:
-            in_flight = await _in_flight(service) if status in (None, IN_PROGRESS) else []
-            if status == IN_PROGRESS:
+            in_flight: list[IncidentRow] = []
+            if status in (None, IN_PROGRESS):
+                in_flight = await _in_flight(service)
                 running = {row.id for row in in_flight}
                 placeholders = await episodic_memory.list_incident_rows(
                     status=IN_PROGRESS, service=service, limit=limit
                 )
-                rows = (in_flight + [r for r in placeholders if r.id not in running])[:limit]
+                in_flight += [r for r in placeholders if r.id not in running]
+            if status == IN_PROGRESS:
+                rows = in_flight[:limit]
             else:
                 stored = await episodic_memory.list_incident_rows(
                     status=status, service=service, limit=limit

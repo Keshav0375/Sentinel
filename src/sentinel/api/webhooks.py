@@ -13,6 +13,9 @@ behind ``require_incident_write`` (backend 5.5).
   and ``status: "duplicate"`` and starts nothing — except that a stored hit on an
   ``in_progress`` placeholder no task here is running (a restart interrupted it) also asks the
   resumer to resume it, in the background (``IncidentResumer.resume_one``; at most once).
+  With a resumer, a stored hit is remembered in the cache only once that resume is decided:
+  a ``deferred`` one (over the cap, shutting down, an error) is NOT remembered, so the
+  sender's next retry reaches the stored lookup and asks again instead of being swallowed.
 - **Body cap.** Over ``SENTINEL_WEBHOOK_MAX_BODY_BYTES`` (256 KB) → 413 before parsing or auth.
 - **One task per incident.** Created in the handler, outside any span (§4.5), with its own
   entry in the shared short-term memory. The shared :class:`IncidentTasks` keeps each task
@@ -245,6 +248,14 @@ def make_incident_router(
             )
             return None
 
+    async def _resume_then_remember(
+        the_resumer: IncidentResumer, correlation_id: str, stored: str
+    ) -> None:
+        """Ask for the resume; remember the duplicate unless it was deferred (retryable)."""
+        outcome = await the_resumer.resume_one(stored)
+        if outcome != "deferred":
+            dedup.record(correlation_id, stored)
+
     def _duplicate(correlation_id: str, incident_id: str, source: str) -> IncidentAck:
         logger.info(
             "incident_deduplicated",
@@ -287,10 +298,12 @@ def make_incident_router(
             return _duplicate(correlation_id, existing, "memory")
         stored = await _stored_original(correlation_id)
         if stored is not None:
-            dedup.record(correlation_id, stored)
-            if resumer is not None:
+            if resumer is None:
+                dedup.record(correlation_id, stored)
+            else:
                 task: asyncio.Task[object] = asyncio.create_task(
-                    resumer.resume_one(stored), name=f"incident-resume-{stored}"
+                    _resume_then_remember(resumer, correlation_id, stored),
+                    name=f"incident-resume-{stored}",
                 )
                 _RESUMES.add(task)
                 task.add_done_callback(_RESUMES.discard)

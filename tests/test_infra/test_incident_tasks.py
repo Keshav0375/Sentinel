@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from sentinel.infra import incident_tasks as tasks_module
-from sentinel.infra.incident_tasks import IncidentTasks
+from sentinel.infra.incident_tasks import IncidentCapacityError, IncidentTasks
 
 
 async def _returns() -> None:
@@ -116,3 +116,58 @@ async def test_start_after_shutdown_raises() -> None:
         tasks.start("i2", coro)
 
     assert coro.cr_frame is None  # closed, so never "awaited"
+
+
+async def test_start_enforces_the_cap_itself() -> None:
+    tasks = IncidentTasks(1)
+    gate = asyncio.Event()
+    first = tasks.start("i1", gate.wait())  # type: ignore[arg-type]
+    coro = _returns()
+
+    with pytest.raises(IncidentCapacityError, match="at capacity"):
+        tasks.start("i2", coro)
+
+    assert coro.cr_frame is None  # closed, never "awaited"
+    assert len(tasks) == 1
+    gate.set()
+    await first
+
+
+async def test_reserved_slot_counts_until_started_or_released() -> None:
+    tasks = IncidentTasks(2)
+    tasks.reserve("r1")
+    tasks.reserve("r1")  # idempotent: still one slot
+    gate = asyncio.Event()
+    other = tasks.start("i1", gate.wait())  # type: ignore[arg-type]
+    assert tasks.at_capacity and tasks.has("r1") and len(tasks) == 1
+
+    with pytest.raises(IncidentCapacityError):
+        tasks.reserve("r2")
+    with pytest.raises(IncidentCapacityError):
+        tasks.start("i2", _returns())
+
+    started = tasks.start("r1", _returns())  # the reservation is its slot
+    await started
+    await asyncio.sleep(0)
+    assert not tasks.at_capacity and not tasks.has("r1")
+
+    tasks.reserve("r3")
+    tasks.release("r3")
+    tasks.release("never-reserved")  # a no-op
+    assert not tasks.has("r3") and not tasks.at_capacity
+    gate.set()
+    await other
+
+
+async def test_reserve_and_reserved_start_refused_after_shutdown() -> None:
+    tasks = IncidentTasks()
+    tasks.reserve("r1")
+    await tasks.shutdown(0)
+
+    with pytest.raises(RuntimeError, match="shutting down"):
+        tasks.reserve("r2")
+    coro = _returns()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        tasks.start("r1", coro)
+    assert coro.cr_frame is None
+    assert not tasks.has("r1")  # the reservation was released

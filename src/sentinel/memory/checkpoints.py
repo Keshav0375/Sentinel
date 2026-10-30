@@ -3,7 +3,9 @@
 An incident used to live only in short-term memory until its terminal row was stored, so a
 pod restart lost it. Now the pipeline inserts a placeholder ``incidents`` row (status
 :data:`INCIDENT_IN_PROGRESS`, no embedding, no trajectory) when it starts, and writes one
-checkpoint per stage: the full :class:`~sentinel.models.checkpoint.RunSnapshot`. A restarted
+checkpoint per stage: the full :class:`~sentinel.models.checkpoint.RunSnapshot`. Between
+stages every tool call raises the latest checkpoint's tool counts in place
+(:meth:`CheckpointStore.update_budget`), so a resume restores the exact budget. A restarted
 pod resumes each stuck incident once from its latest checkpoint
 (:mod:`sentinel.infra.incident_resume`); the checkpoints are deleted once the terminal
 incident is stored. They never leave the database (R14: they hold raw tool outputs).
@@ -97,6 +99,25 @@ class CheckpointStore:
             step,
             stage,
             json.dumps(dict(state)),
+        )
+
+    async def update_budget(self, incident_id: str, used: int, refused: int) -> None:
+        """Raise the latest snapshot checkpoint's tool counts to *used* / *refused*.
+
+        Only ever up (``GREATEST``), and never on a ``resumed`` marker; a no-op while the
+        incident has no snapshot checkpoint yet.
+        """
+        await self._execute(
+            "UPDATE incident_checkpoints SET state = state || jsonb_build_object("
+            "'tool_calls_used', GREATEST(COALESCE((state->>'tool_calls_used')::int, 0), $2::int), "
+            "'tool_calls_refused', "
+            "GREATEST(COALESCE((state->>'tool_calls_refused')::int, 0), $3::int)) "
+            "WHERE incident_id = $1 AND step = (SELECT max(step) FROM incident_checkpoints "
+            "WHERE incident_id = $1 AND stage <> $4)",
+            _uuid(incident_id),
+            used,
+            refused,
+            _RESUMED,
         )
 
     async def latest(self, incident_id: str) -> Checkpoint | None:
@@ -253,6 +274,14 @@ class CheckpointWriter:
         stage = snapshot.stage
         self._chain(
             incident_id, "write", lambda: self._store.write(incident_id, step, stage, state)
+        )
+
+    def save_budget(self, incident_id: str, used: int, refused: int) -> None:
+        """Raise the latest checkpoint's tool counts in the background (after the queued writes)."""
+        if incident_id in self._disabled:
+            return
+        self._chain(
+            incident_id, "budget", lambda: self._store.update_budget(incident_id, used, refused)
         )
 
     def discard(self, incident_id: str) -> None:

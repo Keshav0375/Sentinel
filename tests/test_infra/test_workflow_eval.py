@@ -241,10 +241,10 @@ def test_teardown_paths() -> None:
     warm = _step("teardown-backend", "restore-warm")
     assert (
         _if(warm["if"])
-        == "vars.SENTINEL_KEEP_WARM == 'true' && needs.eval.outputs.paused == 'true'"
+        == "always() && vars.SENTINEL_KEEP_WARM == 'true' && needs.eval.outputs.paused == 'true'"
     )
     down = _step("teardown-backend", "down")
-    assert _if(down["if"]) == "vars.SENTINEL_KEEP_WARM != 'true'"
+    assert _if(down["if"]) == "always() && vars.SENTINEL_KEEP_WARM != 'true'"
     assert down["uses"] == "./.github/actions/backend-down"
     assert down["with"] == {
         "resource-group": "${{ vars.AKS_RESOURCE_GROUP }}",
@@ -323,3 +323,35 @@ def test_inputs_step_rejects(env: dict[str, str], name: str, tmp_path: Path) -> 
     for value in env.values():
         assert value not in out
     assert outputs == {}
+
+
+def test_backend_restore_survives_earlier_failures() -> None:
+    """A failed login, Job delete or eval Job never leaves the paused backend at 0 replicas."""
+    teardown = _jobs()["teardown-backend"]
+    assert _if(teardown["if"]).startswith("always() && ")
+    assert "eval" in teardown["needs"]
+    steps = _steps("teardown-backend")
+    restore_ids = [
+        s["id"]
+        for s in steps
+        if s.get("uses") in ("./.github/actions/backend-up", "./.github/actions/backend-down")
+    ]
+    assert restore_ids == ["restore-warm", "down"]
+    for step_id in restore_ids:
+        assert _if(_step("teardown-backend", step_id)["if"]).startswith("always() && "), step_id
+    # The steps before them may fail without skipping them; none restores on its own.
+    before = [s for s in steps if s["id"] not in restore_ids]
+    assert [s["id"] for s in before] == ["checkout", "login", "clear"]
+    # Idempotent: backend-up scales to exactly 1 after its apply; backend-down ignores what is gone.
+    up = (REPO_ROOT / ".github/actions/backend-up/action.yml").read_text(encoding="utf-8")
+    assert "scale deployment/sentinel-backend --replicas=1" in up
+    down = (REPO_ROOT / ".github/actions/backend-down/action.yml").read_text(encoding="utf-8")
+    assert "delete service/sentinel-backend --ignore-not-found" in down
+    # No other job of this workflow scales the backend up.
+    for job_id, job in _jobs().items():
+        if job_id == "teardown-backend":
+            continue
+        for step in job.get("steps", []):
+            assert step.get("uses") != "./.github/actions/backend-down", job_id
+            if job_id != "eval":
+                assert step.get("uses") != "./.github/actions/backend-up", job_id

@@ -10,23 +10,31 @@ exactly ONE resume:
 - a ``resumed`` marker already written (a resume was started and did not finish) → the
   incident escalates with :data:`~sentinel.memory.checkpoints.RESUME_FAILED` from its latest
   snapshot (``escalate_resumed``: stored, dataset item, checkpoints dropped);
-- otherwise the ``resumed`` marker is written FIRST (if that fails the incident is not
-  resumed, so the bound holds), short-term memory is refilled (the Redis mirror's timeline,
-  when there is one), ``resumed`` is published and the pipeline restarts from the latest
-  checkpoint as an ordinary :class:`~sentinel.infra.incident_tasks.IncidentTasks` task (cap
-  and shutdown drain included). Over the cap, or shutting down, it is skipped and retried
-  at the next startup or webhook retry.
+- otherwise a slot is RESERVED (``IncidentTasks.reserve``: the cap is taken atomically, so a
+  webhook cannot fill it while the marker is written), the ``resumed`` marker is written
+  FIRST (if that fails the incident is not resumed, so the bound holds), short-term memory is
+  refilled (the Redis mirror's timeline, when there is one), ``resumed`` is published and the
+  pipeline restarts from the latest checkpoint as an ordinary
+  :class:`~sentinel.infra.incident_tasks.IncidentTasks` task in that slot (shutdown drain
+  included).
+
+Outcomes: ``resumed``, ``escalated``, ``abandoned``; ``skipped`` when there is nothing to do
+(not an ``in_progress`` placeholder, or its task already runs here); ``deferred`` when it
+could not be resumed NOW — over the cap, shutting down, an error, the marker not written,
+another resume of it in progress — and must be tried again at the next startup or webhook
+retry (the webhook does not remember a deferred retry, so its next retry asks again).
 
 The deployment's strategy is ``Recreate``: no two pods sweep at once.
 """
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import Literal, Protocol
 
 from sentinel.agents.orchestrator import PipelineDeps, ResumePoint, escalate_resumed
-from sentinel.infra.incident_tasks import IncidentTasks
+from sentinel.infra.incident_tasks import IncidentCapacityError, IncidentTasks
 from sentinel.infra.logging import get_logger
 from sentinel.infra.status_events import StatusPublisher
 from sentinel.memory.checkpoints import RESUME_FAILED, CheckpointStore
@@ -37,7 +45,7 @@ __all__ = ["IncidentResumer", "IncidentRunFn", "ResumeOutcome"]
 
 logger = get_logger("sentinel.infra.incident_resume")
 
-ResumeOutcome = Literal["resumed", "escalated", "abandoned", "skipped"]
+ResumeOutcome = Literal["resumed", "escalated", "abandoned", "skipped", "deferred"]
 
 
 class IncidentRunFn(Protocol):
@@ -51,6 +59,12 @@ class IncidentRunFn(Protocol):
 async def _await(awaitable: Awaitable[None]) -> None:
     """Wrap an awaitable as the coroutine ``IncidentTasks.start`` takes."""
     await awaitable
+
+
+def _close(awaitable: Awaitable[None]) -> None:
+    """Close an awaitable that will never run (no "coroutine was never awaited")."""
+    if inspect.iscoroutine(awaitable):
+        awaitable.close()
 
 
 class IncidentResumer:
@@ -92,7 +106,9 @@ class IncidentResumer:
 
     async def resume_one(self, incident_id: str) -> ResumeOutcome:
         """Resume, escalate or close one stuck incident (see the module docs). Never raises."""
-        if incident_id in self._busy or self._tasks.has(incident_id):
+        if incident_id in self._busy:
+            return "deferred"  # another resume of it is deciding; this one cannot know how
+        if self._tasks.has(incident_id):
             return "skipped"
         self._busy.add(incident_id)
         try:
@@ -104,9 +120,10 @@ class IncidentResumer:
                 reason="error",
                 error_type=type(exc).__name__,
             )
-            return "skipped"
+            return "deferred"
         finally:
             self._busy.discard(incident_id)
+            self._tasks.release(incident_id)  # a no-op once its task started
 
     async def _resume(self, incident_id: str) -> ResumeOutcome:
         store = self._store
@@ -121,11 +138,17 @@ class IncidentResumer:
         last_step = await store.last_step(incident_id)
         last = latest.step if last_step is None else last_step
         if await store.was_resumed(incident_id):
-            await escalate_resumed(ResumePoint(snapshot, last + 1), self._deps_fn())
+            await escalate_resumed(
+                ResumePoint(snapshot, last + 1), self._deps_fn(), publisher=self._publisher
+            )
             return "escalated"
-        if self._tasks.closing or self._tasks.at_capacity:
-            reason = "shutting down" if self._tasks.closing else "at capacity"
-            return self._skipped(incident_id, reason)
+        try:
+            # The slot before any await: from here to start() no webhook can take it.
+            self._tasks.reserve(incident_id)
+        except IncidentCapacityError:
+            return self._deferred(incident_id, "at capacity")
+        except RuntimeError:
+            return self._deferred(incident_id, "shutting down")
         try:
             # The marker first: whatever happens next, this incident is never resumed again.
             await store.write(incident_id, last + 1, "resumed", {"from_step": latest.step})
@@ -136,7 +159,7 @@ class IncidentResumer:
                 reason="the resumed marker could not be written",
                 error_type=type(exc).__name__,
             )
-            return "skipped"
+            return "deferred"
         # Read the mirror before create(): create() writes the fresh state through to it.
         timeline = (
             await self._stm_mirror.load_timeline(incident_id)
@@ -148,17 +171,16 @@ class IncidentResumer:
             self._stm.add_timeline_entry(incident_id, entry)
         if self._publisher is not None:
             self._publisher.publish(incident_id, "resumed")
+        run = self._run_fn(snapshot.request, ResumePoint(snapshot, last + 2))
         try:
-            self._tasks.start(
-                incident_id,
-                _await(self._run_fn(snapshot.request, ResumePoint(snapshot, last + 2))),
-            )
+            self._tasks.start(incident_id, _await(run))  # the reserved slot
         except RuntimeError:  # shutdown began meanwhile; the marker bounds the next try
-            return self._skipped(incident_id, "shutting down")
+            _close(run)
+            return self._deferred(incident_id, "shutting down")
         logger.info("incident_resumed", incident_id=incident_id, from_stage=snapshot.stage)
         return "resumed"
 
     @staticmethod
-    def _skipped(incident_id: str, reason: str) -> ResumeOutcome:
+    def _deferred(incident_id: str, reason: str) -> ResumeOutcome:
         logger.warning("incident_resume_skipped", incident_id=incident_id, reason=reason)
-        return "skipped"
+        return "deferred"

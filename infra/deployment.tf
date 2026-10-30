@@ -130,7 +130,7 @@ resource "terraform_data" "component_graph" {
     # The private endpoint joins the platform's AKS subnet and registers in its
     # DNS zone; a platform applied before those outputs existed has neither.
     precondition {
-      condition     = !local.want_redis || try(local.platform.aks_subnet_id, "") != ""
+      condition     = !local.want_redis || (try(local.platform.aks_subnet_id, "") != "" && try(local.platform.redis_private_dns_zone_id, "") != "")
       error_message = "components: `redis` needs the platform's aks_subnet_id / redis_private_dns_zone_id outputs. Re-apply the platform layer (scope platform) first."
     }
 

@@ -36,14 +36,26 @@
 # where the table does not exist yet, it prints a NOTE and exits 0. Re-run it
 # after the migration, and after any destroy/recreate of the database.
 #
-# ── gha-deploy and the backend runtime role (decision 2026-10-28) ────────────
+# ── gha-deploy and the backend runtime role (decision 2026-10-25) ────────────
 # gha-deploy runs the pre-destroy memory backup and the post-apply restore
 # (memory-backup.sh / memory-restore.sh). It is a non-admin principal bound by
-# object ID, like gha-app, and holds the predefined roles pg_read_all_data and
-# pg_write_all_data: enough to dump and to restore DATA, never to create,
-# drop or re-own a table. Without this grant the backup fails and so blocks
-# the destroy (fail closed), so run this once before the first destroy that
-# should keep memory.
+# object ID, like gha-app, scoped to THIS deployment's database only
+# (decision 2026-10-25, amended 2026-10-28; sentinel-brain 6252a75):
+#   CONNECT on the database, USAGE on schema public;
+#   SELECT on every table (the dump) and INSERT on every table (the data-only
+#   restore), USAGE, SELECT on every sequence;
+#   UPDATE (status, resolution) on incidents only — the restore closes the
+#   restored in_progress placeholders as escalated in its own transaction;
+#   ALTER DEFAULT PRIVILEGES for the SELECT / INSERT / sequence grants, so
+#   tables later migrations create are covered.
+# NOT the server-wide pg_read_all_data / pg_write_all_data: the platform server
+# is shared, and those roles reach every database on it. A membership left by
+# an earlier run of this script is revoked and verified gone, and gha-deploy
+# must hold no CONNECT grant of its own on any other database (read back; the
+# PUBLIC default is the server's, see section 2, and reaches no data). It
+# never creates, drops or re-owns a table. Without these grants the backup
+# fails and so blocks the destroy (fail closed), so run this once before the
+# first destroy that should keep memory, and again after migrating.
 #
 # The backend runtime role (`id-<deployment>-<env>-backend`, the backend UAMI)
 # gets SELECT, INSERT, UPDATE, DELETE on incident_checkpoints and cache_entries
@@ -286,21 +298,83 @@ SQL
 fi
 
 # ── 4. gha-deploy (memory backup/restore) ─────────────────────────────────────
-# Data only, through the predefined roles: no table grant to re-run per
-# migration, and no ownership to move.
+# Scoped to this database (see the header): table and sequence grants on what
+# exists now, default privileges for what later migrations create, all read
+# back. Default privileges belong to the role that creates the tables — the
+# caller, who also runs `alembic upgrade head` (as in section 5).
 echo "==> role      ${DEPLOY_ROLE}"
 ensure_principal "${DEPLOY_ROLE}" "${DEPLOY_OID}"
 grant_connect_usage "${DEPLOY_ROLE}"
+# The server-wide predefined roles an earlier version of this script granted.
 pg "${PG_DATABASE}" -v role="${DEPLOY_ROLE}" <<'SQL'
-GRANT pg_read_all_data, pg_write_all_data TO :"role";
+REVOKE pg_read_all_data, pg_write_all_data FROM :"role";
 SQL
 for member in pg_read_all_data pg_write_all_data; do
-  if [ "$(check "${PG_DATABASE}" "SELECT pg_has_role('${DEPLOY_ROLE}', '${member}', 'MEMBER')")" = "t" ]; then
-    echo "    verified ${DEPLOY_ROLE} is a member of ${member}"
+  if [ "$(check "${PG_DATABASE}" "SELECT pg_has_role('${DEPLOY_ROLE}', '${member}', 'MEMBER')")" = "f" ]; then
+    echo "    verified ${DEPLOY_ROLE} is NOT a member of ${member} (server-wide)"
   else
-    failed+=("${DEPLOY_ROLE}: membership of ${member}")
+    failed+=("${DEPLOY_ROLE}: still a member of the server-wide ${member}; REVOKE ${member} FROM \"${DEPLOY_ROLE}\" as its grantor")
   fi
 done
+other_connect="$(check "${PG_DATABASE}" "SELECT coalesce(string_agg(d.datname, ', ' ORDER BY d.datname), '') FROM pg_database d, aclexplode(d.datacl) a WHERE d.datname <> current_database() AND a.privilege_type = 'CONNECT' AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '${DEPLOY_ROLE}')")"
+if [ -z "${other_connect}" ]; then
+  echo "    verified ${DEPLOY_ROLE} holds no CONNECT grant on any other database"
+else
+  failed+=("${DEPLOY_ROLE}: CONNECT granted on other databases (${other_connect}); REVOKE CONNECT ON DATABASE … FROM \"${DEPLOY_ROLE}\"")
+fi
+pg "${PG_DATABASE}" -v role="${DEPLOY_ROLE}" <<'SQL'
+GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA public TO :"role";
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO :"role";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT ON TABLES TO :"role";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO :"role";
+SQL
+deploy_defaults="$(check "${PG_DATABASE}" "SELECT count(DISTINCT a.privilege_type) FROM pg_default_acl d JOIN pg_namespace n ON n.oid = d.defaclnamespace, aclexplode(d.defaclacl) a WHERE n.nspname = 'public' AND d.defaclobjtype = 'r' AND d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = current_user) AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = '${DEPLOY_ROLE}') AND a.privilege_type IN ('SELECT','INSERT')")"
+if [ "${deploy_defaults}" = "2" ]; then
+  echo "    verified ${DEPLOY_ROLE} default SELECT, INSERT on future tables in public"
+else
+  failed+=("${DEPLOY_ROLE}: default SELECT, INSERT on future tables (found ${deploy_defaults:-0} of 2)")
+fi
+# Every table in public must be dumpable and restorable; read back per table.
+deploy_tables="$(check "${PG_DATABASE}" "SELECT quote_ident(schemaname) || '.' || quote_ident(tablename) FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")"
+if [ -z "${deploy_tables}" ]; then
+  echo "NOTE: no tables in public yet; ${DEPLOY_ROLE}'s default privileges cover them once migrated"
+fi
+for t in ${deploy_tables}; do
+  for priv in SELECT INSERT; do
+    if [ "$(check "${PG_DATABASE}" "SELECT has_table_privilege('${DEPLOY_ROLE}', '${t}', '${priv}')")" = "t" ]; then
+      echo "    verified ${DEPLOY_ROLE} ${priv} on ${t}"
+    else
+      failed+=("${DEPLOY_ROLE}: ${priv} on ${t}")
+    fi
+  done
+done
+for seq in $(check "${PG_DATABASE}" "SELECT quote_ident(schemaname) || '.' || quote_ident(sequencename) FROM pg_sequences WHERE schemaname = 'public' ORDER BY sequencename"); do
+  for priv in USAGE SELECT; do
+    if [ "$(check "${PG_DATABASE}" "SELECT has_sequence_privilege('${DEPLOY_ROLE}', '${seq}', '${priv}')")" = "t" ]; then
+      echo "    verified ${DEPLOY_ROLE} ${priv} on sequence ${seq}"
+    else
+      failed+=("${DEPLOY_ROLE}: ${priv} on sequence ${seq}")
+    fi
+  done
+done
+# The restore closes restored in_progress placeholders: two columns of incidents.
+if [ "$(check "${PG_DATABASE}" "SELECT to_regclass('public.incidents') IS NOT NULL")" = "t" ]; then
+  pg "${PG_DATABASE}" -v role="${DEPLOY_ROLE}" <<'SQL'
+GRANT UPDATE (status, resolution) ON public.incidents TO :"role";
+SQL
+  for col in status resolution; do
+    if [ "$(check "${PG_DATABASE}" "SELECT has_column_privilege('${DEPLOY_ROLE}', 'public.incidents', '${col}', 'UPDATE')")" = "t" ]; then
+      echo "    verified ${DEPLOY_ROLE} UPDATE (${col}) on public.incidents"
+    else
+      failed+=("${DEPLOY_ROLE}: UPDATE (${col}) on public.incidents")
+    fi
+  done
+  if [ "$(check "${PG_DATABASE}" "SELECT has_table_privilege('${DEPLOY_ROLE}', 'public.incidents', 'UPDATE')")" = "f" ]; then
+    echo "    verified ${DEPLOY_ROLE} has no table-wide UPDATE on public.incidents"
+  else
+    failed+=("${DEPLOY_ROLE}: table-wide UPDATE on public.incidents (only status, resolution)")
+  fi
+fi
 
 # ── 5. The backend runtime role ───────────────────────────────────────────────
 # The backend UAMI's role (PGUSER in the pod). Its tables are created by later

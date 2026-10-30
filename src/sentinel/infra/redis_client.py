@@ -10,8 +10,11 @@ Auth is Entra, never an access key: the password is an access token for
 token's ``oid`` claim (read without verification — the token came from Entra, and Redis
 verifies it). The token is reused until :data:`REDIS_TOKEN_REFRESH_MARGIN_S` before it
 expires; on a refresh :class:`RedisHandle` builds a NEW client (its connections AUTH with the
-new token) and closes the old one in the background, so no connection outlives its token.
-Tokens are never logged.
+new token) and swaps it in. The old client is closed only once the commands in flight on it
+have finished: :meth:`RedisHandle.client` hands out a lease that counts each command on the
+client it was built for, and a retired client closes when its count drops to zero — a
+command never fails mid-flight because of a refresh, and no connection outlives the margin
+(the old token is still valid for those last commands). Tokens are never logged.
 
 Production code depends only on the narrow :class:`RedisCommands` protocol (the tests use
 a local stub).
@@ -21,8 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
-from typing import Final, Protocol, cast
+from collections.abc import Awaitable, Callable
+from typing import Final, Protocol, TypeVar, cast
 
 import jwt
 import redis.asyncio
@@ -49,6 +52,10 @@ REDIS_ENTRA_SCOPE: Final = "https://redis.azure.com/.default"
 REDIS_TOKEN_REFRESH_MARGIN_S: Final = 300.0
 # Every Redis socket operation and connect, in seconds.
 _SOCKET_TIMEOUT_S: Final = 5.0
+# At shutdown: how long a retired client's commands may still run before it is closed.
+_DRAIN_WAIT_S: Final = 2 * _SOCKET_TIMEOUT_S
+
+_T = TypeVar("_T")
 
 
 class RedisCommands(Protocol):
@@ -115,6 +122,42 @@ def _redis_client(host: str, port: int, username: str, password: str) -> RedisCo
     return cast(RedisCommands, client)
 
 
+class _Lease:
+    """One built client and the commands running on it; closed once retired and idle."""
+
+    def __init__(self, client: RedisCommands) -> None:
+        self.client = client
+        self.in_flight = 0
+        self.retired = False
+        self.closed = False
+        self.idle = asyncio.Event()
+        self.idle.set()
+
+
+class _LeasedClient:
+    """What :meth:`RedisHandle.client` returns: each command counted on its lease while it
+    runs. The handle owns the client, so :meth:`aclose` here is a no-op."""
+
+    def __init__(self, handle: RedisHandle, lease: _Lease) -> None:
+        self._handle = handle
+        self._lease = lease
+
+    async def get(self, name: str) -> bytes | str | None:
+        return await self._handle._run(self._lease, lambda c: c.get(name))  # pyright: ignore[reportPrivateUsage]
+
+    async def set(self, name: str, value: str, ex: int | None = None) -> object:
+        return await self._handle._run(self._lease, lambda c: c.set(name, value, ex=ex))  # pyright: ignore[reportPrivateUsage]
+
+    async def delete(self, *names: str) -> object:
+        return await self._handle._run(self._lease, lambda c: c.delete(*names))  # pyright: ignore[reportPrivateUsage]
+
+    async def publish(self, channel: str, message: str) -> object:
+        return await self._handle._run(self._lease, lambda c: c.publish(channel, message))  # pyright: ignore[reportPrivateUsage]
+
+    async def aclose(self) -> None:
+        return None
+
+
 class RedisHandle:
     """The live Redis client, rebuilt whenever the Entra token is replaced."""
 
@@ -131,35 +174,72 @@ class RedisHandle:
         self._token = token
         self._factory = factory
         self._lock = asyncio.Lock()
-        self._client: RedisCommands | None = None
+        self._lease: _Lease | None = None
         self._built_for: float | None = None
+        # Retired leases with commands still in flight, closed when they go idle.
+        self._retired: set[_Lease] = set()
         self._closing: set[asyncio.Task[None]] = set()
 
     async def client(self) -> RedisCommands:
-        """The client for the current token (a new one after a refresh).
+        """The client for the current token (a new one after a refresh), as a lease.
 
         Raises:
             Exception: The token could not be fetched (callers log and fall back).
         """
         async with self._lock:
             oid, token, expires_on = await self._token.current()
-            if self._client is None or self._built_for != expires_on:
-                old = self._client
-                self._client = self._factory(self.host, self.port, oid, token)
+            if self._lease is None or self._built_for != expires_on:
+                old = self._lease
+                self._lease = _Lease(self._factory(self.host, self.port, oid, token))
                 self._built_for = expires_on
                 if old is not None:
-                    task = asyncio.create_task(self._close(old), name="redis-client-close")
-                    self._closing.add(task)
-                    task.add_done_callback(self._closing.discard)
-            return self._client
+                    self._retire(old)
+            return _LeasedClient(self, self._lease)
 
     async def aclose(self) -> None:
-        """Close the live client and wait for the pending closes. Never raises."""
-        client, self._client = self._client, None
-        if client is not None:
-            await self._close(client)
+        """Close every client: the live one at once, a retired one once its commands end
+        (waiting at most :data:`_DRAIN_WAIT_S`). Never raises."""
+        lease, self._lease = self._lease, None
+        if lease is not None:
+            self._retire(lease)
+        for retired in list(self._retired):
+            try:
+                await asyncio.wait_for(retired.idle.wait(), _DRAIN_WAIT_S)
+            except TimeoutError:
+                logger.warning("redis_client_closed_busy", in_flight=retired.in_flight)
+            self._close_later(retired)
         if self._closing:
             await asyncio.wait(set(self._closing))
+
+    async def _run(self, lease: _Lease, call: Callable[[RedisCommands], Awaitable[_T]]) -> _T:
+        """Run one command on *lease*'s client, counted while it runs."""
+        lease.in_flight += 1
+        lease.idle.clear()
+        try:
+            return await call(lease.client)
+        finally:
+            lease.in_flight -= 1
+            if lease.in_flight == 0:
+                lease.idle.set()
+                if lease.retired:
+                    self._close_later(lease)
+
+    def _retire(self, lease: _Lease) -> None:
+        """Swap *lease* out: closed now when idle, else when its last command ends."""
+        lease.retired = True
+        if lease.in_flight == 0:
+            self._close_later(lease)
+        else:
+            self._retired.add(lease)
+
+    def _close_later(self, lease: _Lease) -> None:
+        if lease.closed:
+            return
+        lease.closed = True
+        self._retired.discard(lease)
+        task = asyncio.create_task(self._close(lease.client), name="redis-client-close")
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
 
     @staticmethod
     async def _close(client: RedisCommands) -> None:

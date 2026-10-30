@@ -9,16 +9,26 @@
 # migrating a fresh database. The counterpart of memory-backup.sh.
 #
 # ── DATA only, into a schema that already exists ─────────────────────────────
-# Decision 2026-10-28 (Q1 = a): owners never change. The tables belong to
-# whoever ran `alembic upgrade head` (the human admin), and gha-deploy is a
-# non-admin principal with pg_read_all_data / pg_write_all_data — it can write
-# rows, it cannot create or re-own tables. So the restore is
-# `pg_restore --data-only --single-transaction --exit-on-error`: all of it or
-# none of it.
+# Decision 2026-10-25 (amended 2026-10-28): owners never change. The tables
+# belong to whoever ran `alembic upgrade head` (the human admin), and
+# gha-deploy is a non-admin principal scoped to this one database (SELECT and
+# INSERT on its tables, UPDATE of incidents.status / .resolution) — it can
+# write rows, it cannot create or re-own tables. So the restore is DATA only:
+# `pg_restore --data-only` renders the rows as SQL and `psql
+# --single-transaction` applies them: all of it or none of it.
 #
-# The data of public.alembic_version and public.services is NOT restored. The
-# migration seeds both, so restoring them would collide with rows already
-# there.
+# Data NOT restored:
+#   alembic_version, services   the migration seeds both; restoring them would
+#                               collide with the rows already there
+#   cache_entries               cached tool / LLM replies stay in the database
+#                               they were made in (R14); never dumped anyway
+#   incident_checkpoints        the in-flight runs of the destroyed estate
+#
+# ── Restored placeholders are closed, in the same transaction ────────────────
+# An incident that was in flight when the estate was destroyed comes back as
+# its `in_progress` placeholder row, with no checkpoint. The same transaction
+# closes every such row as `escalated` ("restored from backup"), so the
+# backend's startup sweep never resumes a stale incident against a new estate.
 #
 # ── When it does nothing (exit 0, with a notice) ─────────────────────────────
 #   no workspace / no database     nothing to restore into
@@ -139,13 +149,22 @@ list="${tmp}/restore.list"
 echo "==> ${ws}: restoring ${latest} into ${db} on ${host} as ${PG_USER}"
 blob blob download -c "${CONTAINER}" -n "${latest}" -f "${dump}" >/dev/null || die "download of ${latest} failed"
 
-# The migration seeds alembic_version and services; their data is left out.
+# The data left out (see the header): seeded, cached, or the old estate's runs.
 pg_restore --list "${dump}" > "${tmp}/full.list" || die "${latest} is not a readable archive"
-grep -v -E '^[0-9]+; [0-9]+ [0-9]+ TABLE DATA public (alembic_version|services) ' "${tmp}/full.list" > "${list}" || true
+grep -v -E '^[0-9]+; [0-9]+ [0-9]+ TABLE DATA public (alembic_version|services|cache_entries|incident_checkpoints) ' \
+  "${tmp}/full.list" > "${list}" || true
 
-pg_restore --data-only --single-transaction --exit-on-error -L "${list}" \
-  -h "${host}" -p 5432 -U "${PG_USER}" -d "${db}" "${dump}" ||
-  die "pg_restore failed (nothing was written; single transaction)"
+# Render the kept data as SQL, then apply it AND close the restored
+# placeholders in ONE transaction (-1 wraps every -f / -c in BEGIN … COMMIT;
+# ON_ERROR_STOP aborts it on the first error).
+sql="${tmp}/restore.sql"
+pg_restore --data-only -L "${list}" -f "${sql}" "${dump}" || die "pg_restore could not render ${latest}"
+psql -X -q -v ON_ERROR_STOP=1 --single-transaction \
+  -h "${host}" -p 5432 -U "${PG_USER}" -d "${db}" \
+  -f "${sql}" \
+  -c "UPDATE public.incidents SET status = 'escalated', resolution = 'restored from backup' WHERE status = 'in_progress'" \
+  >/dev/null ||
+  die "restore failed (nothing was written; single transaction)"
 
 unset PGPASSWORD
 echo "RESTORED ${ws} ${latest}"

@@ -393,6 +393,32 @@ async def test_list_status_filter_selects_the_source(
     assert [item["id"] for item in escalated] == [stored]
 
 
+async def test_stuck_placeholder_listed_in_flight_never_as_stored(
+    episodic: EpisodicMemory, pool: asyncpg.Pool
+) -> None:
+    live = str(uuid.uuid4())
+    stm = ShortTermMemory()
+    stm.create(live, _alert())
+    # A placeholder no pod is running (awaiting its resume), and one stored incident.
+    stuck = await _insert_incident(pool, status="in_progress", created_at=T0)
+    stored = await _insert_incident(pool, status="escalated", created_at=T0 - timedelta(hours=1))
+    app = _app(stm, episodic)
+
+    everything = (await _get(app, "/incidents")).json()["incidents"]
+    in_progress = (await _get(app, "/incidents", status="in_progress")).json()["incidents"]
+    escalated = (await _get(app, "/incidents", status="escalated")).json()["incidents"]
+
+    # Unfiltered = in flight (running here, then the stuck placeholder) + stored: the union.
+    assert [(i["id"], i["status"]) for i in everything] == [
+        (live, "in_progress"),
+        (stuck, "in_progress"),
+        (stored, "escalated"),
+    ]
+    assert [i["id"] for i in in_progress] == [live, stuck]
+    assert [i["id"] for i in escalated] == [stored]
+    assert await episodic.stored_incident_ids([stuck, stored]) == {stored}  # never "stored"
+
+
 async def test_list_service_filter_applies_to_in_flight(
     episodic: EpisodicMemory, pool: asyncpg.Pool
 ) -> None:

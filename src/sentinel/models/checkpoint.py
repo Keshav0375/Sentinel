@@ -33,11 +33,15 @@ class RunSnapshot(BaseModel):
     request: PipelineInput
     started_at: datetime
     stage: CheckpointStage
+    # The absolute wall-clock deadline (started_at + the bound at the first start); None in
+    # a snapshot written before it was persisted (the resume derives it from started_at).
+    deadline_at: datetime | None = None
     timeline: list[TimelineEntry]
     models_used: list[str]
     reflexion_loops: int
     parse_failures: int
     unparsed_critiques: int
+    # Raised on every tool call (CheckpointWriter.save_budget), not only per stage.
     tool_calls_used: int
     tool_calls_refused: int
     escalation_drafted: bool

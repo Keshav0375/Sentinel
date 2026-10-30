@@ -339,9 +339,12 @@ jobs:
           kubelogin convert-kubeconfig -l azurecli
           kubectl -n sentinel-dev delete job/sentinel-eval --ignore-not-found --cascade=foreground --wait=true
 
+      # Both restore paths run under always(): a failed login, Job delete or eval Job never leaves the paused
+      # backend at 0 replicas. Each is idempotent: backend-up applies the manifests and scales to 1 (a no-op on a
+      # running backend), backend-down deletes with --ignore-not-found and scales to 0, so a re-run is safe.
       - id: restore-warm
         name: Bring the backend back up (SENTINEL_KEEP_WARM)
-        if: vars.SENTINEL_KEEP_WARM == 'true' && needs.eval.outputs.paused == 'true'
+        if: always() && vars.SENTINEL_KEEP_WARM == 'true' && needs.eval.outputs.paused == 'true'
         uses: ./.github/actions/backend-up
         with:
           resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
@@ -359,7 +362,7 @@ jobs:
 
       - id: down
         name: Scale the backend down (honours SENTINEL_KEEP_WARM)
-        if: vars.SENTINEL_KEEP_WARM != 'true'
+        if: always() && vars.SENTINEL_KEEP_WARM != 'true'
         uses: ./.github/actions/backend-down
         with:
           resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
