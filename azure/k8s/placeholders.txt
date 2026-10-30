@@ -18,6 +18,8 @@
 # PGHOST                  infra output: lowercase FQDN (two or more DNS labels)
 # PGDATABASE              infra output: identifier [A-Za-z_][A-Za-z0-9_]*, max 63
 # PGUSER                  infra output: backend UAMI name [A-Za-z0-9][A-Za-z0-9_-]*, max 63
+# REDIS_HOST              infra output: lowercase FQDN (two or more DNS labels)
+# REDIS_PORT              infra output: decimal port 1-65535, no leading zero (Managed Redis TLS: 10000)
 ACR_LOGIN_SERVER
 IMAGE_TAG
 SENTINEL_API_TENANT_ID
@@ -26,3 +28,5 @@ KEY_VAULT_URL
 PGHOST
 PGDATABASE
 PGUSER
+REDIS_HOST
+REDIS_PORT

@@ -111,6 +111,13 @@ on:
         type: string
         required: false
         default: ''
+      force_destroy_without_backup:
+        description: >-
+          DESTROY ONLY. Emergency: destroy even if the pre-destroy memory backup fails (the data is
+          lost).
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   id-token: write
@@ -370,6 +377,45 @@ jobs:
           fi
           echo "principal_id=${pid}" >> "$GITHUB_OUTPUT"
 
+      # ── Back up agent memory before any destroy ──────────────────────────
+      # Fail closed (decisions 2026-10-25 A): this step precedes the destroy and
+      # nothing after it has always(), so a failed backup fails the job and the
+      # destroy never runs. The emergency override still attempts the backup;
+      # it only stops a failure from blocking. Scope platform is skipped:
+      # lifecycle.sh refuses it while any deployment, and so any database, lives.
+      - name: Back up agent memory
+        id: backup
+        if: inputs.action == 'destroy' && inputs.scope != 'platform'
+        continue-on-error: ${{ inputs.force_destroy_without_backup }}
+        timeout-minutes: 20
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          SCOPE: ${{ inputs.scope }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        run: |
+          # The Postgres data plane and blob storage need a live OIDC assertion.
+          bash ./scripts/az-refresh.sh
+          bash ./scripts/memory-backup.sh \
+            --scope "${SCOPE}" \
+            --deployment "${DEPLOYMENT}" \
+            --environment "${ENVIRONMENT_NAME}"
+
+      - name: "Warn: destroying without a backup"
+        if: inputs.action == 'destroy' && steps.backup.outcome == 'failure'
+        run: |
+          echo "::warning::force_destroy_without_backup is set and the memory backup FAILED."
+          echo "::warning::The destroy proceeds; this deployment's agent memory is lost."
+          {
+            echo "### Destroying WITHOUT a memory backup"
+            echo ""
+            echo "The pre-destroy backup failed and \`force_destroy_without_backup\` let the"
+            echo "destroy proceed. The agent memory in this deployment's database is lost."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # ── The whole lifecycle, in dependency order ─────────────────────────
       # One script rather than a job matrix: GitHub does not guarantee matrix
       # ordering even at max-parallel 1, and the ordering here IS the safety
@@ -405,6 +451,26 @@ jobs:
             --environment "${ENVIRONMENT_NAME}" \
             --confirm "${CONFIRM}" \
             --target "${TARGET}"
+
+      # ── Restore agent memory after an apply ──────────────────────────────
+      # Data only, and only into an empty, already-migrated schema; every other
+      # state is a notice and exit 0 (scripts/memory-restore.sh). A failure fails
+      # the job — the estate is already up, nothing is rolled back.
+      - name: Restore agent memory
+        id: restore
+        if: inputs.action == 'apply' && inputs.scope != 'platform'
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARM_USE_OIDC: "true"
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        run: |
+          bash ./scripts/az-refresh.sh
+          bash ./scripts/memory-restore.sh \
+            --deployment "${DEPLOYMENT}" \
+            --environment "${ENVIRONMENT_NAME}"
 
       # ── Seed the vault ───────────────────────────────────────────────────
       # After the apply, over the DATA plane, from GitHub environment secrets.
@@ -463,6 +529,8 @@ jobs:
           DEPLOYMENT: ${{ inputs.deployment }}
           ENVIRONMENT_NAME: ${{ inputs.environment_name }}
           GH_ENVIRONMENT: ${{ inputs.action == 'destroy' && 'destroy' || 'production' }}
+          BACKUP: ${{ steps.backup.outcome }}
+          RESTORE: ${{ steps.restore.outcome }}
         run: |
           {
             echo "### ${ACTION} · scope \`${SCOPE}\`"
@@ -472,6 +540,8 @@ jobs:
             echo "| deployment | \`${DEPLOYMENT}-${ENVIRONMENT_NAME}\` |"
             echo "| environment | \`${GH_ENVIRONMENT}\` |"
             echo "| vault | \`${VAULT:-n/a}\` |"
+            echo "| memory backup | ${BACKUP:-n/a} |"
+            echo "| memory restore | ${RESTORE:-n/a} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ── The referee ─────────────────────────────────────────────────────────────

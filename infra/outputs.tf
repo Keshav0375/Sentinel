@@ -88,6 +88,18 @@ output "postgres_admin_principal" {
   value       = try(var.pg_admin_principal_name, null)
 }
 
+# Consumed by: every deployment's Redis private endpoint (modules/managed-redis),
+# which joins the AKS-managed subnet and registers in the platform's zone.
+output "aks_subnet_id" {
+  description = "ID of the AKS-managed `aks-subnet`, where each deployment's Redis private endpoint is placed."
+  value       = try(data.azurerm_subnet.aks[0].id, null)
+}
+
+output "redis_private_dns_zone_id" {
+  description = "ID of the privatelink.redis.azure.net zone linked to the AKS VNet."
+  value       = try(azurerm_private_dns_zone.redis[0].id, null)
+}
+
 # ── Deployment ────────────────────────────────────────────────────────────────
 # Proves the remote-state seam end to end: these values are READ from the
 # platform's state, not computed here. Phase 6 adds the deployment's own
@@ -172,4 +184,17 @@ output "event_grid_topic_name" {
 output "event_grid_endpoint" {
   description = "Ingest URL of this deployment's Event Grid topic; the Datadog webhook posts here."
   value       = try(module.event_grid[0].topic_endpoint, null)
+}
+
+# ── What the backend pod needs for short-term memory (decision 2026-10-25 D) ─
+
+# Consumed by: sentinel-dev vars REDIS_HOST/REDIS_PORT -> backend-up -> ConfigMap.
+output "redis_host" {
+  description = "Hostname of this deployment's Managed Redis; resolves to its private endpoint inside the AKS VNet."
+  value       = try(module.redis[0].hostname, null)
+}
+
+output "redis_port" {
+  description = "TLS port of this deployment's Managed Redis (10000)."
+  value       = try(module.redis[0].port, null)
 }

@@ -291,3 +291,56 @@ def test_actionlint_clean() -> None:
         check=False,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# --- memory backup before destroy, restore after apply (decisions 2026-10-25 A) ---
+
+
+def _deploy_steps() -> list[dict[str, Any]]:
+    return _jobs("infra_deploy.yml")["run"]["steps"]
+
+
+def _step_index(steps: list[dict[str, Any]], name: str) -> int:
+    return next(i for i, s in enumerate(steps) if s.get("name") == name)
+
+
+def test_force_input() -> None:
+    inputs = _on(_doc("infra_deploy.yml"))["workflow_dispatch"]["inputs"]
+    force = inputs["force_destroy_without_backup"]
+    assert force["type"] == "boolean"
+    assert force["default"] is False
+    assert force["required"] is False
+
+
+def test_backup_blocks_destroy() -> None:
+    steps = _deploy_steps()
+    backup_at = _step_index(steps, "Back up agent memory")
+    run_at = _step_index(steps, "Run ${{ inputs.action }}")
+    assert backup_at < run_at
+    backup = steps[backup_at]
+    assert backup["id"] == "backup"
+    assert backup["if"] == "inputs.action == 'destroy' && inputs.scope != 'platform'"
+    assert backup["continue-on-error"] == "${{ inputs.force_destroy_without_backup }}"
+    assert "scripts/memory-backup.sh" in backup["run"]
+    run = steps[run_at]
+    assert "if" not in run
+    assert "continue-on-error" not in run
+    for step in steps[backup_at + 1 : run_at]:
+        condition = str(step.get("if", ""))
+        assert "always()" not in condition, step.get("name")
+        assert "failure()" not in condition, step.get("name")
+        assert step.get("continue-on-error") is not True, step.get("name")
+    warn = steps[_step_index(steps, "Warn: destroying without a backup")]
+    assert warn["if"] == "inputs.action == 'destroy' && steps.backup.outcome == 'failure'"
+    assert "::warning::" in warn["run"]
+
+
+def test_restore_after_apply() -> None:
+    steps = _deploy_steps()
+    restore_at = _step_index(steps, "Restore agent memory")
+    assert restore_at > _step_index(steps, "Run ${{ inputs.action }}")
+    restore = steps[restore_at]
+    assert restore["id"] == "restore"
+    assert restore["if"] == "inputs.action == 'apply' && inputs.scope != 'platform'"
+    assert "continue-on-error" not in restore
+    assert "scripts/memory-restore.sh" in restore["run"]

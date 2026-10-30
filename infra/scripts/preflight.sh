@@ -79,7 +79,7 @@ fi
 unregistered=""
 for ns in Microsoft.ContainerService Microsoft.ContainerRegistry Microsoft.DBforPostgreSQL \
           Microsoft.KeyVault Microsoft.EventGrid Microsoft.Web Microsoft.Storage \
-          Microsoft.ManagedIdentity; do
+          Microsoft.ManagedIdentity Microsoft.Cache; do
   state="$(az provider show --namespace "${ns}" --query registrationState -o tsv 2>/dev/null | nocr)"
   [ "${state}" = "Registered" ] || unregistered="${unregistered} ${ns}"
 done

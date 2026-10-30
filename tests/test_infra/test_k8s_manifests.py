@@ -40,6 +40,8 @@ SAMPLE_VALUES: dict[str, str] = {
     "PGHOST": "pg-sentinel-test.postgres.database.azure.com",
     "PGDATABASE": "sentinel_test",
     "PGUSER": "id-sentinel-backend-test",
+    "REDIS_HOST": "redis-sentinel-test.canadacentral.redis.azure.net",
+    "REDIS_PORT": "10000",
 }
 
 KUBECTL_CONTEXT_ENV = "SENTINEL_TEST_KUBECTL_CONTEXT"
@@ -177,6 +179,8 @@ def test_configmap_data() -> None:
         "PGHOST",
         "PGDATABASE",
         "PGUSER",
+        "REDIS_HOST",
+        "REDIS_PORT",
     ]
     data = _doc("configmap.yaml")["data"]
     assert set(data) == {*dynamic, "DD_SITE", "SENTINEL_PRIMARY_PROVIDER"}

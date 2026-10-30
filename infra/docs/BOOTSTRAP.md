@@ -53,9 +53,10 @@ az account set --subscription 174e25ca-ab82-4671-a913-9c2f66e5924d
 ./scripts/bootstrap-state.sh
 ```
 
-Creates `rg-sentinel-bootstrap`, the storage account `stsentineltf<uid6>`, the `tfstate`
-container, and grants **you** Storage Blob Data Contributor on it. Registers eleven resource
-providers. Idempotent — safe to re-run as a health check.
+Creates `rg-sentinel-bootstrap`, the storage account `stsentineltf<uid6>`, the `tfstate` and
+`memory-backups` containers, and grants **you** Storage Blob Data Contributor on it. Registers
+twelve resource providers (`Microsoft.Cache` for Managed Redis among them). Idempotent — safe to
+re-run as a health check.
 
 > **Control plane is not data plane.** Being Owner of the subscription does **not** let you read
 > a blob. Without that role assignment `terraform init` returns a 403 that reads like broken
@@ -256,6 +257,55 @@ terraform apply -var layer=deployment -var deployment=demo1 -var environment=dev
 
 A deployment absent from `azure/config/deployment-config.yaml` inherits `defaults:` entirely, so
 this needs no file edit. Add a block there only when a deployment must differ.
+
+### Agent memory: Managed Redis and the pre-destroy backup
+
+Every deployment with `namespace` also gets `redis` by default: Azure Managed Redis Balanced B0,
+single node, Entra-only (no access keys), reachable only through a private endpoint in the AKS
+subnet. Cost: [docs/COSTS.md](COSTS.md). **After pulling this change, once:**
+
+1. Re-run `./scripts/bootstrap-state.sh` — it creates the `memory-backups` container and
+   registers `Microsoft.Cache`.
+2. Apply `scope: platform` before any deployment. The platform publishes two new outputs
+   (`aks_subnet_id`, `redis_private_dns_zone_id`) and a deployment with `redis` refuses to plan
+   without them.
+3. After the deployment apply, set the `sentinel-dev` environment variables on Sentinel, like
+   `PG_HOST`:
+
+   ```bash
+   terraform workspace select sentinel-dev
+   terraform output -raw redis_host   # -> REDIS_HOST
+   terraform output -raw redis_port   # -> REDIS_PORT (10000)
+   ```
+
+   Until both are set, the backend workflows skip (not fail) at their preflight.
+
+**Backup before destroy.** Every `destroy` with scope `deployment` or `all` first runs
+`scripts/memory-backup.sh`: one `pg_dump` per deployment database (without the data of
+`cache_entries`) into `memory-backups/<deployment>-<env>/<timestamp>.dump`, newest 10 kept. It
+fails closed: a failed backup fails the job and **the destroy does not run**. The dispatch input
+`force_destroy_without_backup` is the emergency override — the backup is still attempted, its
+failure no longer blocks, and the run warns loudly that the memory is lost.
+
+The backup connects as `gha-deploy`, which needs a database grant: run
+`bash scripts/grant-db-access.sh --deployment sentinel --environment dev` once before the first
+destroy that should keep memory. Without that grant the backup fails and so blocks the destroy
+(fail closed), unless `force_destroy_without_backup` is set.
+
+**Restore after apply.** Every `apply` with scope `deployment` or `all` then runs
+`scripts/memory-restore.sh`. It restores data only, from the newest dump, and only into a
+migrated database whose `incidents` table is empty; otherwise it prints a notice and does
+nothing. On a fresh database the schema does not exist yet (migrations are human-run), so the
+order after a fresh apply is:
+
+```bash
+poetry run alembic upgrade head                                            # from the repo root
+bash infra/scripts/grant-db-access.sh --deployment sentinel --environment dev
+bash infra/scripts/memory-restore.sh --deployment sentinel --environment dev
+```
+
+Re-run grant-db-access.sh after migrating (and after any platform recreate): it grants the
+backend role its tables and the default privileges for the ones later migrations create.
 
 ## Step 8 — Key Vault secrets, per deployment
 
@@ -468,6 +518,10 @@ deployment first and the platform last — the order matters, because a deployme
 platform through `terraform_remote_state` and holds a namespace on its cluster and a database on
 its Postgres server. Destroying the platform first does not fail loudly; it leaves orphaned state
 describing resources that no longer exist.
+
+The workflow also backs up agent memory first and refuses to destroy if that fails (see
+*Agent memory* under step 7). A hand-run `terraform destroy` does not — run
+`bash scripts/memory-backup.sh --scope deployment --deployment demo1 --environment dev` before it.
 
 Everything below is the same thing by hand, for when you want to watch it happen.
 

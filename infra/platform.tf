@@ -102,3 +102,47 @@ module "postgresql" {
   postgres_entra_admin_object_id      = var.pg_admin_object_id
   postgres_entra_admin_principal_name = var.pg_admin_principal_name
 }
+
+# ── Private DNS for Managed Redis ─────────────────────────────────────────────
+# Each deployment's cache is reachable only through a private endpoint in the
+# AKS-managed VNet (modules/managed-redis). The zone and its VNet link live HERE,
+# once, because Azure allows only one zone of a given name linked to a VNet: a
+# zone per deployment would collide on the second one. Each deployment's
+# endpoint registers its A record in this zone through its DNS zone group.
+#
+# The VNet is AKS-managed (azure CNI overlay, no BYO network), so it is found in
+# the node resource group rather than declared. Exactly one is expected there.
+data "azurerm_resources" "aks_vnet" {
+  count               = local.platform_count
+  resource_group_name = module.aks[0].node_resource_group
+  type                = "Microsoft.Network/virtualNetworks"
+
+  lifecycle {
+    postcondition {
+      condition     = length(self.resources) == 1
+      error_message = "expected exactly one AKS-managed VNet in the node resource group"
+    }
+  }
+}
+
+data "azurerm_subnet" "aks" {
+  count                = local.platform_count
+  name                 = "aks-subnet"
+  virtual_network_name = data.azurerm_resources.aks_vnet[0].resources[0].name
+  resource_group_name  = module.aks[0].node_resource_group
+}
+
+resource "azurerm_private_dns_zone" "redis" {
+  count               = local.platform_count
+  name                = "privatelink.redis.azure.net"
+  resource_group_name = azurerm_resource_group.platform[0].name
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "redis_aks" {
+  count                 = local.platform_count
+  name                  = "aks-vnet"
+  resource_group_name   = azurerm_resource_group.platform[0].name
+  private_dns_zone_name = azurerm_private_dns_zone.redis[0].name
+  virtual_network_id    = data.azurerm_resources.aks_vnet[0].resources[0].id
+  registration_enabled  = false
+}
