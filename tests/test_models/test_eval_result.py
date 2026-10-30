@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -222,3 +223,24 @@ def test_ground_truth_result_values_are_binary() -> None:
     )
     assert ok.score_for(GroundTruthCheck.FIRED) == 0.0
     assert ok.score_for(GroundTruthCheck.CLASSIFIED) == 1.0
+
+
+def test_ground_truth_result_link_fields_default() -> None:
+    checks = dict.fromkeys(GroundTruthCheck, 1.0)
+    plain = GroundTruthResult(item_id="i", branch="pass/01", case="i", checks=checks)
+    assert plain.incident_id is None
+    assert plain.judge_failed is False
+    assert plain.created_at is None
+    linked = GroundTruthResult(
+        item_id="i",
+        branch="runtime/01",
+        case="iii",
+        checks=checks,
+        incident_id="33333333-3333-4333-8333-333333333333",
+        judge_failed=True,
+        created_at=datetime(2026, 10, 27, 13, tzinfo=UTC),
+    )
+    dumped = linked.model_dump(mode="json")
+    assert dumped["created_at"] == "2026-10-27T13:00:00Z"
+    assert GroundTruthResult.model_validate(dumped) == linked
+    assert GroundTruthResult.model_validate(plain.model_dump(mode="json")) == plain

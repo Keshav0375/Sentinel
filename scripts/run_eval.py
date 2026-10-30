@@ -5,6 +5,7 @@ Usage::
     python3 scripts/run_eval.py --branches ../Sentinel-deployment/scenarios/branches.yaml
     python3 scripts/run_eval.py --branches <path> --dataset sentinel-scenario-runs --run-name R
     python3 scripts/run_eval.py --branches <path> --no-store
+    python3 scripts/run_eval.py --branches <path> --print-report
 
 This is a read-only scorer: run scenarios by merging their branch PRs; this only scores.
 With DATABASE_URL set, each judged score is also stored on its incident row
@@ -21,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 # Ensure src/ is on sys.path when running the script directly.
@@ -36,12 +39,25 @@ from sentinel.exceptions import EvalError, ProviderUnavailableError  # noqa: E40
 
 _REPORTS_DIR = _PROJECT_ROOT / "reports"
 
+# The in-cluster eval Job's report egress (decision 2026-10-28): ci_eval.yml reads these blocks from
+# the Job logs with scripts/eval_report_from_logs.py, which carries the same two markers.
+REPORT_MARKER_BEGIN = "----- BEGIN SENTINEL EVAL REPORT {name} -----"
+REPORT_MARKER_END = "----- END SENTINEL EVAL REPORT {name} -----"
+
 
 def _score_bar(score: float, width: int = 20) -> str:
     """Render a text progress bar for a 0-1 score."""
     filled = int(round(score * width))
     bar = "█" * filled + "░" * (width - filled)
     return f"[{bar}] {score:.2f}/1.00"
+
+
+def _print_report_blocks(paths: Sequence[Path]) -> None:
+    """Print each report file base64-encoded (76-char lines) between its BEGIN/END markers."""
+    for path in paths:
+        print(REPORT_MARKER_BEGIN.format(name=path.name), flush=True)
+        print(base64.encodebytes(path.read_bytes()).decode("ascii").rstrip("\n"), flush=True)
+        print(REPORT_MARKER_END.format(name=path.name), flush=True)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -58,6 +74,14 @@ def _parse_args() -> argparse.Namespace:
         "--no-store",
         action="store_true",
         help="do not write incidents.eval_score (e.g. no database)",
+    )
+    parser.add_argument(
+        "--print-report",
+        action="store_true",
+        help=(
+            "print the reports base64-encoded between markers (the in-cluster eval Job; "
+            "ci_eval.yml reads them from the Job logs)"
+        ),
     )
     return parser.parse_args()
 
@@ -94,6 +118,8 @@ async def main() -> None:
     print("  Reports written to:")
     print(f"    {run.json_path}")
     print(f"    {run.md_path}")
+    if args.print_report:
+        _print_report_blocks([run.json_path, run.md_path])
 
     if report.items_scored == 0:
         print("No items were scored. Check logs for errors.")

@@ -1,0 +1,767 @@
+# In-cluster eval: score the scenario runs in a LangFuse dataset and record eval.scored.
+# Source: sentinel-brain decisions.md 2026-10-22 (eval scale, flagged scores) and 2026-10-28 "Automated eval
+# runs in-cluster" (+ amendments). Dispatch only: the runner re-scores the whole dataset every run.
+# The namespace quota fits one backend pod, so the eval pauses the backend: backend-up (the shared,
+# idempotent bring-up), scale to 0, run the Job azure/k8s/jobs/eval-job.yaml (rendered from this checkout;
+# outside backend-up's azure/k8s/*.yaml glob), then restore per SENTINEL_KEEP_WARM (backend-up again when
+# true, else backend-down). The Job runs the image's eval CLI under the backend's workload identity, so the
+# LLM keys stay in Key Vault and the pod; incidents.eval_score is stored over PG/Entra as in the backend.
+# The reports leave through the Job logs (base64 between markers; scripts/eval_report_from_logs.py) and are
+# uploaded as the eval-report artifact. The OIDC assertion dies within minutes, so a second azure/login
+# right before the Job step re-mints the AKS token for the poll and the log read.
+# Ops events: ops-events is the only writer of eval.scored (the reconciler never backfills it); one
+# event per scenario, the newest dataset item only. It never blocks the run.
+name: "[sentinel] eval — scenario scoring"
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: LangFuse dataset to score
+        required: false
+        type: string
+        default: sentinel-scenario-runs
+      run-label:
+        description: Optional run-name prefix ([a-z0-9-], max 40)
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: sentinel-backend
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # Until the infra CI-identity ticket sets the variables below, every other job is skipped and the run stays
+  # green with a notice. No secrets and no login here; the environment makes environment-level variables visible.
+  preflight:
+    name: Check Azure CI identity
+    runs-on: ubuntu-24.04
+    environment: sentinel-dev
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        name: Check the Azure CI identity variables
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ACR_NAME: ${{ vars.ACR_NAME }}
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+          AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+          SENTINEL_API_TENANT_ID: ${{ vars.SENTINEL_API_TENANT_ID }}
+          SENTINEL_API_AUDIENCE: ${{ vars.SENTINEL_API_AUDIENCE }}
+          KEY_VAULT_URI: ${{ vars.KEY_VAULT_URI }}
+          PG_HOST: ${{ vars.PG_HOST }}
+          PG_DATABASE: ${{ vars.PG_DATABASE }}
+          PG_USER_BACKEND: ${{ vars.PG_USER_BACKEND }}
+          REDIS_HOST: ${{ vars.REDIS_HOST }}
+          REDIS_PORT: ${{ vars.REDIS_PORT }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID ACR_NAME ACR_LOGIN_SERVER \
+            AKS_RESOURCE_GROUP AKS_CLUSTER_NAME SENTINEL_API_TENANT_ID SENTINEL_API_AUDIENCE KEY_VAULT_URI \
+            PG_HOST PG_DATABASE PG_USER_BACKEND REDIS_HOST REDIS_PORT; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            msg="Azure CI identity not configured — ${GITHUB_WORKFLOW:-this workflow} skipped."
+            msg="$msg See sentinel-brain decisions 2026-10-24 phase 8 'Names the infra CI-identity ticket must create'."
+            echo "::notice::$msg Missing:$missing"
+            {
+              echo "$msg"
+              echo ""
+              echo "Missing variables:$missing"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+  eval:
+    name: Score the scenario runs
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-24.04
+    environment: sentinel-dev
+    timeout-minutes: 120
+    outputs:
+      image-tag: ${{ steps.resolve-tag.outputs.image-tag }}
+      paused: ${{ steps.pause.outputs.paused }}
+    steps:
+      - id: checkout
+        name: Check out the composite actions, the Job manifest and the report extractor
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - id: inputs
+        name: Check the inputs
+        shell: bash
+        env:
+          DATASET: ${{ inputs.dataset }}
+          RUN_LABEL: ${{ inputs.run-label }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::ci_eval: $1"; exit 1; }
+          dataset="${DATASET:-sentinel-scenario-runs}"
+          [[ "$dataset" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]] || die "input dataset is not a dataset name"
+          if [ -n "${RUN_LABEL:-}" ]; then
+            [[ "$RUN_LABEL" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "input run-label is not [a-z0-9-] (max 40)"
+          fi
+          # Deterministic and tied to this GHA run (one LangFuse dataset run per attempt).
+          run_name="${RUN_LABEL:-eval}-gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "dataset=$dataset"
+            echo "run-name=$run_name"
+          } >> "$GITHUB_OUTPUT"
+
+      - id: login
+        name: Azure login (resource tenant)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - id: resolve-tag
+        name: Resolve stable to its sha- tag
+        uses: ./.github/actions/resolve-stable-tag
+        with:
+          acr-name: ${{ vars.ACR_NAME }}
+
+      - id: up
+        name: Bring the backend up
+        uses: ./.github/actions/backend-up
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          image-tag: ${{ steps.resolve-tag.outputs.image-tag }}
+          acr-login-server: ${{ vars.ACR_LOGIN_SERVER }}
+          api-tenant-id: ${{ vars.SENTINEL_API_TENANT_ID }}
+          api-audience: ${{ vars.SENTINEL_API_AUDIENCE }}
+          key-vault-url: ${{ vars.KEY_VAULT_URI }}
+          pg-host: ${{ vars.PG_HOST }}
+          pg-database: ${{ vars.PG_DATABASE }}
+          pg-user: ${{ vars.PG_USER_BACKEND }}
+          redis-host: ${{ vars.REDIS_HOST }}
+          redis-port: ${{ vars.REDIS_PORT }}
+
+      # Recorded before scaling, so teardown restores a backend this run touched even if the scale fails.
+      - id: pause
+        name: Pause the backend (the quota fits one pod)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ns=sentinel-dev
+          echo "paused=true" >> "$GITHUB_OUTPUT"
+          kubectl -n "$ns" scale deployment/sentinel-backend --replicas=0
+          # A transient API error is one failed attempt (60 x 5 s), not a step failure.
+          for _ in $(seq 1 60); do
+            pods="$(kubectl -n "$ns" get pods -l app=sentinel-backend -o name)" || pods="error"
+            [ -z "$pods" ] && exit 0
+            sleep 5
+          done
+          echo "::error::ci_eval: backend pods still running after 300 s"
+          exit 1
+
+      - id: refresh-login
+        name: Azure login again (fresh OIDC assertion for the Job)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - id: job
+        name: Run the eval Job
+        shell: bash
+        env:
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          IMAGE_TAG: ${{ steps.resolve-tag.outputs.image-tag }}
+          EVAL_DATASET: ${{ steps.inputs.outputs.dataset }}
+          EVAL_RUN_NAME: ${{ steps.inputs.outputs.run-name }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::ci_eval: $1"; exit 1; }
+          # az cannot mint new tokens once the GitHub OIDC assertion expires; cache the AKS token for the
+          # poll and the log read.
+          az account get-access-token --resource 6dae42f8-4368-4678-94ff-3960e28e3630 -o none
+          ns=sentinel-dev
+          [[ "${ACR_LOGIN_SERVER:-}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.azurecr\.io$ ]] \
+            || die "ACR_LOGIN_SERVER is not an ACR login server"
+          [[ "${IMAGE_TAG:-}" =~ ^sha-[0-9a-f]{7}$ ]] || die "the image tag is not sha-<7 hex>"
+          [[ "${EVAL_DATASET:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]] || die "the dataset name is invalid"
+          [[ "${EVAL_RUN_NAME:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || die "the run name is invalid"
+          command -v envsubst >/dev/null 2>&1 || die "envsubst is not on PATH"
+          out="$(mktemp -d "${RUNNER_TEMP:-/tmp}/sentinel-eval.XXXXXX")"
+          # shellcheck disable=SC2016  # a literal envsubst list: only these four names are substituted
+          envsubst '${ACR_LOGIN_SERVER} ${IMAGE_TAG} ${EVAL_DATASET} ${EVAL_RUN_NAME}' \
+            < azure/k8s/jobs/eval-job.yaml > "$out/eval-job.yaml"
+          # The fixed name is safe: the concurrency group serialises runs. Foreground delete frees the quota.
+          kubectl -n "$ns" delete job/sentinel-eval --ignore-not-found --cascade=foreground --wait=true
+          kubectl -n "$ns" apply -f "$out/eval-job.yaml"
+          # The Job's activeDeadlineSeconds (2700) is below this bound, so Kubernetes fails it first.
+          result=timeout
+          deadline=$((SECONDS + 2820))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            status="$(kubectl -n "$ns" get job/sentinel-eval \
+              -o jsonpath='{.status.succeeded}/{.status.failed}')" || status="/"
+            case "$status" in
+              1/*) result=succeeded; break;;
+              */[1-9]*) result=failed; break;;
+            esac
+            sleep 15
+          done
+          echo "result=$result" >> "$GITHUB_OUTPUT"
+          if [ "$result" != succeeded ]; then
+            kubectl -n "$ns" describe job/sentinel-eval | tail -n 40 || true
+            kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -n 30 || true
+          fi
+          # The verdict step decides the outcome.
+          exit 0
+
+      # The raw log is never printed or uploaded: only the decoded reports leave the runner.
+      - id: collect
+        name: Read the reports from the Job logs
+        if: always() && steps.job.outcome != 'skipped'
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP:?}/eval-job.log"
+          kubectl -n sentinel-dev logs job/sentinel-eval --tail=-1 > "$log" 2>/dev/null || : > "$log"
+          if python3 scripts/eval_report_from_logs.py "$log" reports; then
+            echo "report=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "report=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: upload
+        name: Upload the eval report
+        if: always() && steps.collect.outputs.report == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: eval-report
+          path: |
+            reports/eval_report.json
+            reports/eval_report.md
+          if-no-files-found: error
+
+      - id: verdict
+        name: Report the eval result
+        if: always() && steps.job.outcome != 'skipped'
+        shell: bash
+        env:
+          JOB_RESULT: ${{ steps.job.outputs.result }}
+          REPORT: ${{ steps.collect.outputs.report }}
+          RUN_NAME: ${{ steps.inputs.outputs.run-name }}
+          DATASET: ${{ steps.inputs.outputs.dataset }}
+        run: |
+          set -euo pipefail
+          report=no
+          [ "${REPORT:-}" = true ] && report=yes
+          {
+            echo "### Sentinel eval"
+            echo ""
+            echo "- dataset: $DATASET"
+            echo "- run name: $RUN_NAME"
+            echo "- Job result: ${JOB_RESULT:-not run}"
+            echo "- report: $report"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if ! { [ "${JOB_RESULT:-}" = succeeded ] && [ "${REPORT:-}" = true ]; }; then
+            echo "::error::ci_eval: eval Job ${JOB_RESULT:-not run}; report ${REPORT:-false}"
+            exit 1
+          fi
+
+  teardown-backend:
+    name: Restore the backend
+    needs: [preflight, eval]
+    if: always() && needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-24.04
+    environment: sentinel-dev
+    timeout-minutes: 60
+    steps:
+      - id: checkout
+        name: Check out the composite actions
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - id: login
+        name: Azure login (resource tenant)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Covers a cancelled or timed-out run: the Job never outlives the workflow and frees the quota.
+      - id: clear
+        name: Delete the eval Job
+        shell: bash
+        env:
+          AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+          AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::ci_eval: $1"; exit 1; }
+          for v in AKS_RESOURCE_GROUP AKS_CLUSTER_NAME; do
+            [ -n "${!v:-}" ] || die "$v is empty"
+          done
+          # az cannot mint new tokens once the GitHub OIDC assertion expires, so cache the AKS token first.
+          az account get-access-token --resource 6dae42f8-4368-4678-94ff-3960e28e3630 -o none
+          state="$(az aks show --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" \
+            --query powerState.code -o tsv)"
+          if [ "$state" = "Stopped" ]; then
+            echo "::notice::ci_eval: cluster $AKS_CLUSTER_NAME is stopped; no eval Job to delete"
+            exit 0
+          fi
+          if ! command -v kubelogin >/dev/null 2>&1; then
+            bin="${RUNNER_TEMP:?}/sentinel-kube-bin"
+            mkdir -p "$bin"
+            az aks install-cli --install-location "$bin/kubectl" --kubelogin-install-location "$bin/kubelogin" \
+              --only-show-errors
+            echo "$bin" >> "$GITHUB_PATH"
+            export PATH="$bin:$PATH"
+          fi
+          az aks get-credentials --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" \
+            --overwrite-existing --only-show-errors
+          kubelogin convert-kubeconfig -l azurecli
+          kubectl -n sentinel-dev delete job/sentinel-eval --ignore-not-found --cascade=foreground --wait=true
+
+      - id: restore-warm
+        name: Bring the backend back up (SENTINEL_KEEP_WARM)
+        if: vars.SENTINEL_KEEP_WARM == 'true' && needs.eval.outputs.paused == 'true'
+        uses: ./.github/actions/backend-up
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          image-tag: ${{ needs.eval.outputs.image-tag }}
+          acr-login-server: ${{ vars.ACR_LOGIN_SERVER }}
+          api-tenant-id: ${{ vars.SENTINEL_API_TENANT_ID }}
+          api-audience: ${{ vars.SENTINEL_API_AUDIENCE }}
+          key-vault-url: ${{ vars.KEY_VAULT_URI }}
+          pg-host: ${{ vars.PG_HOST }}
+          pg-database: ${{ vars.PG_DATABASE }}
+          pg-user: ${{ vars.PG_USER_BACKEND }}
+          redis-host: ${{ vars.REDIS_HOST }}
+          redis-port: ${{ vars.REDIS_PORT }}
+
+      - id: down
+        name: Scale the backend down (honours SENTINEL_KEEP_WARM)
+        if: vars.SENTINEL_KEEP_WARM != 'true'
+        uses: ./.github/actions/backend-down
+        with:
+          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          keep-warm: ${{ vars.SENTINEL_KEEP_WARM }}
+
+  # Ops events (ops-dashboard §4.1; decision 2026-10-28): eval.scored on the ops-ledger branch from the eval
+  # report artifact, one event per scenario. contents: write only here; no login and no secret.
+  # Every step is continue-on-error and the ops-event action never fails, so a ledger fault never reds the run.
+  # Job-level continue-on-error: a timeout or runner fault never reds the run.
+  ops-events:
+    name: Record the eval scores
+    needs: [preflight, eval]
+    if: always() && needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-24.04
+    environment: sentinel-dev
+    timeout-minutes: 8
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - id: checkout
+        name: Check out the ops scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+
+      - id: report
+        name: Download the eval report
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: eval-report
+          path: reports
+
+      - id: shape
+        name: Shape the eval.scored events
+        continue-on-error: true
+        shell: bash
+        env:
+          EVAL_REPORT: reports/eval_report.json
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/emit.py eval >> "$GITHUB_OUTPUT"
+
+      - id: pass-01
+        name: Record eval.scored pass/01
+        if: steps.shape.outputs.pass-01-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.pass-01-kind }}
+          source-id: ${{ steps.shape.outputs.pass-01-source-id }}
+          state: ${{ steps.shape.outputs.pass-01-state }}
+          chain: ${{ steps.shape.outputs.pass-01-chain }}
+          data: ${{ steps.shape.outputs.pass-01-data }}
+
+      - id: pass-02
+        name: Record eval.scored pass/02
+        if: steps.shape.outputs.pass-02-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.pass-02-kind }}
+          source-id: ${{ steps.shape.outputs.pass-02-source-id }}
+          state: ${{ steps.shape.outputs.pass-02-state }}
+          chain: ${{ steps.shape.outputs.pass-02-chain }}
+          data: ${{ steps.shape.outputs.pass-02-data }}
+
+      - id: pass-03
+        name: Record eval.scored pass/03
+        if: steps.shape.outputs.pass-03-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.pass-03-kind }}
+          source-id: ${{ steps.shape.outputs.pass-03-source-id }}
+          state: ${{ steps.shape.outputs.pass-03-state }}
+          chain: ${{ steps.shape.outputs.pass-03-chain }}
+          data: ${{ steps.shape.outputs.pass-03-data }}
+
+      - id: pass-04
+        name: Record eval.scored pass/04
+        if: steps.shape.outputs.pass-04-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.pass-04-kind }}
+          source-id: ${{ steps.shape.outputs.pass-04-source-id }}
+          state: ${{ steps.shape.outputs.pass-04-state }}
+          chain: ${{ steps.shape.outputs.pass-04-chain }}
+          data: ${{ steps.shape.outputs.pass-04-data }}
+
+      - id: pass-05
+        name: Record eval.scored pass/05
+        if: steps.shape.outputs.pass-05-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.pass-05-kind }}
+          source-id: ${{ steps.shape.outputs.pass-05-source-id }}
+          state: ${{ steps.shape.outputs.pass-05-state }}
+          chain: ${{ steps.shape.outputs.pass-05-chain }}
+          data: ${{ steps.shape.outputs.pass-05-data }}
+
+      - id: pass-06
+        name: Record eval.scored pass/06
+        if: steps.shape.outputs.pass-06-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.pass-06-kind }}
+          source-id: ${{ steps.shape.outputs.pass-06-source-id }}
+          state: ${{ steps.shape.outputs.pass-06-state }}
+          chain: ${{ steps.shape.outputs.pass-06-chain }}
+          data: ${{ steps.shape.outputs.pass-06-data }}
+
+      - id: pass-07
+        name: Record eval.scored pass/07
+        if: steps.shape.outputs.pass-07-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.pass-07-kind }}
+          source-id: ${{ steps.shape.outputs.pass-07-source-id }}
+          state: ${{ steps.shape.outputs.pass-07-state }}
+          chain: ${{ steps.shape.outputs.pass-07-chain }}
+          data: ${{ steps.shape.outputs.pass-07-data }}
+
+      - id: pass-08
+        name: Record eval.scored pass/08
+        if: steps.shape.outputs.pass-08-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.pass-08-kind }}
+          source-id: ${{ steps.shape.outputs.pass-08-source-id }}
+          state: ${{ steps.shape.outputs.pass-08-state }}
+          chain: ${{ steps.shape.outputs.pass-08-chain }}
+          data: ${{ steps.shape.outputs.pass-08-data }}
+
+      - id: pass-09
+        name: Record eval.scored pass/09
+        if: steps.shape.outputs.pass-09-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.pass-09-kind }}
+          source-id: ${{ steps.shape.outputs.pass-09-source-id }}
+          state: ${{ steps.shape.outputs.pass-09-state }}
+          chain: ${{ steps.shape.outputs.pass-09-chain }}
+          data: ${{ steps.shape.outputs.pass-09-data }}
+
+      - id: pass-10
+        name: Record eval.scored pass/10
+        if: steps.shape.outputs.pass-10-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.pass-10-kind }}
+          source-id: ${{ steps.shape.outputs.pass-10-source-id }}
+          state: ${{ steps.shape.outputs.pass-10-state }}
+          chain: ${{ steps.shape.outputs.pass-10-chain }}
+          data: ${{ steps.shape.outputs.pass-10-data }}
+
+      - id: deployfail-01
+        name: Record eval.scored deployfail/01
+        if: steps.shape.outputs.deployfail-01-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deployfail-01-kind }}
+          source-id: ${{ steps.shape.outputs.deployfail-01-source-id }}
+          state: ${{ steps.shape.outputs.deployfail-01-state }}
+          chain: ${{ steps.shape.outputs.deployfail-01-chain }}
+          data: ${{ steps.shape.outputs.deployfail-01-data }}
+
+      - id: deployfail-02
+        name: Record eval.scored deployfail/02
+        if: steps.shape.outputs.deployfail-02-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deployfail-02-kind }}
+          source-id: ${{ steps.shape.outputs.deployfail-02-source-id }}
+          state: ${{ steps.shape.outputs.deployfail-02-state }}
+          chain: ${{ steps.shape.outputs.deployfail-02-chain }}
+          data: ${{ steps.shape.outputs.deployfail-02-data }}
+
+      - id: deployfail-03
+        name: Record eval.scored deployfail/03
+        if: steps.shape.outputs.deployfail-03-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deployfail-03-kind }}
+          source-id: ${{ steps.shape.outputs.deployfail-03-source-id }}
+          state: ${{ steps.shape.outputs.deployfail-03-state }}
+          chain: ${{ steps.shape.outputs.deployfail-03-chain }}
+          data: ${{ steps.shape.outputs.deployfail-03-data }}
+
+      - id: deployfail-04
+        name: Record eval.scored deployfail/04
+        if: steps.shape.outputs.deployfail-04-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deployfail-04-kind }}
+          source-id: ${{ steps.shape.outputs.deployfail-04-source-id }}
+          state: ${{ steps.shape.outputs.deployfail-04-state }}
+          chain: ${{ steps.shape.outputs.deployfail-04-chain }}
+          data: ${{ steps.shape.outputs.deployfail-04-data }}
+
+      - id: deployfail-05
+        name: Record eval.scored deployfail/05
+        if: steps.shape.outputs.deployfail-05-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deployfail-05-kind }}
+          source-id: ${{ steps.shape.outputs.deployfail-05-source-id }}
+          state: ${{ steps.shape.outputs.deployfail-05-state }}
+          chain: ${{ steps.shape.outputs.deployfail-05-chain }}
+          data: ${{ steps.shape.outputs.deployfail-05-data }}
+
+      - id: deployfail-06
+        name: Record eval.scored deployfail/06
+        if: steps.shape.outputs.deployfail-06-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deployfail-06-kind }}
+          source-id: ${{ steps.shape.outputs.deployfail-06-source-id }}
+          state: ${{ steps.shape.outputs.deployfail-06-state }}
+          chain: ${{ steps.shape.outputs.deployfail-06-chain }}
+          data: ${{ steps.shape.outputs.deployfail-06-data }}
+
+      - id: deployfail-07
+        name: Record eval.scored deployfail/07
+        if: steps.shape.outputs.deployfail-07-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deployfail-07-kind }}
+          source-id: ${{ steps.shape.outputs.deployfail-07-source-id }}
+          state: ${{ steps.shape.outputs.deployfail-07-state }}
+          chain: ${{ steps.shape.outputs.deployfail-07-chain }}
+          data: ${{ steps.shape.outputs.deployfail-07-data }}
+
+      - id: deployfail-08
+        name: Record eval.scored deployfail/08
+        if: steps.shape.outputs.deployfail-08-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deployfail-08-kind }}
+          source-id: ${{ steps.shape.outputs.deployfail-08-source-id }}
+          state: ${{ steps.shape.outputs.deployfail-08-state }}
+          chain: ${{ steps.shape.outputs.deployfail-08-chain }}
+          data: ${{ steps.shape.outputs.deployfail-08-data }}
+
+      - id: deployfail-09
+        name: Record eval.scored deployfail/09
+        if: steps.shape.outputs.deployfail-09-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deployfail-09-kind }}
+          source-id: ${{ steps.shape.outputs.deployfail-09-source-id }}
+          state: ${{ steps.shape.outputs.deployfail-09-state }}
+          chain: ${{ steps.shape.outputs.deployfail-09-chain }}
+          data: ${{ steps.shape.outputs.deployfail-09-data }}
+
+      - id: deployfail-10
+        name: Record eval.scored deployfail/10
+        if: steps.shape.outputs.deployfail-10-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.deployfail-10-kind }}
+          source-id: ${{ steps.shape.outputs.deployfail-10-source-id }}
+          state: ${{ steps.shape.outputs.deployfail-10-state }}
+          chain: ${{ steps.shape.outputs.deployfail-10-chain }}
+          data: ${{ steps.shape.outputs.deployfail-10-data }}
+
+      - id: runtime-01
+        name: Record eval.scored runtime/01
+        if: steps.shape.outputs.runtime-01-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.runtime-01-kind }}
+          source-id: ${{ steps.shape.outputs.runtime-01-source-id }}
+          state: ${{ steps.shape.outputs.runtime-01-state }}
+          chain: ${{ steps.shape.outputs.runtime-01-chain }}
+          data: ${{ steps.shape.outputs.runtime-01-data }}
+
+      - id: runtime-02
+        name: Record eval.scored runtime/02
+        if: steps.shape.outputs.runtime-02-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.runtime-02-kind }}
+          source-id: ${{ steps.shape.outputs.runtime-02-source-id }}
+          state: ${{ steps.shape.outputs.runtime-02-state }}
+          chain: ${{ steps.shape.outputs.runtime-02-chain }}
+          data: ${{ steps.shape.outputs.runtime-02-data }}
+
+      - id: runtime-03
+        name: Record eval.scored runtime/03
+        if: steps.shape.outputs.runtime-03-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.runtime-03-kind }}
+          source-id: ${{ steps.shape.outputs.runtime-03-source-id }}
+          state: ${{ steps.shape.outputs.runtime-03-state }}
+          chain: ${{ steps.shape.outputs.runtime-03-chain }}
+          data: ${{ steps.shape.outputs.runtime-03-data }}
+
+      - id: runtime-04
+        name: Record eval.scored runtime/04
+        if: steps.shape.outputs.runtime-04-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.runtime-04-kind }}
+          source-id: ${{ steps.shape.outputs.runtime-04-source-id }}
+          state: ${{ steps.shape.outputs.runtime-04-state }}
+          chain: ${{ steps.shape.outputs.runtime-04-chain }}
+          data: ${{ steps.shape.outputs.runtime-04-data }}
+
+      - id: runtime-05
+        name: Record eval.scored runtime/05
+        if: steps.shape.outputs.runtime-05-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.runtime-05-kind }}
+          source-id: ${{ steps.shape.outputs.runtime-05-source-id }}
+          state: ${{ steps.shape.outputs.runtime-05-state }}
+          chain: ${{ steps.shape.outputs.runtime-05-chain }}
+          data: ${{ steps.shape.outputs.runtime-05-data }}
+
+      - id: runtime-06
+        name: Record eval.scored runtime/06
+        if: steps.shape.outputs.runtime-06-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.runtime-06-kind }}
+          source-id: ${{ steps.shape.outputs.runtime-06-source-id }}
+          state: ${{ steps.shape.outputs.runtime-06-state }}
+          chain: ${{ steps.shape.outputs.runtime-06-chain }}
+          data: ${{ steps.shape.outputs.runtime-06-data }}
+
+      - id: runtime-07
+        name: Record eval.scored runtime/07
+        if: steps.shape.outputs.runtime-07-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.runtime-07-kind }}
+          source-id: ${{ steps.shape.outputs.runtime-07-source-id }}
+          state: ${{ steps.shape.outputs.runtime-07-state }}
+          chain: ${{ steps.shape.outputs.runtime-07-chain }}
+          data: ${{ steps.shape.outputs.runtime-07-data }}
+
+      - id: runtime-08
+        name: Record eval.scored runtime/08
+        if: steps.shape.outputs.runtime-08-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.runtime-08-kind }}
+          source-id: ${{ steps.shape.outputs.runtime-08-source-id }}
+          state: ${{ steps.shape.outputs.runtime-08-state }}
+          chain: ${{ steps.shape.outputs.runtime-08-chain }}
+          data: ${{ steps.shape.outputs.runtime-08-data }}
+
+      - id: runtime-09
+        name: Record eval.scored runtime/09
+        if: steps.shape.outputs.runtime-09-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.runtime-09-kind }}
+          source-id: ${{ steps.shape.outputs.runtime-09-source-id }}
+          state: ${{ steps.shape.outputs.runtime-09-state }}
+          chain: ${{ steps.shape.outputs.runtime-09-chain }}
+          data: ${{ steps.shape.outputs.runtime-09-data }}
+
+      - id: runtime-10
+        name: Record eval.scored runtime/10
+        if: steps.shape.outputs.runtime-10-kind != ''
+        continue-on-error: true
+        uses: ./.github/actions/ops-event
+        with:
+          kind: ${{ steps.shape.outputs.runtime-10-kind }}
+          source-id: ${{ steps.shape.outputs.runtime-10-source-id }}
+          state: ${{ steps.shape.outputs.runtime-10-state }}
+          chain: ${{ steps.shape.outputs.runtime-10-chain }}
+          data: ${{ steps.shape.outputs.runtime-10-data }}

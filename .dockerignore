@@ -3,6 +3,7 @@
 !pyproject.toml
 !poetry.lock
 !scripts/install_locked.py
+!scripts/run_eval.py
 !src/
 !alembic/
 !alembic.ini

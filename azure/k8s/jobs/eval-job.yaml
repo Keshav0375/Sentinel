@@ -1,0 +1,76 @@
+# Sentinel in-cluster eval Job (decision 2026-10-28, "Automated eval runs in-cluster", amended).
+# Rendered and applied only by ci_eval.yml with
+#   envsubst '${ACR_LOGIN_SERVER} ${IMAGE_TAG} ${EVAL_DATASET} ${EVAL_RUN_NAME}'
+# It lives outside backend-up's azure/k8s/*.yaml glob on purpose. The backend is scaled to 0 while it
+# runs: the namespace quota fits one pod. The LLM keys come from Key Vault via workload identity
+# inside the pod only; the reports leave through the logs (run_eval.py --print-report).
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sentinel-eval
+  labels:
+    app: sentinel-eval
+spec:
+  backoffLimit: 0
+  # ci_eval.yml polls for 2820 s, so Kubernetes fails the Job first.
+  activeDeadlineSeconds: 2700
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: sentinel-eval
+        azure.workload.identity/use: "true"
+    spec:
+      restartPolicy: Never
+      # Infra-owned SA with the workload-identity client-id annotation (the backend's identity).
+      serviceAccountName: sentinel-backend
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: reports
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      containers:
+        - name: sentinel-eval
+          image: "${ACR_LOGIN_SERVER}/sentinel-backend:${IMAGE_TAG}"
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command:
+            - python
+            - scripts/run_eval.py
+            - --branches
+            - src/sentinel/catalog/branches.yaml
+            - --dataset
+            - "${EVAL_DATASET}"
+            - --run-name
+            - "${EVAL_RUN_NAME}"
+            - --print-report
+          envFrom:
+            - configMapRef:
+                name: sentinel-config
+          volumeMounts:
+            - name: reports
+              mountPath: /app/reports
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            # Writable paths are the two emptyDirs: /app/reports and /tmp.
+            readOnlyRootFilesystem: true

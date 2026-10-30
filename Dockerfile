@@ -53,6 +53,8 @@ WORKDIR /app
 COPY src/ src/
 COPY alembic/ alembic/
 COPY alembic.ini .
+# The eval CLI for the in-cluster eval Job (decision 2026-10-28); the catalog ships in src/.
+COPY scripts/run_eval.py scripts/
 # The app writes reports/ relative to the working directory; in the pod it is an emptyDir
 # (read-only root filesystem).
 RUN mkdir reports && chown 10001:10001 reports

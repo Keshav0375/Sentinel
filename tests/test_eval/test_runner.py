@@ -30,6 +30,7 @@ from sentinel.eval.runner import (
     bind_culprit,
     fetch_dataset_items,
     ground_truth_checks,
+    item_created_at,
     load_branches,
     run_eval,
     same_deploy,
@@ -41,6 +42,7 @@ from sentinel.models.tools import EscalationContext, RollbackSpec, TargetDeploy
 
 FIXTURE = CATALOG_PATH  # the vendored catalog (decision 2026-10-25): no second copy
 _DEPLOYED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+_DF05_CREATED_AT = datetime(2026, 10, 27, 12, tzinfo=UTC)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -63,6 +65,7 @@ class FakeItem:
     id: str
     input: Any
     runs: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    created_at: Any = None
 
     @contextmanager
     def run(
@@ -198,10 +201,17 @@ def _checks(run: ScenarioRun) -> dict[str, float]:
 
 
 def _item(
-    item_id: str, branch: str, pr: int | None, sha: str | None, incidents: list[Any]
+    item_id: str,
+    branch: str,
+    pr: int | None,
+    sha: str | None,
+    incidents: list[Any],
+    created_at: Any = None,
 ) -> FakeItem:
     return FakeItem(
-        item_id, {"branch": branch, "pr_number": pr, "merge_sha": sha, "incidents": incidents}
+        item_id,
+        {"branch": branch, "pr_number": pr, "merge_sha": sha, "incidents": incidents},
+        created_at=created_at,
     )
 
 
@@ -217,6 +227,7 @@ def _dataset() -> list[FakeItem]:
                 _incident("deploy_failure", _rollback(41, "abc1234def"), "pr-41-abc1234"),
                 _incident("runtime_error", _escalated(), "pr-41-abc1234"),
             ],
+            created_at=_DF05_CREATED_AT,
         ),
         _item(
             "rt-01",
@@ -441,6 +452,8 @@ async def test_run_eval_writes_the_report_the_api_serves(tmp_path: Path) -> None
     assert len(data["ground_truth"]["checks"]) == 4
     assert len(data["ground_truth"]["items"]) == 4
     assert len(data["results"]) == 3
+    for item in data["ground_truth"]["items"]:
+        assert {"incident_id", "judge_failed", "created_at"} <= set(item)
     assert (tmp_path / "eval_report.md").exists()
 
     app = FastAPI()
@@ -448,6 +461,34 @@ async def test_run_eval_writes_the_report_the_api_serves(tmp_path: Path) -> None
     response = TestClient(app).get("/api/eval-report")
     assert response.status_code == 200
     assert response.json()["summary"] == data["summary"]
+
+
+async def test_ground_truth_links_judge_and_item(tmp_path: Path) -> None:
+    run, *_ = await _fixture_run(tmp_path)
+    by_item = {r.item_id: r for r in run.results}
+    df05 = by_item["df-05"]
+    assert df05.judge_score is not None
+    assert df05.ground_truth.incident_id == df05.judge_score.incident_id
+    assert df05.ground_truth.judge_failed is False
+    assert df05.ground_truth.created_at == _DF05_CREATED_AT
+    passed = by_item["pass-01"].ground_truth
+    assert passed.incident_id is None
+    assert passed.created_at is None
+
+
+def test_item_created_at() -> None:
+    naive = item_created_at(FakeItem("a", {}, created_at=datetime(2026, 10, 27, 12)))
+    assert naive == _DF05_CREATED_AT
+    assert naive is not None and naive.tzinfo == UTC
+    parsed = item_created_at(FakeItem("a", {}, created_at="2026-10-27T12:00:00Z"))
+    assert parsed == _DF05_CREATED_AT
+    assert parsed is not None and parsed.tzinfo == UTC
+    offset = item_created_at(FakeItem("a", {}, created_at="2026-10-27T14:00:00+02:00"))
+    assert offset == _DF05_CREATED_AT
+    assert offset is not None and offset.tzinfo == UTC
+    assert item_created_at(FakeItem("a", {}, created_at="junk")) is None
+    assert item_created_at(object()) is None
+    assert item_created_at(FakeItem("a", {}, created_at=1730030400)) is None
 
 
 async def test_judge_conflict_item_excluded_and_not_pushed(tmp_path: Path) -> None:
@@ -674,6 +715,7 @@ async def test_judge_failed_item_is_stored_not_pushed_not_aggregated(tmp_path: P
     judge_score = run.results[0].judge_score
     assert judge_score is not None
     assert judge_score.judge_failed is True
+    assert run.results[0].ground_truth.judge_failed is True
     assert store.calls[0][1].to_eval_score()["judge_failed"] is True
 
 

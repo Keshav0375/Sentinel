@@ -36,6 +36,7 @@ WORKFLOWS: dict[str, set[str]] = {
     "ci_backend_deployment.yml": {"promote-or-rollback", "ops-events"},
     "ci_incident_response.yml": {"teardown-backend", "summary", "ops-events"},
     "ci_backend_scale.yml": {"ops-events"},
+    "ci_eval.yml": {"teardown-backend", "ops-events"},
 }
 WORKFLOW_IDS = list(WORKFLOWS)
 
