@@ -121,11 +121,15 @@ async def test_postgres_cache_miss_set_hit_counts(pool: asyncpg.Pool) -> None:
     await cache.set(key, "tool", value, 300)
     assert await cache.get(key, "tool") == value
 
-    row = await pool.fetchrow("SELECT kind, hit_count, expires_at FROM cache_entries")
+    # Measure the TTL against the database clock: expires_at is set from Postgres now(), and a
+    # container clock a few ms ahead of the host's made a host-side comparison flaky.
+    row = await pool.fetchrow(
+        "SELECT kind, hit_count, EXTRACT(EPOCH FROM expires_at - now()) AS remaining"
+        " FROM cache_entries"
+    )
     assert row is not None
     assert row["kind"] == "tool" and row["hit_count"] == 1
-    remaining = (row["expires_at"] - datetime.now(UTC)).total_seconds()
-    assert 250 < remaining <= 300
+    assert 250 < float(row["remaining"]) <= 300
 
     # A set over an existing key replaces its value and expiry.
     await cache.set(key, "tool", {"n": 2}, 60)
