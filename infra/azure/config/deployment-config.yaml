@@ -45,6 +45,8 @@ defaults:
     - event_grid
     - app_service
     - namespace
+    # Managed Redis B0 (~$13.14/mo, docs/COSTS.md). Requires `namespace`.
+    - redis
 
   database:
     # shared    — a database plus an Entra role on the PLATFORM server. One

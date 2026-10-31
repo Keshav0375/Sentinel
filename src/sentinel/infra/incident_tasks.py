@@ -4,6 +4,12 @@ Holds a strong reference to each running incident task, enforces the concurrency
 webhook answers with 429, logs a failed task with its ``incident_id``, and runs the
 shutdown drain the lifespan performs before it closes the pool (an incident that has to be
 cancelled is logged first).
+
+The cap (``SENTINEL_MAX_CONCURRENT_PIPELINES``) is enforced HERE, by :meth:`IncidentTasks.start`
+itself, not only by the callers' ``at_capacity`` check. A caller that must await between the
+check and the start (the resumer writes its marker first) holds a slot with
+:meth:`~IncidentTasks.reserve` instead: a reserved slot counts toward the cap until it is
+started or released, so no other start can take it in the gap.
 """
 
 from __future__ import annotations
@@ -21,6 +27,10 @@ CANCEL_WAIT_S: Final = 2.0
 logger = get_logger("sentinel.infra.incident_tasks")
 
 
+class IncidentCapacityError(RuntimeError):
+    """The cap is reached: no slot is free for another incident."""
+
+
 class IncidentTasks:
     """The in-flight incident tasks: id map, concurrency cap and shutdown drain."""
 
@@ -29,6 +39,8 @@ class IncidentTasks:
             raise ValueError("max_concurrent must be >= 1")
         self._max = max_concurrent
         self._tasks: dict[asyncio.Task[None], str] = {}
+        # Slots held (by incident id) between reserve() and start() / release().
+        self._reserved: set[str] = set()
         self._closing = False
 
     @property
@@ -43,8 +55,8 @@ class IncidentTasks:
 
     @property
     def at_capacity(self) -> bool:
-        """True when the in-flight count has reached ``max_concurrent``."""
-        return len(self._tasks) >= self._max
+        """True when the in-flight tasks plus the reserved slots reach ``max_concurrent``."""
+        return len(self._tasks) + len(self._reserved) >= self._max
 
     def __len__(self) -> int:
         return len(self._tasks)
@@ -52,15 +64,49 @@ class IncidentTasks:
     def __iter__(self) -> Iterator[asyncio.Task[None]]:
         return iter(list(self._tasks))
 
+    def has(self, incident_id: str) -> bool:
+        """True while a task of *incident_id* is in flight or holds a reserved slot."""
+        return incident_id in self._reserved or incident_id in self._tasks.values()
+
+    def reserve(self, incident_id: str) -> None:
+        """Hold one slot for *incident_id* until :meth:`start` or :meth:`release`.
+
+        Raises:
+            RuntimeError: Shutdown began.
+            IncidentCapacityError: No slot is free (a reserved one counts as taken).
+        """
+        if self._closing:
+            raise RuntimeError("incident tasks are shutting down")
+        if incident_id in self._reserved:
+            return
+        if self.at_capacity:
+            raise IncidentCapacityError(f"at capacity ({self._max} incidents in flight)")
+        self._reserved.add(incident_id)
+
+    def release(self, incident_id: str) -> None:
+        """Give back the slot :meth:`reserve` held for *incident_id* (a no-op without one)."""
+        self._reserved.discard(incident_id)
+
     def start(self, incident_id: str, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Run *coro* as the task of *incident_id*; kept until it ends.
 
+        Enforces the cap itself: *incident_id*'s reserved slot is used when it holds one,
+        otherwise a free slot must exist.
+
         Raises:
-            RuntimeError: Shutdown began. *coro* is closed unawaited.
+            RuntimeError: Shutdown began (the reservation, if any, is released).
+            IncidentCapacityError: No reservation and no free slot.
+            In both cases *coro* is closed unawaited.
         """
+        reserved = incident_id in self._reserved
         if self._closing:
+            self._reserved.discard(incident_id)
             coro.close()
             raise RuntimeError("incident tasks are shutting down")
+        if not reserved and self.at_capacity:
+            coro.close()
+            raise IncidentCapacityError(f"at capacity ({self._max} incidents in flight)")
+        self._reserved.discard(incident_id)
         task = asyncio.create_task(coro, name=f"incident-{incident_id}")
         self._tasks[task] = incident_id
         task.add_done_callback(self._done)

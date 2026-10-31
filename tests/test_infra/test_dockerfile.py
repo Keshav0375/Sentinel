@@ -34,3 +34,11 @@ def test_runtime_runs_offline_as_non_root() -> None:
     text = _text()
     assert "HF_HUB_OFFLINE=1" in text
     assert "USER 10001:10001" in text
+
+
+def test_runtime_ships_the_eval_cli() -> None:
+    # The in-cluster eval Job runs scripts/run_eval.py from the image (decision 2026-10-28).
+    runtime = _text().split(" AS runtime", 1)[1]
+    assert "COPY scripts/run_eval.py scripts/" in runtime
+    dockerignore = (DOCKERFILE.parent / ".dockerignore").read_text().splitlines()
+    assert "!scripts/run_eval.py" in dockerignore

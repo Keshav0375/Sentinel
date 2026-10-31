@@ -28,6 +28,10 @@ PIPELINE_TIMEOUT_S = 900.0
 PIPELINE_MAX_CONCURRENT = 5
 # SIGTERM: how long shutdown waits for in-flight incidents before logging and cancelling them.
 SHUTDOWN_GRACE_S = 20.0
+# Azure Managed Redis listens on 10000 (TLS) — not the OSS 6379/6380 (decision 2026-10-28).
+REDIS_PORT = 10000
+# A mirrored STM entry outlives the longest pipeline by this many seconds, then expires.
+STM_TTL_MARGIN_S = 600
 
 # Every credential field. All optional: no secret is required to boot, and a feature whose
 # key is missing fails at use (backend.md §8.2; decision 2026-10-14). A blank value counts
@@ -155,6 +159,18 @@ class Settings(BaseSettings):
     # Raise it only together with the pod's terminationGracePeriodSeconds (deployment manifest).
     sentinel_shutdown_grace_s: float = SHUTDOWN_GRACE_S
 
+    # ── Redis + cache (decision 2026-10-25 D/C) ──────────────────────────────
+    # Azure Managed Redis host; TLS + an Entra token (workload identity), never an access key.
+    # Unset → STM stays in-process, the cache is Postgres-only, no status events are published.
+    redis_host: str | None = None
+    redis_port: int = REDIS_PORT
+    # Master switch for the cache: fetch_logs results (5 min, keyed to the minute) are safe
+    # to reuse in prod, since every incident here is a scenario/eval run.
+    sentinel_cache_enabled: bool = True
+    # Exact-match LLM cache for agent calls (24 h): eval re-runs only — in a live incident a
+    # replayed answer would replay a stale decision.
+    sentinel_cache_llm_deterministic: bool = False
+
     # ── Validators ────────────────────────────────────────────────────────────
     @field_validator("sentinel_max_tool_calls")
     @classmethod
@@ -205,6 +221,13 @@ class Settings(BaseSettings):
             raise ValueError("sentinel_shutdown_grace_s must be >= 0")
         return v
 
+    @field_validator("redis_port")
+    @classmethod
+    def redis_port_in_range(cls, v: int) -> int:
+        if not 1 <= v <= 65535:
+            raise ValueError("redis_port must be between 1 and 65535")
+        return v
+
     @model_validator(mode="after")
     def db_pool_bounds_valid(self) -> Settings:
         if self.sentinel_db_pool_min < 0:
@@ -224,6 +247,7 @@ class Settings(BaseSettings):
         "pghost",
         "pgdatabase",
         "pguser",
+        "redis_host",
         mode="before",
     )
     @classmethod

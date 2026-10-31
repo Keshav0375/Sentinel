@@ -28,6 +28,7 @@ EMITTERS: dict[str, list[str]] = {
     "ci_backend_deployment.yml": ["ops-start", "ops-events"],
     "ci_incident_response.yml": ["ops-start", "ops-events"],
     "ci_backend_scale.yml": ["ops-events"],
+    "ci_eval.yml": ["ops-events"],
     "infra_runners.yml": ["ops-start", "ops-events"],
     "infra_deploy.yml": ["ops-start", "ops-events"],
 }
@@ -37,6 +38,7 @@ SHAPE_CMDS: dict[tuple[str, str], str] = {
     ("ci_incident_response.yml", "ops-start"): "incident-start",
     ("ci_incident_response.yml", "ops-events"): "incident-result",
     ("ci_backend_scale.yml", "ops-events"): "scale",
+    ("ci_eval.yml", "ops-events"): "eval",
     ("infra_runners.yml", "ops-start"): "infra-runners-start",
     ("infra_runners.yml", "ops-events"): "infra-runners",
     ("infra_deploy.yml", "ops-start"): "infra-deploy-start",
@@ -213,6 +215,8 @@ def test_reported_results() -> None:
     assert incident["PIPELINE_RESULT"] == "${{ needs.run-agent-pipeline.result }}"
     assert incident["PR_DETAILS"] == "${{ needs.fetch-pr-details.outputs.pr-details }}"
     assert jobs[("ci_backend_scale.yml", "ops-events")]["environment"] == "sentinel-dev"
+    assert env("ci_eval.yml") == {"EVAL_REPORT": "reports/eval_report.json"}
+    assert jobs[("ci_eval.yml", "ops-events")]["environment"] == "sentinel-dev"
 
 
 def test_pr_triggered_workflows_never_write() -> None:

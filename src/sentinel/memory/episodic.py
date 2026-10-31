@@ -30,6 +30,11 @@ reads the ``deployments`` row whose ``incident_id`` is the incident (written by
 :meth:`link_deployment`, the pipeline's backfill). :meth:`find_incident_by_correlation_id`
 backs the webhook's correlation_id dedupe.
 
+An in-flight incident has an ``in_progress`` placeholder row (no embedding, no trajectory;
+``memory/checkpoints``) until its terminal store overwrites it: it is never "stored" —
+:meth:`stored_incident_ids` and the unfiltered lists leave it out (``status="in_progress"``
+lists exactly those rows), and similarity search skips it (no embedding).
+
 With no pool (no ``DATABASE_URL``) every method raises
 :class:`~sentinel.exceptions.SentinelMemoryError` — there are no silent empty results.
 """
@@ -51,6 +56,7 @@ from pydantic import JsonValue
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra import database
 from sentinel.memory.base import MemoryStore
+from sentinel.memory.checkpoints import INCIDENT_IN_PROGRESS
 from sentinel.memory.embeddings import EmbeddingClient
 from sentinel.models.eval_result import TrajectoryScore
 from sentinel.models.incident import Incident
@@ -372,9 +378,10 @@ class EpisodicMemory:
         return [_row_to_incident_row(row) for row in rows]
 
     async def stored_incident_ids(self, incident_ids: Sequence[str]) -> set[str]:
-        """The ids among *incident_ids* (returned as given) that have an ``incidents`` row.
+        """The ids among *incident_ids* (returned as given) that have a stored ``incidents`` row.
 
-        Non-UUID ids never do.
+        Non-UUID ids never do, and neither does an in-flight placeholder (status
+        ``in_progress``): it is not stored yet.
 
         Raises:
             SentinelMemoryError: no database, or the query failed.
@@ -385,7 +392,9 @@ class EpisodicMemory:
             return set()
         async with database.acquire(pool) as conn:
             rows = await conn.fetch(
-                "SELECT id FROM incidents WHERE id = ANY($1::uuid[])", [u for _, u in pairs]
+                "SELECT id FROM incidents WHERE id = ANY($1::uuid[]) AND status <> $2",
+                [u for _, u in pairs],
+                INCIDENT_IN_PROGRESS,
             )
         found = {row["id"] for row in rows}
         return {given for given, u in pairs if u in found}
@@ -531,12 +540,19 @@ def _as_uuid(value: str) -> uuid.UUID | None:
 
 
 def _filters(status: str | None, service: str | None) -> tuple[str, list[Any]]:
-    """The list filters' WHERE clause ("" for none) and its arguments, numbered from $1."""
+    """The list filters' WHERE clause ("" for none) and its arguments, numbered from $1.
+
+    No *status* lists every stored incident: the in-flight ``in_progress`` placeholders are
+    left out (``status="in_progress"`` lists exactly them).
+    """
     conditions: list[str] = []
     args: list[Any] = []
     if status is not None:
         args.append(str(status))
         conditions.append(f"status = ${len(args)}")
+    else:
+        args.append(INCIDENT_IN_PROGRESS)
+        conditions.append(f"status <> ${len(args)}")
     if service is not None:
         args.append(service)
         conditions.append(f"service = ${len(args)}")

@@ -10,7 +10,7 @@ action to pin.
   for an in-flight start/stop/update (<= 20 min), start the cluster if stopped, scale to 1, wait for `/health`
   and `/ready`.
   - Inputs: `namespace` (default `sentinel-dev`), `resource-group`, `cluster-name`, `image-tag`,
-    `acr-login-server`, `api-tenant-id`, `api-audience`, `key-vault-url`, `pg-host`, `pg-database`, `pg-user`.
+    `acr-login-server`, `api-tenant-id`, `api-audience`, `key-vault-url`, `pg-host`, `pg-database`, `pg-user`, `redis-host`, `redis-port`.
   - Outputs: `backend-url`.
 - `backend-down` - delete Service `sentinel-backend` by name and scale the Deployment to 0 unless `keep-warm` is `true`.
   - Inputs: `namespace` (default `sentinel-dev`), `resource-group`, `cluster-name`, `keep-warm` (default `false`).

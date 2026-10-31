@@ -110,6 +110,7 @@ __all__ = [
     "IncidentTokens",
     "LangfuseGenerationBridge",
     "SentinelTracer",
+    "annotate_trace",
     "configure_langfuse",
     "current_incident_tokens",
     "flush_traces",
@@ -307,6 +308,17 @@ def _with_preamble(prompt: TextPromptClient) -> TextPromptClient:
     preambled = copy.copy(prompt)
     preambled.prompt = f"{template}\n\n{UNTRUSTED_DATA_PREAMBLE}"
     return preambled
+
+
+def annotate_trace(metadata: Mapping[str, int | str]) -> None:
+    """Add *metadata* to the current LangFuse trace (names and counts only). Never raises.
+
+    A no-op when LangFuse is disabled; a failure is logged (``trace_annotate_failed``).
+    """
+    try:
+        get_client().update_current_trace(metadata=dict(metadata))
+    except Exception as exc:
+        logger.warning("trace_annotate_failed", error_type=type(exc).__name__)
 
 
 def push_score(trace_id: str, name: str, value: float) -> None:

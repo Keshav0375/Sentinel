@@ -26,6 +26,7 @@ PHASE8 = [
         "ci_backend_deployment.yml",
         "ci_incident_response.yml",
         "ci_backend_scale.yml",
+        "ci_eval.yml",
     )
 ]
 
@@ -142,6 +143,7 @@ def test_stable_lookup_is_shared() -> None:
 
     assert sorted(path.name for path, _ in callers) == [
         "ci_backend_scale.yml",
+        "ci_eval.yml",
         "ci_incident_response.yml",
     ]
     for _, step in callers:

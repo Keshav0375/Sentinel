@@ -76,12 +76,15 @@ jobs:
           PG_HOST: ${{ vars.PG_HOST }}
           PG_DATABASE: ${{ vars.PG_DATABASE }}
           PG_USER_BACKEND: ${{ vars.PG_USER_BACKEND }}
+          REDIS_HOST: ${{ vars.REDIS_HOST }}
+          REDIS_PORT: ${{ vars.REDIS_PORT }}
         run: |
           set -euo pipefail
           missing=""
           for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_GHA_CLIENT_ID \
             AZURE_IDENTITY_TENANT_ID ACR_NAME ACR_LOGIN_SERVER AKS_RESOURCE_GROUP AKS_CLUSTER_NAME \
-            SENTINEL_API_TENANT_ID SENTINEL_API_AUDIENCE KEY_VAULT_URI PG_HOST PG_DATABASE PG_USER_BACKEND; do
+            SENTINEL_API_TENANT_ID SENTINEL_API_AUDIENCE KEY_VAULT_URI PG_HOST PG_DATABASE PG_USER_BACKEND \
+            REDIS_HOST REDIS_PORT; do
             [ -n "${!name:-}" ] || missing="$missing $name"
           done
           if [ -n "$missing" ]; then
@@ -283,6 +286,8 @@ jobs:
           pg-host: ${{ vars.PG_HOST }}
           pg-database: ${{ vars.PG_DATABASE }}
           pg-user: ${{ vars.PG_USER_BACKEND }}
+          redis-host: ${{ vars.REDIS_HOST }}
+          redis-port: ${{ vars.REDIS_PORT }}
 
       - id: verify
         name: Verify the live image and health

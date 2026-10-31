@@ -61,6 +61,11 @@ run "names_satisfy_azure_limits" {
     condition     = length(output.names.function_app) <= 60 && length(output.names.app_service) <= 60
     error_message = "Function App / App Service names exceed 60 chars"
   }
+
+  assert {
+    condition     = can(regex("^redis-[a-z0-9-]+[a-z0-9]$", output.names.managed_redis)) && length(output.names.managed_redis) <= 60
+    error_message = "Managed Redis name must match ^redis-, end alphanumeric, and be at most 60 chars: ${output.names.managed_redis}"
+  }
 }
 
 run "uid_is_four_hex_chars" {

@@ -60,6 +60,7 @@ locals {
   want_event_grid  = local.is_deployment && contains(local.components, "event_grid")
   want_app_service = local.is_deployment && contains(local.components, "app_service")
   want_namespace   = local.is_deployment && contains(local.components, "namespace")
+  want_redis       = local.is_deployment && contains(local.components, "redis")
 
   c_keyvault    = local.want_keyvault ? 1 : 0
   c_database    = local.want_database ? 1 : 0
@@ -70,6 +71,9 @@ locals {
 
   # The backend identity exists only when there is something for it to reach.
   c_backend_identity = (local.want_namespace && local.want_keyvault) ? 1 : 0
+
+  # The cache's only access policy is the backend identity's, so no identity, no cache.
+  c_redis = (local.want_redis && local.c_backend_identity == 1) ? 1 : 0
 }
 
 # Fails fast and legibly when a deployment is planned before the platform exists.
@@ -114,6 +118,20 @@ resource "terraform_data" "component_graph" {
     precondition {
       condition     = !local.want_namespace || (local.want_database && local.want_keyvault)
       error_message = "components: `namespace` requires `database` and `keyvault` — the backend identity is granted on both, and a pod without them has nothing to reach."
+    }
+
+    # Managed Redis grants exactly one principal, the backend workload identity,
+    # and that identity exists only with `namespace`.
+    precondition {
+      condition     = !local.want_redis || local.want_namespace
+      error_message = "components: `redis` requires `namespace` — the backend UAMI is the only principal granted on it."
+    }
+
+    # The private endpoint joins the platform's AKS subnet and registers in its
+    # DNS zone; a platform applied before those outputs existed has neither.
+    precondition {
+      condition     = !local.want_redis || (try(local.platform.aks_subnet_id, "") != "" && try(local.platform.redis_private_dns_zone_id, "") != "")
+      error_message = "components: `redis` needs the platform's aks_subnet_id / redis_private_dns_zone_id outputs. Re-apply the platform layer (scope platform) first."
     }
 
     # The shared server lives in the platform layer; a deployment cannot create

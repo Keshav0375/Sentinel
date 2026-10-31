@@ -14,6 +14,7 @@ Who emits what (source is `gha:Keshav0375/Sentinel/<file>`):
   ci_incident_response     ops-start    alert.received, agent.started
   ci_incident_response     ops-events   agent.decided|failed, escalation.raised
   ci_backend_scale         ops-events   scale.changed
+  ci_eval                  ops-events   eval.scored
   infra_runners            ops-start    build.started
   infra_runners            ops-events   build.succeeded|failed
   infra_deploy (apply)     ops-start    deploy.started
@@ -33,6 +34,11 @@ secret is dropped, never the event.
 Scale (scale job success only): nightly -> 0 replicas; manual up -> BACKEND_REPLICAS; manual down
 -> 0 unless keep_warm (true or unknown -> nothing changed, no event).
 
+Eval (decision 2026-10-28): one eval.scored per branch from the run's eval report, for the newest
+item only (created_at; None is oldest; a tie goes to the later item), joined to results[] by
+incident_id. judge_conflict/judge_failed are always present; the judge dimensions and total_score
+only when neither is set. state = the scenario.
+
 Infra: runner build -> build.*; apply -> deploy.* ("guards", "apply" or "verify" on failure). The
 chain is `{run_id}` only so an infra run never merges into a backend chain on the same commit.
 """
@@ -44,7 +50,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import ledger
 
@@ -56,6 +62,7 @@ INCIDENT_WF = "ci_incident_response.yml"
 SCALE_WF = "ci_backend_scale.yml"
 INFRA_RUNNERS_WF = "infra_runners.yml"
 INFRA_DEPLOY_WF = "infra_deploy.yml"
+EVAL_WF = "ci_eval.yml"
 # azure/k8s/deployment.yaml `replicas` (a test pins it).
 BACKEND_REPLICAS = 1
 
@@ -67,6 +74,18 @@ UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 SERVICE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 SEVERITY_RE = re.compile(r"^[A-Za-z0-9 _-]{1,32}$")
+# The eval.scored data allow-list (schema data_eval; snapshot.py CHECK_NAMES / JUDGE_NAMES).
+EVAL_CHECKS = ("fired", "classified", "correlated", "revert_target")
+EVAL_DIMENSIONS = (
+    "triage_accuracy",
+    "root_cause_correctness",
+    "tool_efficiency",
+    "mttr",
+    "remediation_safety",
+)
+EVAL_CASES = ("i", "ii", "iii")
+EVAL_GROUPS = ("pass", "deployfail", "runtime")
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,99}$")
 
 # Job display name -> job key (the jobs API reports names).
 BACKEND_DEPLOY_JOBS = {
@@ -467,6 +486,157 @@ def scale_events(
             ts=ts,
         )
     ]
+
+
+# ── Eval ──────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class EvalSelection:
+    events: list[EventSpec]
+    older: dict[str, int]
+    invalid: int
+
+
+def _unit(value: Any) -> float | None:
+    """*value* as a float when it is a finite non-bool number in [0, 1], else None."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if not math.isfinite(value) or not 0 <= value <= 1:
+        return None
+    return float(value)
+
+
+def _units(raw: Any, names: tuple[str, ...]) -> dict[str, float]:
+    if not isinstance(raw, Mapping):
+        return {}
+    picked = {name: _unit(raw.get(name)) for name in names}
+    return {name: value for name, value in picked.items() if value is not None}
+
+
+def _created_key(item: Mapping[str, Any]) -> tuple[int, datetime | None]:
+    raw = item.get("created_at")
+    created = _parse_ts(raw) if isinstance(raw, str) else None
+    return (0, None) if created is None else (1, created)
+
+
+def _newer_or_equal(a: tuple[int, datetime | None], b: tuple[int, datetime | None]) -> bool:
+    """True when key *a* is at least as new as *b* (None oldest)."""
+    if a[0] != b[0]:
+        return a[0] > b[0]
+    if a[1] is None or b[1] is None:
+        return True
+    return a[1] >= b[1]
+
+
+def _judge_result(results: list[Any], incident_id: Any, branch: str) -> Mapping[str, Any] | None:
+    if not isinstance(incident_id, str):
+        return None
+    for result in results:
+        if (
+            isinstance(result, Mapping)
+            and result.get("incident_id") == incident_id
+            and result.get("scenario_id") == branch
+        ):
+            return cast("Mapping[str, Any]", result)
+    return None
+
+
+def _eval_data(
+    item: Mapping[str, Any], judged: Mapping[str, Any] | None, url: str
+) -> dict[str, Any]:
+    conflict = item.get("judge_conflict") is True
+    failed = item.get("judge_failed") is True
+    if judged is not None:
+        conflict = conflict or judged.get("judge_conflict") is True
+        failed = failed or judged.get("judge_failed") is True
+    data: dict[str, Any] = {}
+    if item.get("case") in EVAL_CASES:
+        data["case"] = item["case"]
+    checks = _units(item.get("checks"), EVAL_CHECKS)
+    if checks:
+        data["checks"] = checks
+    if judged is not None:
+        model = judged.get("judge_model")
+        if isinstance(model, str) and MODEL_RE.match(model):
+            data["judge_model"] = model
+        if not conflict and not failed:
+            raw_dims = judged.get("dimension_scores")
+            dims = {
+                str(d.get("dimension")): d.get("score")
+                for d in (raw_dims if isinstance(raw_dims, list) else [])
+                if isinstance(d, Mapping)
+            }
+            judge = _units(dims, EVAL_DIMENSIONS)
+            if judge:
+                data["judge"] = judge
+            total = _unit(judged.get("total_score"))
+            if total is not None:
+                data["total_score"] = total
+    data["judge_conflict"] = conflict
+    data["judge_failed"] = failed
+    data["run_url"] = url
+    return data
+
+
+def _scenario_order(branch: str) -> tuple[int, int]:
+    group, number = branch.split("/", 1)
+    return EVAL_GROUPS.index(group), int(number)
+
+
+def eval_events(
+    report: Mapping[str, Any],
+    *,
+    run_id: int,
+    run_attempt: int,
+    warn: Callable[[str], None] | None = None,
+) -> EvalSelection:
+    """eval.scored per branch of one eval report: the newest item each, in catalog order."""
+    ground_truth = report.get("ground_truth")
+    raw_items = ground_truth.get("items") if isinstance(ground_truth, Mapping) else None
+    items: list[Any] = raw_items if isinstance(raw_items, list) else []
+    raw_results = report.get("results")
+    results: list[Any] = raw_results if isinstance(raw_results, list) else []
+    invalid = 0
+    newest: dict[str, tuple[tuple[int, datetime | None], Mapping[str, Any]]] = {}
+    seen: dict[str, int] = {}
+    for item in items:
+        branch = item.get("branch") if isinstance(item, Mapping) else None
+        if not isinstance(branch, str) or not SCENARIO_RE.match(branch):
+            invalid += 1
+            if warn is not None:
+                warn("an eval item has no usable branch")
+            continue
+        entry = cast("Mapping[str, Any]", item)
+        key = _created_key(entry)
+        seen[branch] = seen.get(branch, 0) + 1
+        current = newest.get(branch)
+        if current is None or _newer_or_equal(key, current[0]):
+            newest[branch] = (key, entry)
+    generated = report.get("generated_at")
+    ts = generated if isinstance(generated, str) else None
+    url = run_url(SENTINEL, run_id)
+    events: list[EventSpec] = []
+    for branch in sorted(newest, key=_scenario_order):
+        _, item = newest[branch]
+        incident_id = item.get("incident_id")
+        chain: dict[str, Any] = {"run_id": run_id, "scenario": branch}
+        if isinstance(incident_id, str) and UUID_RE.match(incident_id):
+            chain["incident_id"] = incident_id
+        judged = _judge_result(results, incident_id, branch)
+        events.append(
+            EventSpec(
+                kind="eval.scored",
+                source=gha_source(SENTINEL, EVAL_WF),
+                source_id=run_source_id(run_id, run_attempt),
+                state=branch,
+                chain=chain,
+                data=_eval_data(item, judged, url),
+                ts=ts,
+            )
+        )
+    older = {branch: n - 1 for branch, n in sorted(seen.items()) if n > 1}
+    return EvalSelection(events=events, older=older, invalid=invalid)
 
 
 # ── Infra ─────────────────────────────────────────────────────────────────────

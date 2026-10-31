@@ -12,3 +12,8 @@ output "oidc_issuer_url" {
   description = "The cluster's OIDC issuer. The federated credential binds to it; exported for diagnostics and for backend task 7.2's docs."
   value       = azurerm_kubernetes_cluster.sentinel.oidc_issuer_url
 }
+
+output "node_resource_group" {
+  description = "Node RG holding the AKS-managed VNet; the Redis private endpoint joins its aks-subnet."
+  value       = azurerm_kubernetes_cluster.sentinel.node_resource_group
+}

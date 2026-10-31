@@ -15,6 +15,7 @@ from agents import Agent
 
 from sentinel.agents.loader import load_prompt
 from sentinel.config import Settings
+from sentinel.memory.cache import Cache
 from sentinel.models.analysis import AnalysisResult
 from sentinel.providers import Role, model_for, role_capabilities
 from sentinel.tools.deploy_checker import make_deploy_checker_tool
@@ -31,6 +32,7 @@ def build_analysis_agent(
     *,
     settings: Settings,
     instructions: str | None = None,
+    cache: Cache | None = None,
 ) -> Agent[Any]:
     """Create a configured Analysis Agent with injected dependencies.
 
@@ -42,6 +44,7 @@ def build_analysis_agent(
             ``fetch_logs`` and the GitHub token ``get_deploy_details`` read at call time.
         instructions: The system prompt (``infra/tracing.load_prompt``, preamble included);
             None reads ``prompts/analysis.txt``.
+        cache: The ``fetch_logs`` result cache (``memory/cache``); None caches nothing.
 
     Returns:
         Configured Agent with exactly ``fetch_logs`` and ``get_deploy_details``, producing an
@@ -59,7 +62,7 @@ def build_analysis_agent(
         name=ANALYSIS_AGENT_NAME,
         instructions=instructions or load_prompt(f"{ANALYSIS_AGENT_NAME}.txt"),
         tools=[
-            make_log_fetcher_tool(settings),
+            make_log_fetcher_tool(settings, cache=cache),
             make_deploy_checker_tool(pool, settings),
         ],
         model=llm,

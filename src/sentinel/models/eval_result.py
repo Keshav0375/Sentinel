@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
@@ -139,6 +140,11 @@ class GroundTruthResult(BaseModel):
     """One dataset item's ground-truth checks: every GroundTruthCheck, each 0.0 or 1.0.
 
     judge_conflict items (decision 2026-10-18) are reported but excluded from aggregates.
+
+    incident_id is the judged (primary) incident, None when nothing was judged; judge_failed
+    mirrors the judge score's flag; created_at is the LangFuse dataset item's creation time
+    (UTC), None when unknown. ci_eval's eval.scored emitter selects the newest item per branch by
+    it and joins results[] on incident_id (decision 2026-10-28).
     """
 
     item_id: str
@@ -146,6 +152,9 @@ class GroundTruthResult(BaseModel):
     case: str
     checks: dict[GroundTruthCheck, float]
     judge_conflict: bool = False
+    incident_id: str | None = None
+    judge_failed: bool = False
+    created_at: datetime | None = None
 
     @model_validator(mode="after")
     def _all_checks_binary(self) -> GroundTruthResult:

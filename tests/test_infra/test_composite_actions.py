@@ -58,6 +58,8 @@ EXPECTED_INPUTS: dict[str, dict[str, tuple[bool, str | None]]] = {
         "pg-host": (True, None),
         "pg-database": (True, None),
         "pg-user": (True, None),
+        "redis-host": (True, None),
+        "redis-port": (True, None),
     },
     "backend-down": {
         "namespace": (False, "sentinel-dev"),
@@ -135,6 +137,8 @@ PLACEHOLDER_INPUTS = {
     "PGHOST": "pg-host",
     "PGDATABASE": "pg-database",
     "PGUSER": "pg-user",
+    "REDIS_HOST": "redis-host",
+    "REDIS_PORT": "redis-port",
 }
 
 INPUT_EXPR = re.compile(r"^\$\{\{ inputs\.([a-z-]+) \}\}$")
@@ -165,6 +169,8 @@ SAMPLE_UP_INPUTS: dict[str, str] = {
     "pg-host": "pg-sentinel-test.postgres.database.azure.com",
     "pg-database": "sentinel_test",
     "pg-user": "id-sentinel-backend-test",
+    "redis-host": "redis-sentinel-test.canadacentral.redis.azure.net",
+    "redis-port": "10000",
 }
 
 MANIFEST_FILES = {"configmap.yaml", "deployment.yaml", "networkpolicy.yaml", "service.yaml"}
@@ -1036,6 +1042,11 @@ def test_backend_up_fails_without_bundled_manifests(tmp_path: Path) -> None:
         ("pg-database", "sentinel$HOME", "PGDATABASE"),
         ("pg-user", "id backend", "PGUSER"),
         ("pg-user", "id\\backend", "PGUSER"),
+        ("redis-host", "Redis.Example.com", "REDIS_HOST"),
+        ("redis-host", "localhost", "REDIS_HOST"),
+        ("redis-port", "0", "REDIS_PORT"),
+        ("redis-port", "65536", "REDIS_PORT"),
+        ("redis-port", "10000x", "REDIS_PORT"),
         ("image-tag", 'sha-0730682"', "IMAGE_TAG"),
         ("image-tag", "latest", "IMAGE_TAG"),
     ],

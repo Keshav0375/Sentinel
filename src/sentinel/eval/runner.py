@@ -47,6 +47,9 @@ aggregate and pushes nothing. A ``judge_failed`` item (the judge errored on ever
 stored flagged; its judge scores are not pushed and are excluded from the judge aggregates,
 while its four checks still count.
 
+Each ground-truth result also records the judged incident id, the judge_failed flag and the
+dataset item's created_at (decision 2026-10-28).
+
 Store: the primary incident's score, flagged ones included, before the push.
 
 Push: each item opens a LangFuse dataset run (``item.run``); the four checks go to its
@@ -316,6 +319,24 @@ def ground_truth_checks(
     return {check: CHECK_PASS if ok else CHECK_FAIL for check, ok in outcomes.items()}
 
 
+def item_created_at(item: object) -> datetime | None:
+    """The item's ``created_at`` as an aware UTC datetime; None when absent or unparsable."""
+    value = getattr(item, "created_at", None)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            value = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def default_run_name() -> str:
     """The dataset-run name when none is given."""
     return f"eval-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
@@ -367,6 +388,9 @@ async def score_item(
         case=truth.case,
         checks=checks,
         judge_conflict=bool(score and score.judge_conflict),
+        incident_id=score.incident_id if score is not None else None,
+        judge_failed=bool(score and score.judge_failed),
+        created_at=item_created_at(item),
     )
     logger.info(
         "eval_item_scored",

@@ -521,3 +521,58 @@ def test_cli_serve_passes_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_settings_has_no_sqlite_path() -> None:
     assert not any("db_path" in field for field in Settings.model_fields)
+
+
+# ── Redis + cache (decision 2026-10-25 C/D) ───────────────────────────────────
+
+
+def test_redis_defaults(no_settings_env: None) -> None:
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.redis_host is None
+    assert s.redis_port == 10000
+    assert s.sentinel_cache_enabled is True
+    assert s.sentinel_cache_llm_deterministic is False
+
+
+@pytest.mark.parametrize("blank", ["", "  "])
+def test_redis_host_blank_is_unset(
+    blank: str, no_settings_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("REDIS_HOST", blank)
+    assert Settings(_env_file=None).redis_host is None  # type: ignore[call-arg]
+    monkeypatch.setenv("REDIS_HOST", "sentinel.westus3.redis.azure.net")
+    assert Settings(_env_file=None).redis_host == "sentinel.westus3.redis.azure.net"  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("port", [0, -1, 65536, 70000])
+def test_redis_port_out_of_range_rejected(port: int) -> None:
+    with pytest.raises(ValidationError, match="redis_port must be between 1 and 65535"):
+        Settings(redis_port=port)
+
+
+def test_redis_port_from_env(no_settings_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REDIS_PORT", "6380")
+    assert Settings(_env_file=None).redis_port == 6380  # type: ignore[call-arg]
+
+
+def test_cache_flags_from_env(no_settings_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTINEL_CACHE_ENABLED", "0")
+    monkeypatch.setenv("SENTINEL_CACHE_LLM_DETERMINISTIC", "1")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.sentinel_cache_enabled is False
+    assert s.sentinel_cache_llm_deterministic is True
+
+
+def test_env_example_lists_new_vars(no_settings_env: None) -> None:
+    text = _ENV_EXAMPLE.read_text()
+    for var in (
+        "REDIS_HOST=",
+        "REDIS_PORT=10000",
+        "SENTINEL_CACHE_ENABLED=1",
+        "SENTINEL_CACHE_LLM_DETERMINISTIC=0",
+    ):
+        assert var in text, var
+    # And they parse: blank host → unset, the defaults hold.
+    s = Settings(_env_file=_ENV_EXAMPLE)  # type: ignore[call-arg]
+    assert s.redis_host is None and s.redis_port == 10000
+    assert s.sentinel_cache_enabled is True and s.sentinel_cache_llm_deterministic is False

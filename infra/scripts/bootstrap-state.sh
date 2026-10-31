@@ -43,6 +43,9 @@ EXPECTED_SUB="174e25ca-ab82-4671-a913-9c2f66e5924d"
 LOCATION="${LOCATION:-canadacentral}"
 BOOTSTRAP_RG="${BOOTSTRAP_RG:-rg-sentinel-bootstrap}"
 CONTAINER="tfstate"
+# Agent-memory dumps (scripts/memory-backup.sh). Out-of-band like tfstate, so
+# they survive every destroy (decisions 2026-10-25 A).
+MEMORY_CONTAINER="memory-backups"
 
 # Derived from the SUBSCRIPTION, not from a deployment — this account exists
 # before any deployment does, so the deployment-derived `uid` that modules/naming
@@ -73,7 +76,7 @@ echo "==> storage       ${STORAGE_ACCOUNT}"
 for ns in Microsoft.Compute Microsoft.ContainerService Microsoft.ContainerRegistry \
           Microsoft.DBforPostgreSQL Microsoft.KeyVault Microsoft.EventGrid \
           Microsoft.Web Microsoft.Storage Microsoft.ManagedIdentity \
-          Microsoft.OperationalInsights Microsoft.Authorization; do
+          Microsoft.OperationalInsights Microsoft.Authorization Microsoft.Cache; do
   state="$(az provider show --namespace "${ns}" --query registrationState -o tsv 2>/dev/null | tr -d '\r' || echo NotFound)"
   if [ "${state}" != "Registered" ]; then
     echo "==> registering ${ns} (was ${state})"
@@ -156,6 +159,21 @@ else
   echo "==> container ${CONTAINER} exists"
 fi
 
+# ── Memory-backup container ───────────────────────────────────────────────────
+# Agent-memory dumps taken before every deployment destroy. Here, not in
+# Terraform, so they survive the destroy they protect against; the backup
+# script fails closed if this container is missing.
+if ! az storage container show --name "${MEMORY_CONTAINER}" --account-name "${STORAGE_ACCOUNT}" --auth-mode login >/dev/null 2>&1; then
+  echo "==> creating container ${MEMORY_CONTAINER}"
+  az storage container create \
+    --name "${MEMORY_CONTAINER}" \
+    --account-name "${STORAGE_ACCOUNT}" \
+    --auth-mode login \
+    -o none
+else
+  echo "==> container ${MEMORY_CONTAINER} exists"
+fi
+
 cat <<SUMMARY
 
 ==> Bootstrap complete.
@@ -163,6 +181,7 @@ cat <<SUMMARY
     resource group   ${BOOTSTRAP_RG}
     storage account  ${STORAGE_ACCOUNT}
     container        ${CONTAINER}
+    memory backups   ${MEMORY_CONTAINER}
 
     backend.tf must match these exactly.
 

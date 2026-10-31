@@ -330,7 +330,7 @@ async def test_key_vault_loads_before_langfuse_and_wiring(monkeypatch: pytest.Mo
     async def init_pool(_settings: Settings, **_kwargs: Any) -> None:
         order.append("pool")
 
-    def wire(_app: FastAPI, settings: Settings, _pool: object, _tasks: object) -> None:
+    def wire(_app: FastAPI, settings: Settings, _pool: object, _tasks: object, **_: object) -> None:
         order.append("wire")
         captured.append(settings)
 
@@ -439,7 +439,7 @@ async def test_shutdown_waits_for_an_in_flight_incident_before_closing_the_pool(
         events.append("stored")
 
     monkeypatch.setattr(
-        main, "_wire_app", lambda _a, _s, _p, tasks: tasks.start("inc-1", pipeline())
+        main, "_wire_app", lambda _a, _s, _p, tasks, **_: tasks.start("inc-1", pipeline())
     )
 
     async with main.lifespan(FastAPI()):
@@ -468,7 +468,7 @@ async def test_shutdown_logs_cancelled_incident_before_closing_the_pool(
             raise
 
     monkeypatch.setattr(
-        main, "_wire_app", lambda _a, _s, _p, tasks: tasks.start("inc-1", pipeline())
+        main, "_wire_app", lambda _a, _s, _p, tasks, **_: tasks.start("inc-1", pipeline())
     )
 
     async with main.lifespan(FastAPI()):
@@ -531,7 +531,7 @@ async def test_shutdown_drains_a_dataset_write_before_the_traces_flush(
             return True
 
     monkeypatch.setattr(
-        main, "_wire_app", lambda _a, _s, _p, _t: writes.start(Writer(), _terminal_run())
+        main, "_wire_app", lambda _a, _s, _p, _t, **_: writes.start(Writer(), _terminal_run())
     )
 
     async with main.lifespan(FastAPI()):
@@ -559,7 +559,7 @@ async def test_shutdown_cancels_a_hanging_dataset_write_within_the_grace(
             return True  # pragma: no cover
 
     monkeypatch.setattr(
-        main, "_wire_app", lambda _a, _s, _p, _t: writes.start(Writer(), _terminal_run())
+        main, "_wire_app", lambda _a, _s, _p, _t, **_: writes.start(Writer(), _terminal_run())
     )
 
     lifespan = main.lifespan(FastAPI())
@@ -571,3 +571,23 @@ async def test_shutdown_cancels_a_hanging_dataset_write_within_the_grace(
     assert elapsed < 0.2 + 1.0
     assert events == ["write_cancelled", "traces", "pool", "credential"]
     assert len(writes) == 0
+
+
+async def test_lifespan_boots_without_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No REDIS_HOST (and no database): every Redis-backed feature uses its fallback."""
+    monkeypatch.delenv("REDIS_HOST", raising=False)
+    wire = MagicMock(return_value=None)
+    log = MagicMock()
+    monkeypatch.setattr(main, "_wire_app", wire)
+    monkeypatch.setattr(main, "logger", log)
+
+    async with main.lifespan(FastAPI()):
+        pass
+
+    kwargs = wire.call_args.kwargs
+    assert kwargs["redis"] is None and kwargs["stm_mirror"] is None
+    assert kwargs["cache"] is None and kwargs["checkpoints"] is None
+    startup = [c for c in log.info.call_args_list if c.args == ("sentinel_startup",)]
+    assert startup[0].kwargs["redis_configured"] is False
+    assert startup[0].kwargs["cache_enabled"] is False
+    assert ("sentinel_ready",) in [c.args for c in log.info.call_args_list]

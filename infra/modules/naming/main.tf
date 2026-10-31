@@ -76,10 +76,11 @@ locals {
     storage_account    = "st${local.compact}"  # 3-24, lowercase alphanumeric only
 
     # ── Global namespace: hyphens allowed ─────────────────────────────────────
-    key_vault       = "kv-${local.d}-${local.env}-${local.uid}"   # 3-24 — the binding limit
-    postgres_server = "psql-${local.d}-${local.env}-${local.uid}" # 3-63
-    function_app    = "func-${local.d}-${local.env}-${local.uid}" # 2-60, azurewebsites.net
-    app_service     = "app-${local.d}-${local.env}-${local.uid}"  # 2-60, same namespace as above
+    key_vault       = "kv-${local.d}-${local.env}-${local.uid}"    # 3-24 — the binding limit
+    postgres_server = "psql-${local.d}-${local.env}-${local.uid}"  # 3-63
+    function_app    = "func-${local.d}-${local.env}-${local.uid}"  # 2-60, azurewebsites.net
+    app_service     = "app-${local.d}-${local.env}-${local.uid}"   # 2-60, same namespace as above
+    managed_redis   = "redis-${local.d}-${local.env}-${local.uid}" # 1-60, global *.redis.azure.net
 
     # ── Scoped names: uniqueness is narrower, so no uid needed ────────────────
     aks_cluster          = "aks-${local.d}-${local.env}"  # unique per resource group

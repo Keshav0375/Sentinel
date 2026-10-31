@@ -24,6 +24,8 @@ GITHUB_RUN_ATTEMPT:
   infra-runners (build)                 GITHUB_SHA, BUILD_RESULT
   infra-deploy-start (deploy)           GITHUB_SHA
   infra-deploy (deploy)                 GITHUB_SHA, RUN_RESULT, VERIFY_RESULT, GUARDS_PASSED
+  eval (pass-01 … runtime-10)           EVAL_REPORT (default reports/eval_report.json),
+                                        GITHUB_STEP_SUMMARY
 
 Non-blocking: always exits 0. Warnings are `::warning::` workflow commands on stderr (stdout is
 GITHUB_OUTPUT) and name a field, never a value.
@@ -46,6 +48,11 @@ import incident_dispatch  # noqa: E402
 import ledger  # noqa: E402
 import rules  # noqa: E402
 
+# One slot per catalog scenario, "/" -> "-" (a test pins them to sentinel.catalog).
+EVAL_SLOTS: tuple[str, ...] = tuple(
+    f"{g}-{n:02d}" for g in ("pass", "deployfail", "runtime") for n in range(1, 11)
+)
+EVAL_REPORT_MAX_BYTES = 10_000_000
 SLOTS: dict[str, tuple[str, ...]] = {
     "backend-start": ("build",),
     "backend-deploy": ("build", "deploy"),
@@ -56,6 +63,7 @@ SLOTS: dict[str, tuple[str, ...]] = {
     "infra-runners": ("build",),
     "infra-deploy-start": ("deploy",),
     "infra-deploy": ("deploy",),
+    "eval": EVAL_SLOTS,
 }
 # Which slot an event kind fills, per command.
 SLOT_OF_KIND: dict[str, dict[str, str]] = {
@@ -112,6 +120,42 @@ def _correlation(payload: Mapping[str, Any]) -> str:
 
 def _str_or_none(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _eval_summary(selection: rules.EvalSelection) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lines = ["### eval.scored", "", f"- emitted: {len(selection.events)} scenario(s)"]
+    if selection.older:
+        counts = ", ".join(f"{branch}: {n}" for branch, n in sorted(selection.older.items()))
+        lines.append(f"- older items not emitted: {sum(selection.older.values())} ({counts})")
+    if selection.invalid:
+        lines.append(f"- items with an unusable branch: {selection.invalid}")
+    try:
+        with open(path, "a", encoding="utf-8") as summary:
+            summary.write("\n".join(lines) + "\n")
+    except OSError:
+        warn("GITHUB_STEP_SUMMARY is not writable")
+
+
+def _eval_events(run_id: int, run_attempt: int) -> list[rules.EventSpec]:
+    path = Path(os.environ.get("EVAL_REPORT") or "reports/eval_report.json")
+    try:
+        if path.stat().st_size > EVAL_REPORT_MAX_BYTES:
+            raise EmitError("EVAL_REPORT is unreadable")
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise EmitError("EVAL_REPORT is unreadable") from None
+    try:
+        report = json.loads(text)
+    except ValueError:
+        report = None
+    if not isinstance(report, dict):
+        raise EmitError("EVAL_REPORT is not a JSON object")
+    selection = rules.eval_events(report, run_id=run_id, run_attempt=run_attempt, warn=warn)
+    _eval_summary(selection)
+    return selection.events
 
 
 def _events(command: str) -> list[rules.EventSpec]:
@@ -177,6 +221,8 @@ def _events(command: str) -> list[rules.EventSpec]:
         return rules.infra_build_events(rules.JobFact(env.get("BUILD_RESULT", "")), **run)
     if command == "infra-deploy-start":
         return [rules.infra_deploy_started(**run)]
+    if command == "eval":
+        return _eval_events(run_id, run_attempt)
     return rules.infra_deploy_events(
         rules.JobFact(env.get("RUN_RESULT", "")),
         rules.JobFact(env.get("VERIFY_RESULT", "")),
@@ -186,6 +232,8 @@ def _events(command: str) -> list[rules.EventSpec]:
 
 
 def _slot_of(command: str, spec: rules.EventSpec) -> str:
+    if command == "eval":
+        return str(spec.chain["scenario"]).replace("/", "-")
     by_kind = SLOT_OF_KIND.get(command)
     if by_kind is not None:
         return by_kind[spec.kind]

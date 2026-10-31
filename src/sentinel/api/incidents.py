@@ -1,9 +1,14 @@
 """Incident query endpoints (backend.md §3.2) — ``GET /incidents``, ``/incidents/{id}``,
 ``/incidents/{id}/trajectory``, ``/incidents/{id}/deploy``, ``/incidents/{id}/rollback-spec``.
 
-An incident is served from the ``incidents`` table when it has a row; otherwise, if
-short-term memory still holds it, as an in-flight row with ``status: "in_progress"`` (its
-live timeline in ``trajectory``, shaped like a stored one); otherwise 404. No database (or
+An incident is served from the ``incidents`` table when it has a stored row; while it runs
+here (short-term memory holds it — its row, if any, is only the ``in_progress`` placeholder,
+``memory/checkpoints``) as an in-flight row with ``status: "in_progress"`` (its live timeline
+in ``trajectory``, shaped like a stored one); an ``in_progress`` placeholder no pod is running
+(awaiting its resume after a restart) as that row; otherwise 404. A placeholder is never a
+*stored* incident: every listing shows it as in flight (``status: "in_progress"``, after the
+ones running here, before the stored ones), and ``status=in_progress`` lists exactly both
+kinds of in-flight incident. No database (or
 a failed query) is 503 on every route. An unknown incident is 404, and so is a known one
 with no linked ``deployments`` row on ``/deploy``. ``/rollback-spec`` is the RollbackSpec the
 pipeline drafted, read from ``trajectory.pipeline_result.rollback_spec`` of a stored
@@ -22,6 +27,7 @@ from pydantic import BaseModel, JsonValue, ValidationError
 
 from sentinel.exceptions import SentinelMemoryError
 from sentinel.infra.logging import get_logger
+from sentinel.memory.checkpoints import INCIDENT_IN_PROGRESS
 from sentinel.memory.episodic import EpisodicMemory
 from sentinel.memory.short_term import ShortTermMemory
 from sentinel.models.alert import IncidentAlert
@@ -31,7 +37,7 @@ from sentinel.models.tools import RollbackSpec
 
 logger = get_logger("sentinel.api.incidents")
 
-IN_PROGRESS: Final = "in_progress"
+IN_PROGRESS: Final = INCIDENT_IN_PROGRESS
 _DEFAULT_LIMIT: Final = 50  # EpisodicMemory.list_incidents' default
 _MAX_LIMIT: Final = 200
 
@@ -148,11 +154,13 @@ def make_incidents_router(
 
     async def _find(incident_id: str) -> IncidentRow:
         row = await episodic_memory.get_incident_row(incident_id)
-        if row is not None:
+        if row is not None and row.status != IN_PROGRESS:
             return row
         try:
             context = short_term_memory.get_context(incident_id)
         except KeyError:
+            if row is not None:
+                return row  # a placeholder no pod is running: awaiting its resume
             raise _not_found(incident_id) from None
         return _in_flight_row(context)
 
@@ -164,12 +172,21 @@ def make_incidents_router(
     ) -> IncidentListResponse:
         """List incidents: in-flight first, then stored newest first.
 
-        ``status=in_progress`` lists only the in-flight ones; any other status only the
-        stored ones; none lists both. ``service`` filters both. ``limit`` is 1-200
+        In flight is the incidents running here, then the ``in_progress`` placeholders no
+        pod is running (awaiting a resume) — never counted as stored. ``status=in_progress``
+        lists only the in-flight ones; any other status only the stored ones; none lists
+        both (the union of the two). ``service`` filters both. ``limit`` is 1-200
         (default 50).
         """
         try:
-            in_flight = await _in_flight(service) if status in (None, IN_PROGRESS) else []
+            in_flight: list[IncidentRow] = []
+            if status in (None, IN_PROGRESS):
+                in_flight = await _in_flight(service)
+                running = {row.id for row in in_flight}
+                placeholders = await episodic_memory.list_incident_rows(
+                    status=IN_PROGRESS, service=service, limit=limit
+                )
+                in_flight += [r for r in placeholders if r.id not in running]
             if status == IN_PROGRESS:
                 rows = in_flight[:limit]
             else:

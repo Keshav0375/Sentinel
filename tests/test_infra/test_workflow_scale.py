@@ -39,6 +39,8 @@ EXPECTED_VARS = frozenset(
         "PG_HOST",
         "PG_DATABASE",
         "PG_USER_BACKEND",
+        "REDIS_HOST",
+        "REDIS_PORT",
         "SENTINEL_KEEP_WARM",
     }
 )
@@ -54,6 +56,8 @@ UP_WITH = {
     "pg-host": "${{ vars.PG_HOST }}",
     "pg-database": "${{ vars.PG_DATABASE }}",
     "pg-user": "${{ vars.PG_USER_BACKEND }}",
+    "redis-host": "${{ vars.REDIS_HOST }}",
+    "redis-port": "${{ vars.REDIS_PORT }}",
 }
 
 

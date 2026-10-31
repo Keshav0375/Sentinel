@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -424,6 +425,24 @@ class TestGroundTruth:
         assert data["summary"]["items_scored"] == 1
         assert len(data["ground_truth"]["checks"]) == 4
         assert data["ground_truth"]["items"][0]["item_id"] == "a"
+        assert data["ground_truth"]["items"][0]["incident_id"] is None
+        assert data["ground_truth"]["items"][0]["judge_failed"] is False
+        assert data["ground_truth"]["items"][0]["created_at"] is None
+        json.dumps(data)
+
+    def test_json_serialises_created_at(self) -> None:
+        gt = GroundTruthResult(
+            item_id="a",
+            branch="deployfail/05",
+            case="ii",
+            checks=dict.fromkeys(GroundTruthCheck, 1.0),
+            incident_id="inc-1",
+            created_at=datetime(2026, 10, 27, 12, tzinfo=UTC),
+        )
+        data = to_json_dict(build_report([], ground_truth=[gt]))
+        item = data["ground_truth"]["items"][0]
+        assert item["created_at"] == "2026-10-27T12:00:00Z"
+        assert item["incident_id"] == "inc-1"
         json.dumps(data)
 
     def test_markdown_has_ground_truth_section(self) -> None:
